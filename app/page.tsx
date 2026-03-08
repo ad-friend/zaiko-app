@@ -380,12 +380,22 @@ export default function InboundPage() {
 
   const closeCamera = useCallback(() => {
     if (scannerRef.current) {
-      scannerRef.current.stop().catch(() => {});
-      scannerRef.current.clear();
-      scannerRef.current = null;
+      // カメラが完全に停止するのを「待ってから」画面を閉じるように修正
+      scannerRef.current.stop().then(() => {
+        scannerRef.current?.clear();
+        scannerRef.current = null;
+        setCameraOpen(false);
+        setScannerReady(false);
+      }).catch((err) => {
+        console.warn("カメラの停止中にエラー:", err);
+        scannerRef.current = null;
+        setCameraOpen(false);
+        setScannerReady(false);
+      });
+    } else {
+      setCameraOpen(false);
+      setScannerReady(false);
     }
-    setCameraOpen(false);
-    setScannerReady(false);
   }, []);
 
   useEffect(() => {
