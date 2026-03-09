@@ -8,7 +8,7 @@ export type InferJanResponse = {
 };
 
 // 1分間のリクエスト制限に強い 3.1 Flash Lite を指定
-const GEMINI_MODEL = "gemini-3.1-flash-lite";
+const GEMINI_MODEL = "gemini-2.5-flash";
 
 export async function POST(request: NextRequest) {
   try {
