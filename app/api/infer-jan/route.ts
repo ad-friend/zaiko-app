@@ -335,27 +335,52 @@ async function fetchRakuten(jan: string): Promise<string | null> {
   }
 }
 
+// 💡 一時的なデバッグ版（犯人特定用）
 async function fetchYahooShopping(jan: string): Promise<string | null> {
   const appId = process.env.YAHOO_SHOPPING_APP_ID ?? process.env.YAHOO_APP_ID;
+  
+  // 💡 ここで環境変数が本当に読み込めているかチェック！
+  console.log("🔍 [Yahoo Debug] App ID 読み込み確認:", appId ? "OK" : "NG (空っぽです)");
+  
   if (!appId) return null;
+  
   try {
     const url = `https://shopping.yahooapis.jp/ShoppingWebService/V3/itemSearch?appid=${encodeURIComponent(appId)}&jan_code=${encodeURIComponent(jan)}&results=5`;
     const res = await fetch(url);
-    if (!res.ok) return null;
+    
+    // 💡 Yahooから返ってきたHTTPステータス（200なら成功）
+    console.log("🔍 [Yahoo Debug] HTTPステータス:", res.status);
+
+    if (!res.ok) {
+      // 💡 エラーだった場合、Yahooが言っている本当の文句を出力
+      const errorText = await res.text();
+      console.log("❌ [Yahoo Debug] エラーレスポンス:", errorText);
+      return null;
+    }
+
     const data = await res.json();
     const hits = data.hits;
-    if (!Array.isArray(hits) || hits.length === 0) return null;
+    
+    if (!Array.isArray(hits) || hits.length === 0) {
+      console.log("⚠️ [Yahoo Debug] 検索は成功しましたが、該当商品が0件でした");
+      return null;
+    }
+
+    // 💡 無事に5件取得できたか確認
+    console.log(`🔍 [Yahoo Debug] 取得できた件数: ${hits.length}件`);
+
     const parts: string[] = [];
     for (const h of hits.slice(0, 5)) {
       if (h.name) parts.push(`商品名: ${h.name}`);
       if (h.brand?.name) parts.push(`ブランド: ${h.brand.name}`);
     }
     return parts.length ? [...new Set(parts)].join("\n") : null;
-  } catch {
+  } catch (e: any) {
+    // 💡 fetch自体の失敗（ネットワークエラー等）
+    console.log("❌ [Yahoo Debug] プログラム実行エラー:", e.message);
     return null;
   }
 }
-
 async function signAwsSigV4(
   method: string,
   host: string,
