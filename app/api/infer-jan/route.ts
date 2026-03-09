@@ -67,8 +67,10 @@ export async function PATCH(request: NextRequest) {
     const body = await request.json();
 
     if (body.items && Array.isArray(body.items)) {
-      // 一括更新
-      for (const item of body.items) {
+      const updates = body.items.filter((item: { id?: unknown }) => item.id != null && Number(item.id) > 0);
+      const inserts = body.items.filter((item: { id?: unknown }) => item.id == null || !Number(item.id));
+
+      for (const item of updates) {
         const id = Number(item.id);
         if (!id) continue;
         const update: Record<string, unknown> = {};
@@ -78,8 +80,8 @@ export async function PATCH(request: NextRequest) {
         if (item.base_price !== undefined) update.base_price = item.base_price;
         if (item.effective_unit_price !== undefined) update.effective_unit_price = item.effective_unit_price;
         if (item.created_at !== undefined) update.created_at = item.created_at;
+        if (item.condition_type !== undefined) update.condition_type = item.condition_type;
 
-        // inbound_items の更新
         if (Object.keys(update).length > 0) {
           const { error } = await supabase
             .from("inbound_items")
@@ -88,9 +90,7 @@ export async function PATCH(request: NextRequest) {
           if (error) throw error;
         }
 
-        // header情報の更新 (supplier, genre)
         if (item.supplier !== undefined || item.genre !== undefined) {
-           // item.id から header_id を取得
            const { data: currentItem } = await supabase.from("inbound_items").select("header_id").eq("id", id).single();
            if (currentItem?.header_id) {
              const headerUpdate: Record<string, unknown> = {};
@@ -102,6 +102,40 @@ export async function PATCH(request: NextRequest) {
            }
         }
       }
+
+      if (inserts.length > 0) {
+        const today = new Date().toISOString().slice(0, 10);
+        const { data: headerRow, error: headerError } = await supabase
+          .from("inbound_headers")
+          .insert({
+            purchase_date: today,
+            supplier: inserts[0]?.supplier ?? null,
+            genre: inserts[0]?.genre ?? null,
+            total_purchase_amount: 0,
+            shipping_cost: 0,
+            discount_amount: 0,
+            total_cost: 0,
+          })
+          .select("id")
+          .single();
+        if (headerError || !headerRow) throw new Error(headerError?.message ?? "ヘッダー作成に失敗しました");
+        const headerId = headerRow.id as number;
+        const rows = inserts.map((item: Record<string, unknown>) => ({
+          header_id: headerId,
+          jan_code: item.jan_code ?? null,
+          brand: item.brand ?? null,
+          product_name: item.product_name ?? null,
+          model_number: item.model_number ?? null,
+          condition_type: item.condition_type ?? "new",
+          base_price: Number(item.base_price ?? 0),
+          is_fixed_price: false,
+          effective_unit_price: Number(item.effective_unit_price ?? 0),
+          created_at: item.created_at ? String(item.created_at) : new Date().toISOString(),
+        }));
+        const { error: insertError } = await supabase.from("inbound_items").insert(rows);
+        if (insertError) throw new Error(insertError.message);
+      }
+
       return NextResponse.json({ ok: true });
     }
 

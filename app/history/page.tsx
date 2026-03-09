@@ -283,13 +283,19 @@ export default function HistoryPage() {
   }, [bulkAction, selectedIds, fetchRecords]);
 
   const escapeCsv = (v: string | number | null | undefined): string => {
-    const s = String(v ?? "");
+    const s = v === null || v === undefined ? "" : String(v);
     if (s.includes(",") || s.includes('"') || s.includes("\n")) return `"${s.replace(/"/g, '""')}"`;
     return s;
   };
 
+  const statusLabel = (c: string | null | undefined): string => {
+    if (c === "new") return "新品";
+    if (c === "used") return "中古";
+    return c ?? "";
+  };
+
   const handleCsvExport = useCallback(() => {
-    const header = "id,jan_code,brand,product_name,model_number,supplier,genre,base_price,effective_unit_price,created_at";
+    const header = "id,jan_code,brand,product_name,model_number,supplier,genre,base_price,effective_unit_price,created_at,status";
     const lines = rows.map((r) =>
       [
         r.id,
@@ -299,10 +305,11 @@ export default function HistoryPage() {
         r.model_number ?? "",
         r.header?.supplier ?? "",
         r.header?.genre ?? "",
-        r.base_price,
-        r.effective_unit_price,
+        r.base_price ?? "",
+        r.effective_unit_price ?? "",
         r.created_at ?? "",
-      ].map(escapeCsv).join(",")
+        statusLabel(r.condition_type),
+      ].map((x) => escapeCsv(x)).join(",")
     );
     const csv = [header, ...lines].join("\r\n");
     const bom = "\uFEFF";
@@ -343,6 +350,53 @@ export default function HistoryPage() {
     return result;
   };
 
+  type ParsedCsvRow = {
+    id: string;
+    jan_code: string;
+    product_name: string;
+    model_number: string;
+    created_at: string;
+    effective_unit_price: string;
+    status: string;
+    brand: string;
+    supplier: string;
+    genre: string;
+    base_price: string;
+    rawCells: string[];
+  };
+
+  const validateRow = (row: ParsedCsvRow): string[] => {
+    const reasons: string[] = [];
+    const createdAt = (row.created_at ?? "").trim();
+    const effPrice = (row.effective_unit_price ?? "").trim();
+    const status = (row.status ?? "").trim();
+    if (!createdAt) reasons.push("必須A: インポート日付（登録日）が未入力");
+    if (!effPrice) reasons.push("必須A: 実質価格が未入力");
+    if (!status) reasons.push("必須A: 状態が未入力");
+    const jan = (row.jan_code ?? "").trim();
+    const productName = (row.product_name ?? "").trim();
+    const modelNum = (row.model_number ?? "").trim();
+    if (!jan && !productName && !modelNum) reasons.push("必須B: JANコード・商品名・型番のいずれか1つ以上が必須です");
+    return reasons;
+  };
+
+  const downloadErrorCsv = (errorRows: Array<{ row: ParsedCsvRow; reasons: string[] }>, headers: string[]) => {
+    const headerLine = [...headers, "エラー理由"].map((h) => escapeCsv(h)).join(",");
+    const lines = errorRows.map(({ row, reasons }) => {
+      const reasonText = reasons.join("; ");
+      return [...row.rawCells, reasonText].map((c) => escapeCsv(c)).join(",");
+    });
+    const csv = [headerLine, ...lines].join("\r\n");
+    const bom = "\uFEFF";
+    const blob = new Blob([bom + csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `import_errors_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const handleCsvImport = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
@@ -356,53 +410,118 @@ export default function HistoryPage() {
           alert("CSVにデータ行がありません");
           return;
         }
-        const headers = parseCsvLine(rawLines[0]).map((h) => h.toLowerCase().trim());
-        const idIdx = headers.findIndex((h) => h === "id");
-        const get = (arr: string[], key: string) => {
-          const i = headers.findIndex((h) => h === key);
-          return i >= 0 ? arr[i] ?? "" : "";
+        const headerCells = parseCsvLine(rawLines[0]);
+        const headers = headerCells.map((h) => h.toLowerCase().trim());
+        const keyToAliases: Record<string, string[]> = {
+          id: ["id"],
+          jan_code: ["jan_code", "jan", "janコード"],
+          product_name: ["product_name", "商品名"],
+          model_number: ["model_number", "型番"],
+          created_at: ["created_at", "登録日", "インポート日付"],
+          effective_unit_price: ["effective_unit_price", "実質価格", "実質単価"],
+          status: ["status", "状態"],
+          brand: ["brand", "ブランド"],
+          supplier: ["supplier", "仕入先"],
+          genre: ["genre", "ジャンル"],
+          base_price: ["base_price", "基準価格"],
         };
-        const items: Array<{
-          id: number;
-          brand?: string;
-          product_name?: string;
-          model_number?: string;
-          supplier?: string;
-          genre?: string;
-          base_price?: number;
-          effective_unit_price?: number;
-          created_at?: string;
-        }> = [];
+        const get = (arr: string[], key: string): string => {
+          const aliases = keyToAliases[key];
+          if (!aliases) return "";
+          for (const alias of aliases) {
+            const idx = headers.findIndex((h) => h === alias);
+            if (idx >= 0) return arr[idx] ?? "";
+          }
+          return "";
+        };
+
+        const parsed: ParsedCsvRow[] = [];
         for (let i = 1; i < rawLines.length; i++) {
           const cells = parseCsvLine(rawLines[i]);
-          const id = idIdx >= 0 ? Number(cells[idIdx]) : NaN;
-          if (!Number.isFinite(id)) continue;
-          const bp = get(cells, "base_price");
-          const ep = get(cells, "effective_unit_price");
-          items.push({
-            id,
-            brand: get(cells, "brand") || undefined,
-            product_name: get(cells, "product_name") || undefined,
-            model_number: get(cells, "model_number") || undefined,
-            supplier: get(cells, "supplier") || undefined,
-            genre: get(cells, "genre") || undefined,
-            base_price: bp === "" ? undefined : Number(bp),
-            effective_unit_price: ep === "" ? undefined : Number(ep),
-            created_at: get(cells, "created_at") || undefined,
+          parsed.push({
+            id: get(cells, "id"),
+            jan_code: get(cells, "jan_code"),
+            product_name: get(cells, "product_name"),
+            model_number: get(cells, "model_number"),
+            created_at: get(cells, "created_at"),
+            effective_unit_price: get(cells, "effective_unit_price"),
+            status: get(cells, "status"),
+            brand: get(cells, "brand"),
+            supplier: get(cells, "supplier"),
+            genre: get(cells, "genre"),
+            base_price: get(cells, "base_price"),
+            rawCells: cells,
           });
         }
-        if (items.length === 0) {
-          alert("更新対象の行（id が数値の行）がありません");
+
+        const errorRows: Array<{ row: ParsedCsvRow; reasons: string[] }> = [];
+        const normalRows: ParsedCsvRow[] = [];
+        for (let i = 0; i < parsed.length; i++) {
+          const reasons = validateRow(parsed[i]);
+          if (reasons.length > 0) errorRows.push({ row: parsed[i], reasons });
+          else normalRows.push(parsed[i]);
+        }
+
+        if (errorRows.length > 0) {
+          downloadErrorCsv(errorRows, headerCells);
+          alert(`バリデーションエラーが ${errorRows.length} 行あります。エラー内容を記載したCSV（import_errors_YYYYMMDD.csv）をダウンロードしました。`);
+        }
+
+        if (normalRows.length === 0) {
+          setSaving(false);
           return;
         }
+
+        const statusToCondition = (s: string): string => {
+          const t = (s ?? "").trim();
+          if (t === "新品" || t === "new") return "new";
+          if (t === "中古" || t === "used") return "used";
+          return t || "new";
+        };
+
+        const items = normalRows.map((row) => {
+          const idNum = row.id.trim() ? Number(row.id) : NaN;
+          const bp = row.base_price.trim();
+          const ep = row.effective_unit_price.trim();
+          const item: {
+            id?: number;
+            jan_code?: string;
+            brand?: string;
+            product_name?: string;
+            model_number?: string;
+            supplier?: string;
+            genre?: string;
+            base_price?: number;
+            effective_unit_price?: number;
+            created_at?: string;
+            condition_type?: string;
+          } = {
+            jan_code: row.jan_code.trim() || undefined,
+            brand: row.brand.trim() || undefined,
+            product_name: row.product_name.trim() || undefined,
+            model_number: row.model_number.trim() || undefined,
+            supplier: row.supplier.trim() || undefined,
+            genre: row.genre.trim() || undefined,
+            base_price: bp === "" ? undefined : Number(bp),
+            effective_unit_price: ep === "" ? undefined : Number(ep),
+            created_at: row.created_at.trim() || undefined,
+            condition_type: statusToCondition(row.status),
+          };
+          if (Number.isFinite(idNum)) item.id = idNum;
+          return item;
+        });
+
         const res = await fetch("/api/infer-jan", {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ items }),
         });
-        if (!res.ok) throw new Error("CSV取込に失敗しました");
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.error || "CSV取込に失敗しました");
+        }
         await fetchRecords();
-        alert(`${items.length} 件を更新しました`);
+        alert(`${normalRows.length} 件を取込ました`);
       } catch (err) {
         alert(err instanceof Error ? err.message : "CSV取込に失敗しました");
       } finally {
