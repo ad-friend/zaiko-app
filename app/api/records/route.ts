@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 
 export type RecordRow = {
@@ -64,6 +64,19 @@ export async function GET() {
     return NextResponse.json(rows);
   } catch (e: any) {
     console.error("[records] GET error:", e);
+    return NextResponse.json({ error: e.message }, { status: 500 });
+  }
+}
+
+export async function DELETE(request: NextRequest) {
+  try {
+    const body = await request.json();
+    const ids = Array.isArray(body.ids) ? body.ids.map(Number).filter(Boolean) : [];
+    if (ids.length === 0) return NextResponse.json({ error: "idsが必要です" }, { status: 400 });
+    const { error } = await supabase.from("inbound_items").delete().in("id", ids);
+    if (error) throw error;
+    return NextResponse.json({ ok: true });
+  } catch (e: any) {
     return NextResponse.json({ error: e.message }, { status: 500 });
   }
 }

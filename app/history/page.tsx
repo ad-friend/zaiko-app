@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { Pencil, Save, X, ChevronLeft } from "lucide-react";
 
 type RecordRow = {
   id: number;
@@ -38,34 +39,38 @@ function DocumentIcon({ className }: { className?: string }) {
   );
 }
 
-function ChevronLeftIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
-    </svg>
-  );
-}
+const inputClass = "flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 transition-all duration-200 shadow-sm";
+const buttonClass = "inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 h-10 px-4 py-2 shadow-sm active:scale-[0.98] duration-100";
 
 export default function HistoryPage() {
   const [rows, setRows] = useState<RecordRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    async function fetchRecords() {
-      try {
-        const res = await fetch("/api/records");
-        if (!res.ok) throw new Error("取得に失敗しました");
-        const data = await res.json();
-        setRows(data);
-      } catch (e: any) {
-        setError(e.message ?? "エラーが発生しました");
-      } finally {
-        setLoading(false);
-      }
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState<{ brand: string; product_name: string; model_number: string; created_at: string } | null>(null);
+  const [isBulkEditing, setIsBulkEditing] = useState(false);
+  const [bulkSnapshot, setBulkSnapshot] = useState<RecordRow[] | null>(null);
+  const [bulkAction, setBulkAction] = useState<string>("bulk_delete");
+  const [saving, setSaving] = useState(false);
+
+  const fetchRecords = useCallback(async () => {
+    try {
+      const res = await fetch("/api/records");
+      if (!res.ok) throw new Error("取得に失敗しました");
+      const data = await res.json();
+      setRows(data);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "エラーが発生しました");
+    } finally {
+      setLoading(false);
     }
-    fetchRecords();
   }, []);
+
+  useEffect(() => {
+    fetchRecords();
+  }, [fetchRecords]);
 
   const formatDate = (iso: string) => {
     if (!iso) return "—";
@@ -76,6 +81,139 @@ export default function HistoryPage() {
       return iso;
     }
   };
+
+  const toDateValue = (iso: string) => (iso ? iso.slice(0, 10) : "");
+
+  const toggleSelect = (id: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (rows.length === 0) return;
+    if (selectedIds.size >= rows.length) setSelectedIds(new Set());
+    else setSelectedIds(new Set(rows.map((r) => r.id)));
+  };
+
+  const startIndividualEdit = (row: RecordRow) => {
+    setEditingId(row.id);
+    setEditDraft({
+      brand: row.brand ?? "",
+      product_name: row.product_name ?? "",
+      model_number: row.model_number ?? "",
+      created_at: toDateValue(row.created_at),
+    });
+  };
+
+  const cancelIndividualEdit = () => {
+    setEditingId(null);
+    setEditDraft(null);
+  };
+
+  const saveIndividualEdit = useCallback(async () => {
+    if (editingId == null || !editDraft) return;
+    setSaving(true);
+    try {
+      const created_at = editDraft.created_at ? `${editDraft.created_at}T00:00:00.000Z` : "";
+      const res = await fetch("/api/infer-jan", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: editingId,
+          brand: editDraft.brand,
+          product_name: editDraft.product_name,
+          model_number: editDraft.model_number,
+          ...(created_at && { created_at }),
+        }),
+      });
+      if (!res.ok) throw new Error("更新に失敗しました");
+      setRows((prev) =>
+        prev.map((r) =>
+          r.id === editingId
+            ? {
+                ...r,
+                brand: editDraft.brand || null,
+                product_name: editDraft.product_name || null,
+                model_number: editDraft.model_number || null,
+                created_at: created_at || r.created_at,
+              }
+            : r
+        )
+      );
+      setEditingId(null);
+      setEditDraft(null);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "更新に失敗しました");
+    } finally {
+      setSaving(false);
+    }
+  }, [editingId, editDraft]);
+
+  const startBulkEdit = () => {
+    setBulkSnapshot([...rows]);
+    setIsBulkEditing(true);
+  };
+
+  const cancelBulkEdit = () => {
+    if (bulkSnapshot) setRows(bulkSnapshot);
+    setBulkSnapshot(null);
+    setIsBulkEditing(false);
+  };
+
+  const saveBulkEdit = useCallback(async () => {
+    setSaving(true);
+    try {
+      const items = rows.map((r) => ({
+        id: r.id,
+        brand: r.brand ?? "",
+        product_name: r.product_name ?? "",
+        model_number: r.model_number ?? "",
+        ...(r.created_at && { created_at: r.created_at }),
+      }));
+      const res = await fetch("/api/infer-jan", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items }),
+      });
+      if (!res.ok) throw new Error("一括更新に失敗しました");
+      setBulkSnapshot(null);
+      setIsBulkEditing(false);
+      await fetchRecords();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "一括更新に失敗しました");
+    } finally {
+      setSaving(false);
+    }
+  }, [rows, fetchRecords]);
+
+  const updateRowField = useCallback((id: number, field: keyof RecordRow, value: string) => {
+    setRows((prev) => prev.map((r) => (r.id === id ? { ...r, [field]: value } : r)));
+  }, []);
+
+  const executeBulkAction = useCallback(async () => {
+    if (bulkAction === "bulk_delete" && selectedIds.size > 0) {
+      if (!confirm(`選択した ${selectedIds.size} 件を削除しますか？`)) return;
+      setSaving(true);
+      try {
+        const res = await fetch("/api/records", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids: Array.from(selectedIds) }),
+        });
+        if (!res.ok) throw new Error("削除に失敗しました");
+        setSelectedIds(new Set());
+        await fetchRecords();
+      } catch (e) {
+        alert(e instanceof Error ? e.message : "削除に失敗しました");
+      } finally {
+        setSaving(false);
+      }
+    }
+  }, [bulkAction, selectedIds, fetchRecords]);
 
   return (
     <div className="flex min-h-screen flex-col bg-slate-50 font-sans text-slate-900">
@@ -94,7 +232,7 @@ export default function HistoryPage() {
               href="/"
               className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 h-10 px-4 py-2 shadow-sm bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300"
             >
-              <ChevronLeftIcon className="mr-2 h-4 w-4" />
+              <ChevronLeft className="mr-2 h-4 w-4" />
               入庫画面へ戻る
             </Link>
           </div>
@@ -109,6 +247,65 @@ export default function HistoryPage() {
               在庫一覧
             </h2>
           </div>
+
+          {!loading && !error && rows.length > 0 && (
+            <div className="flex flex-wrap items-center gap-3 px-6 py-3 border-b border-slate-100 bg-white">
+              {!isBulkEditing ? (
+                <>
+                  <label className="flex items-center gap-2 cursor-pointer text-sm text-slate-600">
+                    <input
+                      type="checkbox"
+                      checked={rows.length > 0 && selectedIds.size === rows.length}
+                      onChange={toggleSelectAll}
+                      className="rounded border-slate-300 text-primary focus:ring-primary"
+                    />
+                    全選択/解除
+                  </label>
+                  <select
+                    value={bulkAction}
+                    onChange={(e) => setBulkAction(e.target.value)}
+                    className={`${inputClass} w-auto min-w-[120px] h-9 py-1`}
+                  >
+                    <option value="bulk_delete">一括削除</option>
+                  </select>
+                  <button
+                    type="button"
+                    onClick={executeBulkAction}
+                    disabled={selectedIds.size === 0 || saving}
+                    className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300 disabled:opacity-50`}
+                  >
+                    実行
+                  </button>
+                  <button
+                    type="button"
+                    onClick={startBulkEdit}
+                    className={`${buttonClass} bg-white text-primary border border-primary/20 hover:bg-primary/5`}
+                  >
+                    一括編集
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={saveBulkEdit}
+                    disabled={saving}
+                    className={`${buttonClass} bg-primary text-white hover:bg-primary/90`}
+                  >
+                    {saving ? "保存中..." : "全保存"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={cancelBulkEdit}
+                    className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300`}
+                  >
+                    全解除
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+
           <div className="p-6">
             {loading && (
               <p className="text-sm text-slate-500 py-8 text-center">読み込み中...</p>
@@ -126,6 +323,7 @@ export default function HistoryPage() {
                 <table className="w-full text-sm text-left min-w-[800px]">
                   <thead className="bg-slate-50/80 border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold tracking-wider">
                     <tr>
+                      <th className="px-6 py-4 w-[44px] text-center"></th>
                       <th className="px-6 py-4">登録日</th>
                       <th className="px-6 py-4">仕入先</th>
                       <th className="px-6 py-4">ジャンル</th>
@@ -136,25 +334,152 @@ export default function HistoryPage() {
                       <th className="px-6 py-4 text-right">基準価格</th>
                       <th className="px-6 py-4 text-right">実質単価</th>
                       <th className="px-6 py-4">状態</th>
+                      <th className="px-6 py-4 w-[100px] text-center">操作</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 bg-white">
-                    {rows.map((row) => (
-                      <tr key={row.id} className="hover:bg-slate-50/50 transition-colors">
-                        <td className="px-6 py-4 text-slate-600 whitespace-nowrap">{formatDate(row.header?.created_at ?? row.created_at)}</td>
-                        <td className="px-6 py-4 text-slate-700">{row.header?.supplier ?? "—"}</td>
-                        <td className="px-6 py-4 text-slate-600">{row.header?.genre ?? "—"}</td>
-                        <td className="px-6 py-4 font-mono text-xs">{row.jan_code ?? "—"}</td>
-                        <td className="px-6 py-4 font-medium text-slate-900">{row.product_name ?? "—"}</td>
-                        <td className="px-6 py-4 text-slate-600">{row.brand ?? "—"}</td>
-                        <td className="px-6 py-4 text-slate-600">{row.model_number ?? "—"}</td>
-                        <td className="px-6 py-4 text-right tabular-nums">{row.base_price > 0 ? row.base_price.toLocaleString() : "—"} 円</td>
-                        <td className="px-6 py-4 text-right font-medium tabular-nums">{row.effective_unit_price > 0 ? Math.round(row.effective_unit_price).toLocaleString() : "—"} 円</td>
-                        <td className="px-6 py-4 text-slate-600">{row.condition_type === "new" ? "新品" : row.condition_type === "used" ? "中古" : row.condition_type ?? "—"}</td>
-                      </tr>
-                    ))}
+                    {rows.map((row) => {
+                      const isIndividualEdit = editingId === row.id;
+                      const isEditMode = isIndividualEdit || isBulkEditing;
+                      const displayDate = formatDate(row.header?.created_at ?? row.created_at);
+
+                      return (
+                        <tr key={row.id} className="hover:bg-slate-50/50 transition-colors">
+                          <td className="px-6 py-4 text-center align-middle">
+                            <input
+                              type="checkbox"
+                              checked={selectedIds.has(row.id)}
+                              onChange={() => toggleSelect(row.id)}
+                              className="rounded border-slate-300 text-primary focus:ring-primary"
+                            />
+                          </td>
+                          <td className="px-6 py-4 text-slate-600 whitespace-nowrap">
+                            {isEditMode ? (
+                              <input
+                                type="date"
+                                value={isIndividualEdit && editDraft ? editDraft.created_at : toDateValue(row.created_at)}
+                                onChange={(e) =>
+                                  isIndividualEdit && editDraft
+                                    ? setEditDraft((d) => (d ? { ...d, created_at: e.target.value } : d))
+                                    : updateRowField(row.id, "created_at", e.target.value ? `${e.target.value}T00:00:00.000Z` : "")
+                                }
+                                className={`${inputClass} h-9 text-xs`}
+                              />
+                            ) : (
+                              displayDate
+                            )}
+                          </td>
+                          <td className="px-6 py-4 text-slate-700">{row.header?.supplier ?? "—"}</td>
+                          <td className="px-6 py-4 text-slate-600">{row.header?.genre ?? "—"}</td>
+                          <td className="px-6 py-4 font-mono text-xs">{row.jan_code ?? "—"}</td>
+                          <td className="px-6 py-4 font-medium text-slate-900">
+                            {isEditMode ? (
+                              <input
+                                value={isIndividualEdit && editDraft ? editDraft.product_name : row.product_name ?? ""}
+                                onChange={(e) =>
+                                  isIndividualEdit && editDraft
+                                    ? setEditDraft((d) => (d ? { ...d, product_name: e.target.value } : d))
+                                    : updateRowField(row.id, "product_name", e.target.value)
+                                }
+                                className={`${inputClass} h-9 font-medium`}
+                                placeholder="商品名"
+                              />
+                            ) : (
+                              row.product_name ?? "—"
+                            )}
+                          </td>
+                          <td className="px-6 py-4 text-slate-600">
+                            {isEditMode ? (
+                              <input
+                                value={isIndividualEdit && editDraft ? editDraft.brand : row.brand ?? ""}
+                                onChange={(e) =>
+                                  isIndividualEdit && editDraft
+                                    ? setEditDraft((d) => (d ? { ...d, brand: e.target.value } : d))
+                                    : updateRowField(row.id, "brand", e.target.value)
+                                }
+                                className={`${inputClass} h-9`}
+                                placeholder="ブランド"
+                              />
+                            ) : (
+                              row.brand ?? "—"
+                            )}
+                          </td>
+                          <td className="px-6 py-4 text-slate-600">
+                            {isEditMode ? (
+                              <input
+                                value={isIndividualEdit && editDraft ? editDraft.model_number : row.model_number ?? ""}
+                                onChange={(e) =>
+                                  isIndividualEdit && editDraft
+                                    ? setEditDraft((d) => (d ? { ...d, model_number: e.target.value } : d))
+                                    : updateRowField(row.id, "model_number", e.target.value)
+                                }
+                                className={`${inputClass} h-9`}
+                                placeholder="型番"
+                              />
+                            ) : (
+                              row.model_number ?? "—"
+                            )}
+                          </td>
+                          <td className="px-6 py-4 text-right tabular-nums">{row.base_price > 0 ? row.base_price.toLocaleString() : "—"} 円</td>
+                          <td className="px-6 py-4 text-right font-medium tabular-nums">{row.effective_unit_price > 0 ? Math.round(row.effective_unit_price).toLocaleString() : "—"} 円</td>
+                          <td className="px-6 py-4 text-slate-600">{row.condition_type === "new" ? "新品" : row.condition_type === "used" ? "中古" : row.condition_type ?? "—"}</td>
+                          <td className="px-6 py-4 text-center">
+                            {isIndividualEdit ? (
+                              <div className="flex items-center justify-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={saveIndividualEdit}
+                                  disabled={saving}
+                                  className={`${buttonClass} h-9 px-2 bg-primary text-white hover:bg-primary/90`}
+                                  title="保存"
+                                >
+                                  <Save className="h-4 w-4" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={cancelIndividualEdit}
+                                  className={`${buttonClass} h-9 px-2 bg-white text-slate-700 border border-slate-200 hover:bg-slate-50`}
+                                  title="取消"
+                                >
+                                  <X className="h-4 w-4" />
+                                </button>
+                              </div>
+                            ) : !isBulkEditing ? (
+                              <button
+                                type="button"
+                                onClick={() => startIndividualEdit(row)}
+                                className={`${buttonClass} h-9 px-2 bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300`}
+                                title="編集"
+                              >
+                                <Pencil className="h-4 w-4" />
+                              </button>
+                            ) : null}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
+              </div>
+            )}
+
+            {!loading && !error && rows.length > 0 && isBulkEditing && (
+              <div className="flex flex-wrap items-center gap-3 pt-4 mt-4 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={saveBulkEdit}
+                  disabled={saving}
+                  className={`${buttonClass} bg-primary text-white hover:bg-primary/90`}
+                >
+                  {saving ? "保存中..." : "保存"}
+                </button>
+                <button
+                  type="button"
+                  onClick={cancelBulkEdit}
+                  className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300`}
+                >
+                  解除
+                </button>
               </div>
             )}
           </div>

@@ -35,6 +35,52 @@ export async function GET() {
   }
 }
 
+// 個別・一括更新用 PATCH（在庫一覧の編集保存）
+export async function PATCH(request: NextRequest) {
+  try {
+    const body = await request.json();
+
+    if (body.items && Array.isArray(body.items)) {
+      // 一括更新
+      for (const item of body.items) {
+        const id = Number(item.id);
+        if (!id) continue;
+        const update: Record<string, unknown> = {};
+        if (item.brand !== undefined) update.brand = item.brand;
+        if (item.product_name !== undefined) update.product_name = item.product_name;
+        if (item.model_number !== undefined) update.model_number = item.model_number;
+        if (item.created_at !== undefined) update.created_at = item.created_at;
+        if (Object.keys(update).length === 0) continue;
+        const { error } = await supabase
+          .from("inbound_items")
+          .update(update)
+          .eq("id", id);
+        if (error) throw error;
+      }
+      return NextResponse.json({ ok: true });
+    }
+
+    // 個別更新
+    const id = Number(body.id);
+    if (!id) return NextResponse.json({ error: "idが必要です" }, { status: 400 });
+    const update: Record<string, unknown> = {};
+    if (body.brand !== undefined) update.brand = body.brand;
+    if (body.product_name !== undefined) update.product_name = body.product_name;
+    if (body.model_number !== undefined) update.model_number = body.model_number;
+    if (body.created_at !== undefined) update.created_at = body.created_at;
+    if (Object.keys(update).length === 0) return NextResponse.json({ error: "更新項目がありません" }, { status: 400 });
+
+    const { error } = await supabase
+      .from("inbound_items")
+      .update(update)
+      .eq("id", id);
+    if (error) throw error;
+    return NextResponse.json({ ok: true });
+  } catch (e: any) {
+    return NextResponse.json({ error: e.message }, { status: 500 });
+  }
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
