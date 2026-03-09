@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { pool } from '@/lib/db';
+import { supabase } from '@/lib/supabase';
 
 type Item = {
   jan: string;
@@ -26,67 +26,56 @@ type Body = {
 };
 
 export async function POST(req: Request) {
-  const connection = await pool.getConnection();
-
   try {
     const { header, items }: Body = await req.json();
 
-    // トランザクション開始
-    await connection.beginTransaction();
-
     // 1. ヘッダー情報の保存
-    const [headerResult] = await connection.execute<any>(
-      `INSERT INTO inbound_headers 
-       (purchase_date, supplier, genre, total_purchase_amount, shipping_cost, discount_amount, total_cost, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
-      [
-        header.purchaseDate,
-        header.supplier,
-        header.genre,
-        header.totalPurchase,
-        header.shipping,
-        header.discount,
-        header.totalCost,
-      ]
-    );
+    const { data: headerRow, error: headerError } = await supabase
+      .from('inbound_headers')
+      .insert({
+        purchase_date: header.purchaseDate,
+        supplier: header.supplier,
+        genre: header.genre,
+        total_purchase_amount: header.totalPurchase,
+        shipping_cost: header.shipping,
+        discount_amount: header.discount,
+        total_cost: header.totalCost,
+      })
+      .select('id')
+      .single();
 
-    const headerId = headerResult.insertId;
+    if (headerError || !headerRow) {
+      console.error('Failed to save inbound header:', headerError);
+      return NextResponse.json({ success: false, error: 'Database Error' }, { status: 500 });
+    }
+
+    const headerId = headerRow.id as number;
 
     // 2. 明細（商品リスト）の保存
     if (items.length > 0) {
-      // プレースホルダを作成: (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) をアイテム数分連結
-      const placeholders = items.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(',');
-      const values = items.flatMap((item) => [
-        headerId,
-        item.jan,
-        item.brand,
-        item.productName,
-        item.modelNumber,
-        item.condition,
-        item.basePrice,
-        item.fixedUnitPrice ? 1 : 0,
-        item.effectiveUnitPrice,
-        new Date() // created_at
-      ]);
+      const rows = items.map((item) => ({
+        header_id: headerId,
+        jan_code: item.jan,
+        brand: item.brand,
+        product_name: item.productName,
+        model_number: item.modelNumber,
+        condition_type: item.condition,
+        base_price: item.basePrice,
+        is_fixed_price: item.fixedUnitPrice,
+        effective_unit_price: item.effectiveUnitPrice,
+      }));
 
-      await connection.execute(
-        `INSERT INTO inbound_items 
-         (header_id, jan_code, brand, product_name, model_number, condition_type, base_price, is_fixed_price, effective_unit_price, created_at)
-         VALUES ${placeholders}`,
-        values
-      );
+      const { error: itemsError } = await supabase.from('inbound_items').insert(rows);
+
+      if (itemsError) {
+        console.error('Failed to save inbound items:', itemsError);
+        return NextResponse.json({ success: false, error: 'Database Error' }, { status: 500 });
+      }
     }
-
-    // コミット
-    await connection.commit();
 
     return NextResponse.json({ success: true, id: headerId });
   } catch (error) {
-    // ロールバック
-    await connection.rollback();
     console.error('Failed to save inbound data:', error);
     return NextResponse.json({ success: false, error: 'Database Error' }, { status: 500 });
-  } finally {
-    connection.release();
   }
 }

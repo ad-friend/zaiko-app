@@ -1,13 +1,20 @@
 import { NextResponse } from 'next/server';
-import { pool } from '@/lib/db';
+import { supabase } from '@/lib/supabase';
 
 export async function GET() {
   try {
-    const [rows] = await pool.query(
-      'SELECT DISTINCT supplier FROM inbound_headers WHERE supplier IS NOT NULL AND supplier != "" ORDER BY supplier ASC'
-    );
-    // 型安全のためのキャスト（実際は配列）
-    const suppliers = (rows as { supplier: string }[]).map((r) => r.supplier);
+    const { data: rows, error } = await supabase
+      .from('inbound_headers')
+      .select('supplier')
+      .not('supplier', 'is', null)
+      .not('supplier', 'eq', '');
+
+    if (error) {
+      console.error('Failed to fetch suppliers:', error);
+      return NextResponse.json([], { status: 500 });
+    }
+
+    const suppliers = [...new Set((rows || []).map((r) => r.supplier).filter(Boolean))].sort();
     return NextResponse.json(suppliers);
   } catch (error) {
     console.error('Failed to fetch suppliers:', error);
