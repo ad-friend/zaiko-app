@@ -7,7 +7,7 @@ export type InferJanResponse = {
   inferred: boolean;
 };
 
-// 2026年現在、最も安定して高速な 2.0 Flash を使用
+// 2.0 Flash を使用
 const GEMINI_MODEL = "gemini-2.0-flash";
 const SYSTEM_PROMPT = `あなたはJAN（EAN-13）コードから商品情報を推論する専門家です。
 日本のECサイト・カタログ等の情報を元に、このJANコードに該当する商品の「ブランド名」「正確な商品名」「型番」を特定してください。
@@ -16,7 +16,6 @@ const SYSTEM_PROMPT = `あなたはJAN（EAN-13）コードから商品情報を
 
 /**
  * JANコードからブランド・商品名・型番を推論するAPI
- * 環境変数 GOOGLE_GENERATIVE_AI_API_KEY で Gemini API を呼び出し
  */
 export async function POST(request: NextRequest) {
   try {
@@ -32,18 +31,15 @@ export async function POST(request: NextRequest) {
 
     const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
     
-    // APIキーがある場合はGeminiで推論
     if (apiKey) {
       try {
         const result = await inferWithGemini(trimmed, apiKey);
         return NextResponse.json(result);
       } catch (geminiError) {
         console.error("[infer-jan] Gemini failed, using fallback:", geminiError);
-        // Geminiが失敗した場合はフォールバック（推論ロジック）へ移行
       }
     }
 
-    // キーがない、またはGeminiが失敗した場合は独自の推論ロジックを使用
     const fallback = inferHeuristic(trimmed);
     return NextResponse.json(fallback);
   } catch (e) {
@@ -56,7 +52,6 @@ export async function POST(request: NextRequest) {
 }
 
 async function inferWithGemini(jan: string, apiKey: string): Promise<InferJanResponse> {
-  // 修正ポイント: v1beta から v1 へ、URL構造を最新化
   const url = `https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
   
   const res = await fetch(url, {
@@ -68,10 +63,11 @@ async function inferWithGemini(jan: string, apiKey: string): Promise<InferJanRes
           parts: [{ text: `${SYSTEM_PROMPT}\n\nJANコード: ${jan}` }],
         },
       ],
+      // 修正ポイント：項目の名前をスネークケース（_繋ぎ）に変更
       generationConfig: {
-        responseMimeType: "application/json",
-        maxOutputTokens: 512, // 少し余裕を持たせました
-        temperature: 0.1,    // より正確な回答を求めるために少し下げました
+        response_mime_type: "application/json",
+        max_output_tokens: 512,
+        temperature: 0.1,
       },
     }),
   });
@@ -86,7 +82,6 @@ async function inferWithGemini(jan: string, apiKey: string): Promise<InferJanRes
   
   let parsed: { brand?: string; product_name?: string; model_number?: string };
   try {
-    // GeminiがJSONマークダウン（```json ... ```）を付けて返してきた場合も考慮してトリム
     const cleanJson = text.replace(/```json/g, "").replace(/```/g, "").trim();
     parsed = JSON.parse(cleanJson) as typeof parsed;
   } catch {
@@ -103,8 +98,8 @@ async function inferWithGemini(jan: string, apiKey: string): Promise<InferJanRes
 
 function sanitizeProductText(s: string): string {
   return s
-    .replace(/\d{13,}/g, "") // JANコード自体が混じっていたら削除
-    .replace(/\s+/g, " ")     // 余計な空白を1つに
+    .replace(/\d{13,}/g, "")
+    .replace(/\s+/g, " ")
     .trim();
 }
 
