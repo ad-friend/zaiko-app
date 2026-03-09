@@ -21,7 +21,6 @@ const GEMINI_MODEL = "gemini-3.1-flash-lite-preview";
 // 💡 追加: 登録商品を確認（取得）するためだけの GET メソッド
 export async function GET() {
   try {
-    // ⚠️ 'products' の部分は実際のテーブル名に合わせてください
     const { data, error } = await supabase
       .from('products')
       .select('jan, brand, product_name, model_number')
@@ -36,24 +35,34 @@ export async function GET() {
   }
 }
 
-// 👇 ここから下の POST メソッドや関数は、いただいた元のコードから一切変えていません 👇
-
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const jan = String(body.jan ?? "").trim().replace(/\D/g, "");
     
-    if (!jan) return NextResponse.json({ error: "JANが必要です" }, { status: 400 });
+    // 💡 ログ追加：処理の開始を記録
+    console.log("=========================================");
+    console.log("🚀 [infer-jan] 検索開始 | JAN:", jan);
+    
+    if (!jan) {
+      console.log("❌ エラー: JANが入力されていません");
+      return NextResponse.json({ error: "JANが必要です" }, { status: 400 });
+    }
 
-    // spabees（登録情報）優先: products テーブルで JAN 検索し、一致すればその情報を返す
+    // spabees（登録情報）優先: products テーブルで JAN 検索
     if (supabaseUrl && supabaseKey) {
       try {
+        console.log("📡 Step 1: Supabase (productsテーブル) 検索中...");
         const { data: product, error } = await supabase
           .from("products")
           .select("jan, brand, product_name, model_number")
           .eq("jan", jan)
           .maybeSingle();
-        if (!error && product) {
+
+        if (error) {
+          console.log("❌ DBエラー発生:", error.message);
+        } else if (product) {
+          console.log("✅ DBヒット成功! 登録情報を引用します:", product.product_name);
           return NextResponse.json({
             brand: sanitizeProductText(product.brand ?? ""),
             productName: sanitizeProductText(product.product_name ?? ""),
@@ -61,26 +70,47 @@ export async function POST(request: NextRequest) {
             inferred: false,
             source: "db",
           });
+        } else {
+          console.log("⚠️ DBには登録されていませんでした。外部APIへ移行します。");
         }
       } catch (dbErr) {
-        console.warn("[infer-jan] spabees lookup failed, falling back to AI:", dbErr);
+        console.warn("❗ DB接続例外:", dbErr);
       }
     }
 
     // Step 2: 外部3社APIを順次実行し、取得できた情報をバッファに蓄積（スキップ可）
     const apiBuffer: string[] = [];
+    console.log("📡 Step 2: 外部3社APIへの問い合わせを開始...");
+
     try {
       const amazon = await fetchAmazonPaApi(jan);
-      if (amazon) apiBuffer.push(`【Amazon】\n${amazon}`);
-    } catch (_) { /* スキップ */ }
+      if (amazon) {
+        console.log("📦 Amazon: 取得成功");
+        apiBuffer.push(`【Amazon】\n${amazon}`);
+      } else {
+        console.log("📦 Amazon: データなし");
+      }
+    } catch (_) { console.log("📦 Amazon: エラーによりスキップ"); }
+
     try {
       const rakuten = await fetchRakuten(jan);
-      if (rakuten) apiBuffer.push(`【楽天】\n${rakuten}`);
-    } catch (_) { /* スキップ */ }
+      if (rakuten) {
+        console.log("📦 楽天: 取得成功");
+        apiBuffer.push(`【楽天】\n${rakuten}`);
+      } else {
+        console.log("📦 楽天: データなし");
+      }
+    } catch (_) { console.log("📦 楽天: エラーによりスキップ"); }
+
     try {
       const yahoo = await fetchYahooShopping(jan);
-      if (yahoo) apiBuffer.push(`【Yahoo!ショッピング】\n${yahoo}`);
-    } catch (_) { /* スキップ */ }
+      if (yahoo) {
+        console.log("📦 Yahoo!: 取得成功");
+        apiBuffer.push(`【Yahoo!ショッピング】\n${yahoo}`);
+      } else {
+        console.log("📦 Yahoo!: データなし");
+      }
+    } catch (_) { console.log("📦 Yahoo!: エラーによりスキップ"); }
 
     const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
     const combinedBuffer = apiBuffer.length > 0 ? apiBuffer.join("\n\n") : "";
@@ -89,10 +119,13 @@ export async function POST(request: NextRequest) {
     if (apiKey) {
       try {
         if (combinedBuffer) {
+          console.log("🤖 Step 3: API情報を元にAIが情報を統合・抽出中...");
           const result = await inferWithGeminiFromApiBuffer(jan, combinedBuffer, apiKey);
+          console.log("✅ AI統合完了:", result.productName);
           return NextResponse.json(result);
         }
-        // API情報が全く得られなかった場合: 空欄で返す
+        
+        console.log("🤖 Step 3: API情報がないため、空欄を返します。");
         return NextResponse.json({
           brand: "",
           productName: "",
@@ -101,7 +134,7 @@ export async function POST(request: NextRequest) {
           source: "ai",
         });
       } catch (geminiError: any) {
-        console.error("[infer-jan] Gemini Error:", geminiError);
+        console.error("❌ Gemini Error:", geminiError);
         return NextResponse.json({
           ...inferHeuristic(jan),
           brand: "❌ AIエラー",
@@ -111,19 +144,21 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // APIキーなし: バッファがあれば簡易抽出、なければヒューリスティック
+    console.log("⚠️ APIキー未設定のため、ヒューリスティックで回答します。");
     if (combinedBuffer) {
       const parsed = tryParseFirstLineFromBuffer(combinedBuffer);
       if (parsed) return NextResponse.json({ ...parsed, inferred: true, source: "api" as const });
     }
     return NextResponse.json({ ...inferHeuristic(jan), source: "ai" });
   } catch (e: any) {
+    console.error("🚨 致命的な例外が発生しました:", e.message);
     return NextResponse.json({ error: e.message }, { status: 500 });
+  } finally {
+    console.log("=========================================");
   }
 }
 
 async function inferWithGemini(jan: string, apiKey: string): Promise<InferJanResponse> {
-  // 3.1系プレビューモデルのため v1beta を使用
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
   
   const res = await fetch(url, {
@@ -149,7 +184,6 @@ async function inferWithGemini(jan: string, apiKey: string): Promise<InferJanRes
 
   const data = await res.json();
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
-  
   const match = text.match(/\{[\s\S]*\}/);
   const parsed = match ? JSON.parse(match[0]) : {};
 
@@ -162,7 +196,6 @@ async function inferWithGemini(jan: string, apiKey: string): Promise<InferJanRes
   };
 }
 
-/** Step 3用: 複数ECサイトの情報をAIで精査・統合 */
 async function inferWithGeminiFromApiBuffer(
   jan: string,
   buffer: string,
@@ -203,7 +236,6 @@ ${buffer}`
   };
 }
 
-/** APIキーなしでバッファだけある場合の簡易抽出（最初の行の商品名など） */
 function tryParseFirstLineFromBuffer(buffer: string): InferJanResponse | null {
   const lines = buffer.split(/\n/).map((s) => s.trim()).filter(Boolean);
   const firstTitle = lines.find((l) => /商品名|タイトル|title|itemName|name/i.test(l) && l.length < 200);
@@ -219,7 +251,6 @@ function tryParseFirstLineFromBuffer(buffer: string): InferJanResponse | null {
   };
 }
 
-// ----- 外部API（Step 2）: キーなし・該当なしはスキップし次へ -----
 async function fetchAmazonPaApi(jan: string): Promise<string | null> {
   const accessKey = process.env.AMAZON_PAAPI_ACCESS_KEY ?? process.env.AMAZON_ACCESS_KEY;
   const secretKey = process.env.AMAZON_PAAPI_SECRET_KEY ?? process.env.AMAZON_SECRET_KEY;
@@ -308,7 +339,6 @@ async function fetchYahooShopping(jan: string): Promise<string | null> {
   }
 }
 
-/** AWS Signature Version 4（PA-API 5.0 用） */
 async function signAwsSigV4(
   method: string,
   host: string,
@@ -342,11 +372,11 @@ async function signAwsSigV4(
   const authorization = `${algorithm} Credential=${accessKey}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
   return { headers: { Authorization: authorization } };
 }
+
 function sha256HexSync(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
-// ここから下の関数が不足していた、あるいは名前が日本語になっていたのがエラーの原因です
 function sanitizeProductText(s: string): string {
   return String(s).replace(/\d{13,}/g, "").replace(/\s+/g, " ").trim();
 }
