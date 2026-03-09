@@ -514,7 +514,7 @@ export default function InboundPage() {
               href="/history"
               className="text-sm font-medium text-slate-500 hover:text-primary transition-colors"
             >
-              履歴を確認する
+              在庫一覧
             </Link>
              <button
               onClick={() => alert("ログアウト")}

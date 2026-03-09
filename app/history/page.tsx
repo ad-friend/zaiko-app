@@ -106,7 +106,7 @@ export default function HistoryPage() {
           <div className="bg-slate-50/80 px-6 py-4 border-b border-slate-100 backdrop-blur">
             <h2 className="text-base font-bold text-slate-800 flex items-center gap-2">
               <DocumentIcon className="h-5 w-5 text-primary" />
-              登録データ一覧
+              在庫一覧
             </h2>
           </div>
           <div className="p-6">
