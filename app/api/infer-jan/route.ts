@@ -43,6 +43,27 @@ export async function POST(request: NextRequest) {
     
     if (!jan) return NextResponse.json({ error: "JANが必要です" }, { status: 400 });
 
+    // spabees（登録情報）優先: products テーブルで JAN 検索し、一致すればその情報を返す
+    if (supabaseUrl && supabaseKey) {
+      try {
+        const { data: product, error } = await supabase
+          .from("products")
+          .select("jan, brand, product_name, model_number")
+          .eq("jan", jan)
+          .maybeSingle();
+        if (!error && product) {
+          return NextResponse.json({
+            brand: sanitizeProductText(product.brand ?? ""),
+            productName: sanitizeProductText(product.product_name ?? ""),
+            modelNumber: sanitizeProductText(product.model_number ?? ""),
+            inferred: false,
+          });
+        }
+      } catch (dbErr) {
+        console.warn("[infer-jan] spabees lookup failed, falling back to AI:", dbErr);
+      }
+    }
+
     const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
     
     if (apiKey) {

@@ -147,6 +147,8 @@ export default function InboundPage() {
   const [supplierSuggestions, setSupplierSuggestions] = useState<string[]>([]);
   // 保存処理中フラグ
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // 登録情報確認モーダル
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
 
   const totalNum = Number(totalPurchase) || 0;
   const shippingNum = Number(shipping) || 0;
@@ -615,7 +617,14 @@ export default function InboundPage() {
                       </div>
                    </div>
 
-                   <div>
+                   <div className="space-y-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowConfirmModal(true)}
+                      className={`${buttonClass} w-full bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300 h-10 text-sm`}
+                    >
+                      登録情報を確認する
+                    </button>
                     <button
                       type="button"
                       onClick={handleRegister}
@@ -1030,6 +1039,75 @@ export default function InboundPage() {
             <p className="mt-4 text-center text-sm font-medium text-slate-500">
               カメラを商品コードに向けてください
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* 登録情報確認モーダル */}
+      {showConfirmModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+          <div className="relative w-full max-w-4xl max-h-[90vh] rounded-2xl border border-slate-200 bg-white shadow-2xl flex flex-col">
+            <div className="flex items-center justify-between p-6 border-b border-slate-100">
+              <h3 className="text-lg font-bold text-slate-900">登録情報の確認</h3>
+              <button
+                onClick={() => setShowConfirmModal(false)}
+                className="rounded-full p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-colors"
+              >
+                <CloseIcon className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="p-6 overflow-y-auto flex-1 space-y-6">
+              <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
+                <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">伝票情報</h4>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 text-sm">
+                  <div><span className="text-slate-500">仕入日</span><div className="font-medium text-slate-900">{purchaseDate}</div></div>
+                  <div><span className="text-slate-500">仕入先</span><div className="font-medium text-slate-900">{supplier || "—"}</div></div>
+                  <div><span className="text-slate-500">ジャンル（カテゴリ）</span><div className="font-medium text-slate-900">{genre || "—"}</div></div>
+                  <div><span className="text-slate-500">仕入総額</span><div className="font-medium text-slate-900">{totalNum.toLocaleString()} 円</div></div>
+                  <div><span className="text-slate-500">送料</span><div className="font-medium text-slate-900">{shippingNum.toLocaleString()} 円</div></div>
+                  <div><span className="text-slate-500">割引</span><div className="font-medium text-slate-900">{discountNum.toLocaleString()} 円</div></div>
+                  <div className="col-span-2 sm:col-span-3"><span className="text-slate-500">実質総コスト</span><div className="font-bold text-slate-900">{totalCost.toLocaleString()} 円</div></div>
+                </div>
+              </div>
+              <div>
+                <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">商品一覧</h4>
+                {rows.length === 0 ? (
+                  <p className="text-sm text-slate-400 py-4">商品がありません</p>
+                ) : (
+                  <div className="rounded-xl border border-slate-200 overflow-hidden">
+                    <table className="w-full text-sm text-left">
+                      <thead className="bg-slate-50 border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold">
+                        <tr>
+                          <th className="px-4 py-3">JAN</th>
+                          <th className="px-4 py-3">名称</th>
+                          <th className="px-4 py-3">ブランド / 型番</th>
+                          <th className="px-4 py-3 text-right">数量</th>
+                          <th className="px-4 py-3 text-right">基準価格</th>
+                          <th className="px-4 py-3 text-right">実質単価</th>
+                          <th className="px-4 py-3">状態</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {rows.map((row) => {
+                          const effective = calcEffectiveUnitPrice(row, totalNum, headerInfo, rows);
+                          return (
+                            <tr key={row.id} className="bg-white">
+                              <td className="px-4 py-3 font-mono text-xs">{row.jan || "—"}</td>
+                              <td className="px-4 py-3 font-medium text-slate-900">{row.productName || "—"}</td>
+                              <td className="px-4 py-3 text-slate-600">{row.brand || "—"} {row.modelNumber ? `/ ${row.modelNumber}` : ""}</td>
+                              <td className="px-4 py-3 text-right">{row.quantity}</td>
+                              <td className="px-4 py-3 text-right">{row.basePrice > 0 ? row.basePrice.toLocaleString() : "—"} 円</td>
+                              <td className="px-4 py-3 text-right font-medium">{effective > 0 ? Math.round(effective).toLocaleString() : "—"} 円</td>
+                              <td className="px-4 py-3">{row.condition === "new" ? "新品" : "中古"}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       )}
