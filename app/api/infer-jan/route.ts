@@ -22,8 +22,8 @@ const GEMINI_MODEL = "gemini-3.1-flash-lite-preview";
 export async function GET() {
   try {
     const { data, error } = await supabase
-      .from('products')
-      .select('jan, brand, product_name, model_number')
+      .from('inbound_items')
+      .select('jan_code, brand, product_name, model_number')
       .order('created_at', { ascending: false })
       .limit(10);
 
@@ -52,11 +52,11 @@ export async function POST(request: NextRequest) {
     // spabees（登録情報）優先: products テーブルで JAN 検索
     if (supabaseUrl && supabaseKey) {
       try {
-        console.log("📡 Step 1: Supabase (productsテーブル) 検索中...");
+        console.log("📡 Step 1: Supabase (inbound_itemsテーブル) 検索中...");
         const { data: product, error } = await supabase
-          .from("products")
-          .select("jan, brand, product_name, model_number")
-          .eq("jan", jan)
+          .from("inbound_items")
+          .select("jan_code, brand, product_name, model_number")
+          .eq("jan_code", jan)
           .maybeSingle();
 
         if (error) {
