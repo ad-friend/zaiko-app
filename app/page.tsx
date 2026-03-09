@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { Html5Qrcode } from "html5-qrcode";
 
 // ----- 型定義 -----
@@ -483,6 +484,12 @@ export default function InboundPage() {
              <div className="hidden sm:flex items-center gap-1 text-sm text-slate-500 mr-4">
                 <span className="px-2">ユーザー: <strong>管理者</strong></span>
              </div>
+             <Link
+              href="/history"
+              className="text-sm font-medium text-slate-500 hover:text-primary transition-colors"
+            >
+              履歴を確認する
+            </Link>
              <button
               onClick={() => alert("ログアウト")}
               className="text-sm font-medium text-slate-500 hover:text-destructive transition-colors"
