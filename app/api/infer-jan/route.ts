@@ -7,7 +7,7 @@ export type InferJanResponse = {
   inferred: boolean;
 };
 
-// 1. モデル名のみ変更（ご指摘のプレビュー版ID）
+// 1. モデル名はご指摘のプレビュー版を使用
 const GEMINI_MODEL = "gemini-3.1-flash-lite-preview";
 
 export async function POST(request: NextRequest) {
@@ -25,7 +25,7 @@ export async function POST(request: NextRequest) {
         return NextResponse.json(result);
       } catch (geminiError: any) {
         console.error("[infer-jan] Gemini Error:", geminiError);
-        // エラー内容を画面で確認できるように戻します
+        // AIが失敗した際、エラー理由を表示しつつヒューリスティックを返す
         return NextResponse.json({
           ...inferHeuristic(jan),
           brand: "❌ AIエラー",
@@ -41,7 +41,7 @@ export async function POST(request: NextRequest) {
 }
 
 async function inferWithGemini(jan: string, apiKey: string): Promise<InferJanResponse> {
-  // 2. 通信先のみ変更（プレビュー版モデルを叩くためのbetaエンドポイント）
+  // 3.1系プレビューモデルのため v1beta を使用
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
   
   const res = await fetch(url, {
@@ -56,7 +56,6 @@ async function inferWithGemini(jan: string, apiKey: string): Promise<InferJanRes
           {"brand":"ブランド名","product_name":"商品名","model_number":"型番"}`
         }]
       }],
-      // 2.5で動いていた時と同じ設定
       generationConfig: { max_output_tokens: 512, temperature: 0.1 }
     }),
   });
@@ -69,7 +68,6 @@ async function inferWithGemini(jan: string, apiKey: string): Promise<InferJanRes
   const data = await res.json();
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
   
-  // 正規表現もビルドエラーが出ない安全な書き方のまま
   const match = text.match(/\{[\s\S]*\}/);
   const parsed = match ? JSON.parse(match[0]) : {};
 
@@ -77,6 +75,21 @@ async function inferWithGemini(jan: string, apiKey: string): Promise<InferJanRes
     brand: sanitizeProductText(parsed.brand ?? ""),
     productName: sanitizeProductText(parsed.product_name ?? ""),
     modelNumber: sanitizeProductText(parsed.model_number ?? ""),
+    inferred: true,
+  };
+}
+
+// ここから下の関数が不足していた、あるいは名前が日本語になっていたのがエラーの原因です
+function sanitizeProductText(s: string): string {
+  return String(s).replace(/\d{13,}/g, "").replace(/\s+/g, " ").trim();
+}
+
+function inferHeuristic(jan: string): InferJanResponse {
+  const digits = jan.replace(/\D/g, "");
+  return {
+    brand: digits.startsWith("4") ? "（推論）国産品" : "（推論）不明",
+    productName: `商品 ${digits.slice(-6)}`,
+    modelNumber: `JAN-${digits.slice(-6)}`,
     inferred: true,
   };
 }
