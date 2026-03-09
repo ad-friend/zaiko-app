@@ -7,7 +7,7 @@ export type InferJanResponse = {
   inferred: boolean;
 };
 
-const GEMINI_MODEL = "gemini-3.1-flash-lite-preview";
+const GEMINI_MODEL = "gemini-2.5-flash";
 
 export async function POST(request: NextRequest) {
   try {
