@@ -49,7 +49,9 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "JANが必要です" }, { status: 400 });
     }
 
-    // spabees（登録情報）優先: products テーブルで JAN 検索
+    const dbOnly = body.dbOnly === true;
+
+    // Step 1: 自社DB (inbound_items) で JAN 検索（テーブル名・カラム名は手動修正済みのまま維持）
     if (supabaseUrl && supabaseKey) {
       try {
         console.log("📡 Step 1: Supabase (inbound_itemsテーブル) 検索中...");
@@ -63,6 +65,9 @@ export async function POST(request: NextRequest) {
           console.log("❌ DBエラー発生:", error.message);
         } else if (product) {
           console.log("✅ DBヒット成功! 登録情報を引用します:", product.product_name);
+          if (dbOnly) {
+            console.log("✅ [dbOnly] DBで解決したため、AIは起動しません。");
+          }
           return NextResponse.json({
             brand: sanitizeProductText(product.brand ?? ""),
             productName: sanitizeProductText(product.product_name ?? ""),
@@ -76,6 +81,18 @@ export async function POST(request: NextRequest) {
       } catch (dbErr) {
         console.warn("❗ DB接続例外:", dbErr);
       }
+    }
+
+    // dbOnly の場合は DB にデータがなかったことを返し、AI は起動しない（フロントで後からフル検索を呼ぶ）
+    if (dbOnly) {
+      console.log("📡 [dbOnly] Step 1 のみ実行 → DBにデータなし。フロントでAI起動してください。");
+      return NextResponse.json({
+        found: false,
+        brand: "",
+        productName: "",
+        modelNumber: "",
+        inferred: false,
+      });
     }
 
     // Step 2: 外部3社APIを順次実行し、取得できた情報をバッファに蓄積（スキップ可）

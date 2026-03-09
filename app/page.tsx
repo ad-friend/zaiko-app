@@ -197,43 +197,71 @@ export default function InboundPage() {
     }
   }, [rows]);
 
-  // JAN入力時に未登録ならAPIで推論（13桁のときのみ）
+  // JAN入力時: まずDB検索 → データがない場合のみAI推論を起動（プロセス分離）
   const handleJanBlurOrEnter = useCallback(
     async (jan: string, rowId?: string) => {
       const trimmed = jan.trim().replace(/\D/g, "");
       if (trimmed.length !== 13) return;
-      
+
       const target = rowId
         ? rows.find((r) => r.id === rowId)
         : null;
-      
+
       if (target && (target.brand || target.productName || target.modelNumber)) {
         return;
       }
 
-      setInferringJan(trimmed);
-      try {
-        let brand = "";
-        let productName = "";
-        let modelNumber = "";
+      let brand = "";
+      let productName = "";
+      let modelNumber = "";
 
-        // API呼び出し (モックまたは実装済みのエンドポイント)
-        try {
-            const res = await fetch("/api/infer-jan", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ jan: trimmed }),
-            });
-            if (res.ok) {
-                const data = await res.json();
-                brand = cleanseProductName(data.brand ?? "");
-                productName = cleanseProductName(data.productName ?? "");
-                modelNumber = cleanseProductName(data.modelNumber ?? "");
-            }
-        } catch (e) {
-            console.warn("API Error, falling back to manual input", e);
+      try {
+        // ① まずDB検索のみ実行（AIは起動しない）
+        const dbRes = await fetch("/api/infer-jan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jan: trimmed, dbOnly: true }),
+        });
+        if (dbRes.ok) {
+          const dbData = await dbRes.json();
+          if (dbData.source === "db") {
+            // DBで解決 → 即反映し、AIプロセスは起動しない
+            brand = cleanseProductName(dbData.brand ?? "");
+            productName = cleanseProductName(dbData.productName ?? "");
+            modelNumber = cleanseProductName(dbData.modelNumber ?? "");
+            applyJanResult(trimmed, brand, productName, modelNumber, rowId);
+            return;
+          }
         }
 
+        // ② DBにデータがないことが確定 → この時点で「AI推論中」を表示し、AIプロセス開始
+        setInferringJan(trimmed);
+        const res = await fetch("/api/infer-jan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jan: trimmed }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          brand = cleanseProductName(data.brand ?? "");
+          productName = cleanseProductName(data.productName ?? "");
+          modelNumber = cleanseProductName(data.modelNumber ?? "");
+        }
+        applyJanResult(trimmed, brand, productName, modelNumber, rowId);
+      } catch (e) {
+        console.warn("API Error, falling back to manual input", e);
+        applyJanResult(trimmed, brand, productName, modelNumber, rowId);
+      } finally {
+        setInferringJan(null);
+      }
+
+      function applyJanResult(
+        trimmed: string,
+        brand: string,
+        productName: string,
+        modelNumber: string,
+        rowId?: string
+      ) {
         if (rowId) {
           setRows((prev) =>
             prev.map((r) =>
@@ -283,8 +311,6 @@ export default function InboundPage() {
           });
           if (janInputRef.current) janInputRef.current.value = "";
         }
-      } finally {
-        setInferringJan(null);
       }
     },
     [rows]
