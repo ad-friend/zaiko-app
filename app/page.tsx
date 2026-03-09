@@ -194,11 +194,11 @@ export default function InboundPage() {
     }
   }, [rows]);
 
-  // JAN入力時に未登録ならAPIで推論
+  // JAN入力時に未登録ならAPIで推論（13桁のときのみ）
   const handleJanBlurOrEnter = useCallback(
     async (jan: string, rowId?: string) => {
-      const trimmed = jan.trim();
-      if (!trimmed || trimmed.length < 8) return;
+      const trimmed = jan.trim().replace(/\D/g, "");
+      if (trimmed.length !== 13) return;
       
       const target = rowId
         ? rows.find((r) => r.id === rowId)
@@ -705,13 +705,21 @@ export default function InboundPage() {
                         autoComplete="off"
                         placeholder="JANコードをスキャン または 入力してEnter"
                         className="flex-1 h-12 bg-transparent text-lg text-slate-900 placeholder:text-slate-400 focus:outline-none"
+                        disabled={!!inferringJan}
                         onKeyDown={(e) => {
                           if (e.key === "Enter") {
-                            const v = (e.target as HTMLInputElement).value.trim();
-                            if (v) {
+                            const v = (e.target as HTMLInputElement).value.trim().replace(/\D/g, "");
+                            if (v.length === 13) {
                               handleJanBlurOrEnter(v);
                               (e.target as HTMLInputElement).value = "";
                             }
+                          }
+                        }}
+                        onChange={(e) => {
+                          const digits = (e.target.value || "").replace(/\D/g, "");
+                          if (digits.length === 13) {
+                            handleJanBlurOrEnter(digits);
+                            e.target.value = "";
                           }
                         }}
                       />
@@ -772,8 +780,8 @@ export default function InboundPage() {
                                     value={row.jan}
                                     onChange={(e) => updateRow(row.id, { jan: e.target.value })}
                                     onBlur={(e) => {
-                                        const v = e.target.value.trim();
-                                        if (v && !row.brand && !row.productName) handleJanBlurOrEnter(v, row.id);
+                                        const v = e.target.value.trim().replace(/\D/g, "");
+                                        if (v.length === 13 && !row.brand && !row.productName) handleJanBlurOrEnter(v, row.id);
                                     }}
                                     className={`${inputClass} font-mono text-xs h-9 shadow-sm`}
                                     placeholder="JAN"
@@ -887,8 +895,8 @@ export default function InboundPage() {
                                     value={row.jan}
                                     onChange={(e) => updateRow(row.id, { jan: e.target.value })}
                                     onBlur={(e) => {
-                                        const v = e.target.value.trim();
-                                        if (v && !row.brand && !row.productName) handleJanBlurOrEnter(v, row.id);
+                                        const v = e.target.value.trim().replace(/\D/g, "");
+                                        if (v.length === 13 && !row.brand && !row.productName) handleJanBlurOrEnter(v, row.id);
                                     }}
                                     className={`${inputClass} font-mono text-sm h-9 bg-white/80`}
                                     inputMode="numeric"

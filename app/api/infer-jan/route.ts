@@ -7,14 +7,20 @@ export type InferJanResponse = {
   inferred: boolean;
 };
 
+const GEMINI_MODEL = "gemini-1.5-flash";
+const SYSTEM_PROMPT = `あなたはJAN（EAN-13）コードから商品情報を推論する専門家です。
+日本のECサイト・カタログ等の情報を元に、このJANコードに該当する商品の「ブランド名」「正確な商品名」「型番」を特定してください。
+回答は以下のJSON形式のみで返し、余計な説明やマークダウンは入れないでください。
+{"brand":"ブランド名","product_name":"商品名（JANコードの数字は含めない）","model_number":"型番またはSKU"}`;
+
 /**
  * JANコードからブランド・商品名・型番を推論するAPI
- * 環境変数 OPENAI_API_KEY が設定されていればLLMで推論、未設定ならヒューリスティックで提案
+ * 環境変数 GOOGLE_GENERATIVE_AI_API_KEY で Gemini API を呼び出し
  */
 export async function POST(request: NextRequest) {
   try {
     const { jan } = (await request.json()) as { jan: string };
-    const trimmed = String(jan ?? "").trim();
+    const trimmed = String(jan ?? "").trim().replace(/\D/g, "");
     if (!trimmed) {
       return NextResponse.json(
         { error: "JANコードを指定してください" },
@@ -22,13 +28,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const apiKey = process.env.OPENAI_API_KEY;
+    const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
     if (apiKey) {
-      const result = await inferWithLLM(trimmed, apiKey);
+      const result = await inferWithGemini(trimmed, apiKey);
       return NextResponse.json(result);
     }
 
-    // 未設定時: ヒューリスティックで推論（LLM風の提案）
     const fallback = inferHeuristic(trimmed);
     return NextResponse.json(fallback);
   } catch (e) {
@@ -40,53 +45,50 @@ export async function POST(request: NextRequest) {
   }
 }
 
-async function inferWithLLM(jan: string, apiKey: string): Promise<InferJanResponse> {
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+async function inferWithGemini(jan: string, apiKey: string): Promise<InferJanResponse> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const res = await fetch(url, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: "gpt-4o-mini",
-      messages: [
+      contents: [
         {
-          role: "system",
-          content: `あなたはJAN（EAN-13）コードから商品情報を推論する専門家です。
-入力はJANコード（13桁の数字）のみです。
-以下のJSON形式のみで回答し、余計な説明は入れないでください。
-{"brand":"ブランド名","productName":"商品名（JANコードの数字は含めない）","modelNumber":"型番またはSKU"}`,
-        },
-        {
-          role: "user",
-          content: jan,
+          parts: [{ text: `${SYSTEM_PROMPT}\n\nJANコード: ${jan}` }],
         },
       ],
-      response_format: { type: "json_object" },
-      max_tokens: 200,
+      generationConfig: {
+        responseMimeType: "application/json",
+        maxOutputTokens: 256,
+        temperature: 0.2,
+      },
     }),
   });
 
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`OpenAI API error: ${res.status} ${err}`);
+    throw new Error(`Gemini API error: ${res.status} ${err}`);
   }
 
   const data = await res.json();
-  const content = data.choices?.[0]?.message?.content ?? "{}";
-  const parsed = JSON.parse(content) as { brand?: string; productName?: string; modelNumber?: string };
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
+  let parsed: { brand?: string; product_name?: string; model_number?: string };
+  try {
+    parsed = JSON.parse(text.trim()) as typeof parsed;
+  } catch {
+    parsed = {};
+  }
+
   return {
     brand: sanitizeProductText(parsed.brand ?? ""),
-    productName: sanitizeProductText(parsed.productName ?? ""),
-    modelNumber: sanitizeProductText(parsed.modelNumber ?? ""),
+    productName: sanitizeProductText(parsed.product_name ?? ""),
+    modelNumber: sanitizeProductText(parsed.model_number ?? ""),
     inferred: true,
   };
 }
 
-/** 商品名にJAN（数字のみ）が含まれないようにクレンジング */
 function sanitizeProductText(s: string): string {
   return s
-    .replace(/\d{13,}/g, "") // 13桁以上の数字を除去
+    .replace(/\d{13,}/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }
