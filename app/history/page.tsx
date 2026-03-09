@@ -40,7 +40,19 @@ function DocumentIcon({ className }: { className?: string }) {
 }
 
 const inputClass = "flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 transition-all duration-200 shadow-sm";
-const buttonClass = "inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 h-10 px-4 py-2 shadow-sm active:scale-[0.98] duration-100";
+// px-4 -> px-6
+const buttonClass = "inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 h-10 px-6 py-2 shadow-sm active:scale-[0.98] duration-100";
+
+type EditDraft = {
+  brand: string;
+  product_name: string;
+  model_number: string;
+  created_at: string;
+  supplier: string;
+  genre: string;
+  base_price: number;
+  effective_unit_price: number;
+};
 
 export default function HistoryPage() {
   const [rows, setRows] = useState<RecordRow[]>([]);
@@ -48,8 +60,9 @@ export default function HistoryPage() {
   const [error, setError] = useState<string | null>(null);
 
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [lastCheckedId, setLastCheckedId] = useState<number | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
-  const [editDraft, setEditDraft] = useState<{ brand: string; product_name: string; model_number: string; created_at: string } | null>(null);
+  const [editDraft, setEditDraft] = useState<EditDraft | null>(null);
   const [isBulkEditing, setIsBulkEditing] = useState(false);
   const [bulkSnapshot, setBulkSnapshot] = useState<RecordRow[] | null>(null);
   const [bulkAction, setBulkAction] = useState<string>("bulk_delete");
@@ -84,19 +97,45 @@ export default function HistoryPage() {
 
   const toDateValue = (iso: string) => (iso ? iso.slice(0, 10) : "");
 
-  const toggleSelect = (id: number) => {
+  const toggleSelect = (id: number, shiftKey: boolean) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
+      
+      // Shiftキー範囲選択ロジック
+      if (shiftKey && lastCheckedId !== null) {
+        const currentIndex = rows.findIndex(r => r.id === id);
+        const lastIndex = rows.findIndex(r => r.id === lastCheckedId);
+        
+        if (currentIndex !== -1 && lastIndex !== -1) {
+          const start = Math.min(currentIndex, lastIndex);
+          const end = Math.max(currentIndex, lastIndex);
+          const targetValue = !prev.has(id); // クリックした行の状態に合わせるか、常に選択にするか。
+          // 通常Shift選択は「選択範囲をActiveにする」なので、addする方向で実装
+          
+          for (let i = start; i <= end; i++) {
+             next.add(rows[i].id);
+          }
+          return next;
+        }
+      }
+
       if (next.has(id)) next.delete(id);
       else next.add(id);
+      
+      setLastCheckedId(id);
       return next;
     });
   };
 
   const toggleSelectAll = () => {
     if (rows.length === 0) return;
-    if (selectedIds.size >= rows.length) setSelectedIds(new Set());
-    else setSelectedIds(new Set(rows.map((r) => r.id)));
+    if (selectedIds.size >= rows.length) {
+        setSelectedIds(new Set());
+        setLastCheckedId(null);
+    } else {
+        setSelectedIds(new Set(rows.map((r) => r.id)));
+        setLastCheckedId(null);
+    }
   };
 
   const startIndividualEdit = (row: RecordRow) => {
@@ -106,6 +145,10 @@ export default function HistoryPage() {
       product_name: row.product_name ?? "",
       model_number: row.model_number ?? "",
       created_at: toDateValue(row.created_at),
+      supplier: row.header?.supplier ?? "",
+      genre: row.header?.genre ?? "",
+      base_price: row.base_price,
+      effective_unit_price: row.effective_unit_price,
     });
   };
 
@@ -127,22 +170,30 @@ export default function HistoryPage() {
           brand: editDraft.brand,
           product_name: editDraft.product_name,
           model_number: editDraft.model_number,
+          supplier: editDraft.supplier,
+          genre: editDraft.genre,
+          base_price: editDraft.base_price,
+          effective_unit_price: editDraft.effective_unit_price,
           ...(created_at && { created_at }),
         }),
       });
       if (!res.ok) throw new Error("更新に失敗しました");
+      
       setRows((prev) =>
-        prev.map((r) =>
-          r.id === editingId
-            ? {
+        prev.map((r) => {
+            if (r.id !== editingId) return r;
+            const newHeader = r.header ? { ...r.header, supplier: editDraft.supplier, genre: editDraft.genre } : r.header;
+            return {
                 ...r,
                 brand: editDraft.brand || null,
                 product_name: editDraft.product_name || null,
                 model_number: editDraft.model_number || null,
                 created_at: created_at || r.created_at,
-              }
-            : r
-        )
+                base_price: editDraft.base_price,
+                effective_unit_price: editDraft.effective_unit_price,
+                header: newHeader
+            };
+        })
       );
       setEditingId(null);
       setEditDraft(null);
@@ -154,7 +205,8 @@ export default function HistoryPage() {
   }, [editingId, editDraft]);
 
   const startBulkEdit = () => {
-    setBulkSnapshot([...rows]);
+    // deep copy for snapshot including header
+    setBulkSnapshot(rows.map(r => ({...r, header: r.header ? {...r.header} : null})));
     setIsBulkEditing(true);
   };
 
@@ -172,6 +224,10 @@ export default function HistoryPage() {
         brand: r.brand ?? "",
         product_name: r.product_name ?? "",
         model_number: r.model_number ?? "",
+        base_price: r.base_price,
+        effective_unit_price: r.effective_unit_price,
+        supplier: r.header?.supplier ?? "",
+        genre: r.header?.genre ?? "",
         ...(r.created_at && { created_at: r.created_at }),
       }));
       const res = await fetch("/api/infer-jan", {
@@ -190,9 +246,19 @@ export default function HistoryPage() {
     }
   }, [rows, fetchRecords]);
 
-  const updateRowField = useCallback((id: number, field: keyof RecordRow, value: string) => {
+  // RecordRowのフィールド更新用
+  const updateRowField = useCallback((id: number, field: keyof RecordRow, value: string | number) => {
     setRows((prev) => prev.map((r) => (r.id === id ? { ...r, [field]: value } : r)));
   }, []);
+
+  // Header情報のフィールド更新用
+  const updateRowHeaderField = useCallback((id: number, field: "supplier" | "genre", value: string) => {
+      setRows((prev) => prev.map((r) => {
+          if (r.id !== id || !r.header) return r;
+          return { ...r, header: { ...r.header, [field]: value } };
+      }));
+  }, []);
+
 
   const executeBulkAction = useCallback(async () => {
     if (bulkAction === "bulk_delete" && selectedIds.size > 0) {
@@ -230,7 +296,7 @@ export default function HistoryPage() {
           <div className="flex items-center gap-3">
             <Link
               href="/"
-              className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 h-10 px-4 py-2 shadow-sm bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300"
+              className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 h-10 px-6 py-2 shadow-sm bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300"
             >
               <ChevronLeft className="mr-2 h-4 w-4" />
               入庫画面へ戻る
@@ -252,55 +318,65 @@ export default function HistoryPage() {
             <div className="flex flex-wrap items-center gap-3 px-6 py-3 border-b border-slate-100 bg-white">
               {!isBulkEditing ? (
                 <>
-                  <label className="flex items-center gap-2 cursor-pointer text-sm text-slate-600">
-                    <input
-                      type="checkbox"
-                      checked={rows.length > 0 && selectedIds.size === rows.length}
-                      onChange={toggleSelectAll}
-                      className="rounded border-slate-300 text-primary focus:ring-primary"
-                    />
-                    全選択/解除
-                  </label>
-                  <select
-                    value={bulkAction}
-                    onChange={(e) => setBulkAction(e.target.value)}
-                    className={`${inputClass} w-auto min-w-[120px] h-9 py-1`}
-                  >
-                    <option value="bulk_delete">一括削除</option>
-                  </select>
-                  <button
-                    type="button"
-                    onClick={executeBulkAction}
-                    disabled={selectedIds.size === 0 || saving}
-                    className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300 disabled:opacity-50`}
-                  >
-                    実行
-                  </button>
-                  <button
-                    type="button"
-                    onClick={startBulkEdit}
-                    className={`${buttonClass} bg-white text-primary border border-primary/20 hover:bg-primary/5`}
-                  >
-                    一括編集
-                  </button>
+                  {/* 左側固定：全選択、操作プルダウン、実行ボタン */}
+                  <div className="flex items-center gap-3">
+                    <label className="flex items-center gap-2 cursor-pointer text-sm text-slate-600">
+                        <input
+                        type="checkbox"
+                        checked={rows.length > 0 && selectedIds.size === rows.length}
+                        onChange={toggleSelectAll}
+                        className="rounded border-slate-300 text-primary focus:ring-primary"
+                        />
+                        全選択/解除
+                    </label>
+                    <select
+                        value={bulkAction}
+                        onChange={(e) => setBulkAction(e.target.value)}
+                        className={`${inputClass} w-auto min-w-[120px] h-9 py-1`}
+                    >
+                        <option value="bulk_delete">一括削除</option>
+                    </select>
+                    <button
+                        type="button"
+                        onClick={executeBulkAction}
+                        disabled={selectedIds.size === 0 || saving}
+                        className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300 disabled:opacity-50`}
+                    >
+                        実行
+                    </button>
+                  </div>
+                  
+                  {/* 右側：一括編集ボタン */}
+                  <div className="ml-auto">
+                    <button
+                        type="button"
+                        onClick={startBulkEdit}
+                        className={`${buttonClass} bg-white text-primary border border-primary/20 hover:bg-primary/5`}
+                    >
+                        一括編集
+                    </button>
+                  </div>
                 </>
               ) : (
                 <>
-                  <button
-                    type="button"
-                    onClick={saveBulkEdit}
-                    disabled={saving}
-                    className={`${buttonClass} bg-primary text-white hover:bg-primary/90`}
-                  >
-                    {saving ? "保存中..." : "全保存"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={cancelBulkEdit}
-                    className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300`}
-                  >
-                    全解除
-                  </button>
+                  {/* 右側：保存、解除ボタン */}
+                  <div className="ml-auto flex items-center gap-3">
+                    <button
+                        type="button"
+                        onClick={saveBulkEdit}
+                        disabled={saving}
+                        className={`${buttonClass} bg-primary text-white hover:bg-primary/90`}
+                    >
+                        {saving ? "保存中..." : "全保存"}
+                    </button>
+                    <button
+                        type="button"
+                        onClick={cancelBulkEdit}
+                        className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300`}
+                    >
+                        全解除
+                    </button>
+                  </div>
                 </>
               )}
             </div>
@@ -349,7 +425,11 @@ export default function HistoryPage() {
                             <input
                               type="checkbox"
                               checked={selectedIds.has(row.id)}
-                              onChange={() => toggleSelect(row.id)}
+                              onChange={(e) => {
+                                // Shiftキーは nativeEvent で取得
+                                const nativeEvent = e.nativeEvent as MouseEvent;
+                                toggleSelect(row.id, nativeEvent.shiftKey);
+                              }}
                               className="rounded border-slate-300 text-primary focus:ring-primary"
                             />
                           </td>
@@ -369,8 +449,38 @@ export default function HistoryPage() {
                               displayDate
                             )}
                           </td>
-                          <td className="px-6 py-4 text-slate-700">{row.header?.supplier ?? "—"}</td>
-                          <td className="px-6 py-4 text-slate-600">{row.header?.genre ?? "—"}</td>
+                          <td className="px-6 py-4 text-slate-700">
+                             {isEditMode ? (
+                                <input
+                                    value={isIndividualEdit && editDraft ? editDraft.supplier : row.header?.supplier ?? ""}
+                                    onChange={(e) =>
+                                        isIndividualEdit && editDraft
+                                          ? setEditDraft((d) => (d ? { ...d, supplier: e.target.value } : d))
+                                          : updateRowHeaderField(row.id, "supplier", e.target.value)
+                                    }
+                                    className={`${inputClass} h-9 text-xs`}
+                                    placeholder="仕入先"
+                                />
+                             ) : (
+                                row.header?.supplier ?? "—"
+                             )}
+                          </td>
+                          <td className="px-6 py-4 text-slate-600">
+                             {isEditMode ? (
+                                <input
+                                    value={isIndividualEdit && editDraft ? editDraft.genre : row.header?.genre ?? ""}
+                                    onChange={(e) =>
+                                        isIndividualEdit && editDraft
+                                          ? setEditDraft((d) => (d ? { ...d, genre: e.target.value } : d))
+                                          : updateRowHeaderField(row.id, "genre", e.target.value)
+                                    }
+                                    className={`${inputClass} h-9 text-xs`}
+                                    placeholder="ジャンル"
+                                />
+                             ) : (
+                                row.header?.genre ?? "—"
+                             )}
+                          </td>
                           <td className="px-6 py-4 font-mono text-xs">{row.jan_code ?? "—"}</td>
                           <td className="px-6 py-4 font-medium text-slate-900">
                             {isEditMode ? (
@@ -420,8 +530,38 @@ export default function HistoryPage() {
                               row.model_number ?? "—"
                             )}
                           </td>
-                          <td className="px-6 py-4 text-right tabular-nums">{row.base_price > 0 ? row.base_price.toLocaleString() : "—"} 円</td>
-                          <td className="px-6 py-4 text-right font-medium tabular-nums">{row.effective_unit_price > 0 ? Math.round(row.effective_unit_price).toLocaleString() : "—"} 円</td>
+                          <td className="px-6 py-4 text-right tabular-nums">
+                            {isEditMode ? (
+                                <input
+                                type="number"
+                                value={isIndividualEdit && editDraft ? editDraft.base_price : row.base_price}
+                                onChange={(e) =>
+                                    isIndividualEdit && editDraft
+                                    ? setEditDraft((d) => (d ? { ...d, base_price: Number(e.target.value) } : d))
+                                    : updateRowField(row.id, "base_price", Number(e.target.value))
+                                }
+                                className={`${inputClass} h-9 text-right`}
+                                />
+                            ) : (
+                                row.base_price > 0 ? row.base_price.toLocaleString() + " 円" : "—"
+                            )}
+                          </td>
+                          <td className="px-6 py-4 text-right font-medium tabular-nums">
+                             {isEditMode ? (
+                                <input
+                                type="number"
+                                value={isIndividualEdit && editDraft ? editDraft.effective_unit_price : row.effective_unit_price}
+                                onChange={(e) =>
+                                    isIndividualEdit && editDraft
+                                    ? setEditDraft((d) => (d ? { ...d, effective_unit_price: Number(e.target.value) } : d))
+                                    : updateRowField(row.id, "effective_unit_price", Number(e.target.value))
+                                }
+                                className={`${inputClass} h-9 text-right`}
+                                />
+                             ) : (
+                                row.effective_unit_price > 0 ? Math.round(row.effective_unit_price).toLocaleString() + " 円" : "—"
+                             )}
+                          </td>
                           <td className="px-6 py-4 text-slate-600">{row.condition_type === "new" ? "新品" : row.condition_type === "used" ? "中古" : row.condition_type ?? "—"}</td>
                           <td className="px-6 py-4 text-center">
                             {isIndividualEdit ? (
@@ -464,22 +604,24 @@ export default function HistoryPage() {
             )}
 
             {!loading && !error && rows.length > 0 && isBulkEditing && (
-              <div className="flex flex-wrap items-center gap-3 pt-4 mt-4 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={saveBulkEdit}
-                  disabled={saving}
-                  className={`${buttonClass} bg-primary text-white hover:bg-primary/90`}
-                >
-                  {saving ? "保存中..." : "保存"}
-                </button>
-                <button
-                  type="button"
-                  onClick={cancelBulkEdit}
-                  className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300`}
-                >
-                  解除
-                </button>
+              <div className="flex items-center gap-3 pt-4 mt-4 border-t border-slate-100">
+                <div className="ml-auto flex items-center gap-3">
+                    <button
+                        type="button"
+                        onClick={saveBulkEdit}
+                        disabled={saving}
+                        className={`${buttonClass} bg-primary text-white hover:bg-primary/90`}
+                    >
+                        {saving ? "保存中..." : "保存"}
+                    </button>
+                    <button
+                        type="button"
+                        onClick={cancelBulkEdit}
+                        className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300`}
+                    >
+                        解除
+                    </button>
+                </div>
               </div>
             )}
           </div>

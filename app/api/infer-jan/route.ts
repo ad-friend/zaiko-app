@@ -49,13 +49,32 @@ export async function PATCH(request: NextRequest) {
         if (item.brand !== undefined) update.brand = item.brand;
         if (item.product_name !== undefined) update.product_name = item.product_name;
         if (item.model_number !== undefined) update.model_number = item.model_number;
+        if (item.base_price !== undefined) update.base_price = item.base_price;
+        if (item.effective_unit_price !== undefined) update.effective_unit_price = item.effective_unit_price;
         if (item.created_at !== undefined) update.created_at = item.created_at;
-        if (Object.keys(update).length === 0) continue;
-        const { error } = await supabase
-          .from("inbound_items")
-          .update(update)
-          .eq("id", id);
-        if (error) throw error;
+
+        // inbound_items の更新
+        if (Object.keys(update).length > 0) {
+          const { error } = await supabase
+            .from("inbound_items")
+            .update(update)
+            .eq("id", id);
+          if (error) throw error;
+        }
+
+        // header情報の更新 (supplier, genre)
+        if (item.supplier !== undefined || item.genre !== undefined) {
+           // item.id から header_id を取得
+           const { data: currentItem } = await supabase.from("inbound_items").select("header_id").eq("id", id).single();
+           if (currentItem?.header_id) {
+             const headerUpdate: Record<string, unknown> = {};
+             if (item.supplier !== undefined) headerUpdate.supplier = item.supplier;
+             if (item.genre !== undefined) headerUpdate.genre = item.genre;
+             if (Object.keys(headerUpdate).length > 0) {
+               await supabase.from("inbound_headers").update(headerUpdate).eq("id", currentItem.header_id);
+             }
+           }
+        }
       }
       return NextResponse.json({ ok: true });
     }
@@ -67,14 +86,32 @@ export async function PATCH(request: NextRequest) {
     if (body.brand !== undefined) update.brand = body.brand;
     if (body.product_name !== undefined) update.product_name = body.product_name;
     if (body.model_number !== undefined) update.model_number = body.model_number;
+    if (body.base_price !== undefined) update.base_price = body.base_price;
+    if (body.effective_unit_price !== undefined) update.effective_unit_price = body.effective_unit_price;
     if (body.created_at !== undefined) update.created_at = body.created_at;
-    if (Object.keys(update).length === 0) return NextResponse.json({ error: "更新項目がありません" }, { status: 400 });
 
-    const { error } = await supabase
-      .from("inbound_items")
-      .update(update)
-      .eq("id", id);
-    if (error) throw error;
+    if (Object.keys(update).length > 0) {
+        const { error } = await supabase
+        .from("inbound_items")
+        .update(update)
+        .eq("id", id);
+        if (error) throw error;
+    }
+
+    // header情報の更新 (supplier, genre)
+    if (body.supplier !== undefined || body.genre !== undefined) {
+        // item.id から header_id を取得
+        const { data: currentItem } = await supabase.from("inbound_items").select("header_id").eq("id", id).single();
+        if (currentItem?.header_id) {
+            const headerUpdate: Record<string, unknown> = {};
+            if (body.supplier !== undefined) headerUpdate.supplier = body.supplier;
+            if (body.genre !== undefined) headerUpdate.genre = body.genre;
+            if (Object.keys(headerUpdate).length > 0) {
+            await supabase.from("inbound_headers").update(headerUpdate).eq("id", currentItem.header_id);
+            }
+        }
+    }
+    
     return NextResponse.json({ ok: true });
   } catch (e: any) {
     return NextResponse.json({ error: e.message }, { status: 500 });
