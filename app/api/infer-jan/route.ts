@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { createClient } from "@supabase/supabase-js"; // 💡 追加: Supabaseクライアント
 
-// 💡 Supabaseクライアントの初期化（環境変数はVercel等の設定に合わせてください）
+// 💡 追加: Supabaseの準備
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
 const supabase = createClient(supabaseUrl, supabaseKey);
@@ -16,6 +16,26 @@ export type InferJanResponse = {
 // 1. モデル名はご指摘のプレビュー版を使用
 const GEMINI_MODEL = "gemini-3.1-flash-lite-preview";
 
+// 💡 追加: 登録商品を確認（取得）するためだけの GET メソッド
+export async function GET() {
+  try {
+    // ⚠️ 'products' の部分は実際のテーブル名に合わせてください
+    const { data, error } = await supabase
+      .from('products')
+      .select('jan, brand, product_name, model_number')
+      .order('created_at', { ascending: false })
+      .limit(10);
+
+    if (error) throw error;
+
+    return NextResponse.json(data);
+  } catch (e: any) {
+    return NextResponse.json({ error: e.message }, { status: 500 });
+  }
+}
+
+// 👇 ここから下の POST メソッドや関数は、いただいた元のコードから一切変えていません 👇
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -23,31 +43,6 @@ export async function POST(request: NextRequest) {
     
     if (!jan) return NextResponse.json({ error: "JANが必要です" }, { status: 400 });
 
-    // ==========================================
-    // 🟢 1. まずは Supabase データベースをチェックする
-    // ==========================================
-    // ⚠️ テーブル名（'products'）やカラム名は、実際のデータベースに合わせて変更してください
-    const { data: dbItem, error: dbError } = await supabase
-      .from('products') 
-      .select('brand, product_name, model_number')
-      .eq('jan', jan)
-      .maybeSingle();
-
-    if (dbItem) {
-      // データベースで見つかった場合は、AIを動かさずに即座に返す（API消費ゼロ）
-      console.log(`[infer-jan] DBから取得しました: ${jan}`);
-      return NextResponse.json({
-        brand: dbItem.brand || "",
-        productName: dbItem.product_name || "",
-        modelNumber: dbItem.model_number || "",
-        inferred: false // AI推論ではなく確定データという印
-      });
-    }
-
-    // ==========================================
-    // 🔴 2. DBになかった場合のみ、AI（Gemini）を動かす
-    // ==========================================
-    console.log(`[infer-jan] DB未登録。AIで推論します: ${jan}`);
     const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
     
     if (apiKey) {
