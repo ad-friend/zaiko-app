@@ -7,40 +7,42 @@ export type InferJanResponse = {
   inferred: boolean;
 };
 
-const GEMINI_MODEL = "gemini-2.5-flash";
+// 1. モデル名のみ変更（ご指摘のプレビュー版ID）
+const GEMINI_MODEL = "gemini-3.1-flash-lite-preview";
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const jan = String(body.jan ?? "").trim().replace(/\D/g, "");
     
-    if (!jan) {
-      return NextResponse.json({ error: "JANコードを指定してください" }, { status: 400 });
-    }
+    if (!jan) return NextResponse.json({ error: "JANが必要です" }, { status: 400 });
 
     const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
     
-    // AIで推論（APIキーがある場合）
     if (apiKey) {
       try {
         const result = await inferWithGemini(jan, apiKey);
         return NextResponse.json(result);
-      } catch (geminiError) {
+      } catch (geminiError: any) {
         console.error("[infer-jan] Gemini Error:", geminiError);
+        // エラー内容を画面で確認できるように戻します
+        return NextResponse.json({
+          ...inferHeuristic(jan),
+          brand: "❌ AIエラー",
+          productName: `理由: ${geminiError.message}`
+        });
       }
     }
 
-    // AIがダメな場合、またはキーがない場合は元の詳しい推論ロジックを使用
     return NextResponse.json(inferHeuristic(jan));
-
-  } catch (e) {
-    console.error("[infer-jan] Fatal Error:", e);
-    return NextResponse.json({ error: "エラーが発生しました" }, { status: 500 });
+  } catch (e: any) {
+    return NextResponse.json({ error: e.message }, { status: 500 });
   }
 }
 
 async function inferWithGemini(jan: string, apiKey: string): Promise<InferJanResponse> {
-  const url = `https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  // 2. 通信先のみ変更（プレビュー版モデルを叩くためのbetaエンドポイント）
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
   
   const res = await fetch(url, {
     method: "POST",
@@ -54,16 +56,20 @@ async function inferWithGemini(jan: string, apiKey: string): Promise<InferJanRes
           {"brand":"ブランド名","product_name":"商品名","model_number":"型番"}`
         }]
       }],
+      // 2.5で動いていた時と同じ設定
       generationConfig: { max_output_tokens: 512, temperature: 0.1 }
     }),
   });
 
-  if (!res.ok) throw new Error(`API Error: ${res.status}`);
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Google API (${res.status}): ${errText.slice(0, 100)}`);
+  }
 
   const data = await res.json();
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
   
-  // 修正ポイント：エラーの原因だった /s フラグを [\\s\\S] に変更（古いバージョンでも動く書き方）
+  // 正規表現もビルドエラーが出ない安全な書き方のまま
   const match = text.match(/\{[\s\S]*\}/);
   const parsed = match ? JSON.parse(match[0]) : {};
 
@@ -71,38 +77,6 @@ async function inferWithGemini(jan: string, apiKey: string): Promise<InferJanRes
     brand: sanitizeProductText(parsed.brand ?? ""),
     productName: sanitizeProductText(parsed.product_name ?? ""),
     modelNumber: sanitizeProductText(parsed.model_number ?? ""),
-    inferred: true,
-  };
-}
-
-function sanitizeProductText(s: string): string {
-  return String(s).replace(/\d{13,}/g, "").replace(/\s+/g, " ").trim();
-}
-
-// あなたが以前使っていた、詳しい推論ロジックを復活させました
-function inferHeuristic(jan: string): InferJanResponse {
-  const digits = jan.replace(/\D/g, "");
-  const len = digits.length;
-  let brand = "（推論）不明ブランド";
-  let productName = "";
-  let modelNumber = "";
-
-  if (len >= 8) {
-    const suffix = digits.slice(-6);
-    modelNumber = `JAN-${suffix}`;
-    productName = `商品 ${suffix}`;
-    // 日本のコード体系に基づいた推論
-    if (digits.startsWith("45") || digits.startsWith("49")) {
-      brand = "（推論）国産品";
-    } else if (digits.startsWith("4")) {
-      brand = "（推論）日本向け";
-    }
-  }
-
-  return {
-    brand,
-    productName: productName || "（JANから推論）",
-    modelNumber: modelNumber || jan.slice(-8),
     inferred: true,
   };
 }
