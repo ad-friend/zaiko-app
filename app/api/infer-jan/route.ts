@@ -18,6 +18,32 @@ export type InferJanResponse = {
 // 1. モデル名はご指摘のプレビュー版を使用
 const GEMINI_MODEL = "gemini-3.1-flash-lite-preview";
 
+const RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 16000];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWith503Retry(
+  url: string,
+  options: RequestInit,
+  maxRetries = 5
+): Promise<Response> {
+  let lastRes: Response | null = null;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const res = await fetch(url, options);
+    lastRes = res;
+    if (res.status === 503 && attempt < maxRetries - 1) {
+      const delay = RETRY_DELAYS_MS[attempt] ?? 16000;
+      console.log(`🤖 Gemini 503 → ${delay / 1000}s 後にリトライ (${attempt + 1}/${maxRetries})`);
+      await sleep(delay);
+      continue;
+    }
+    return res;
+  }
+  return lastRes!;
+}
+
 // 💡 追加: 登録商品を確認（取得）するためだけの GET メソッド
 export async function GET() {
   try {
@@ -134,19 +160,22 @@ export async function POST(request: NextRequest) {
 
     const dbOnly = body.dbOnly === true;
 
-    // Step 1: 自社DB (inbound_items) で JAN 検索（テーブル名・カラム名は手動修正済みのまま維持）
+    // Step 1: 自社DB (inbound_items) で JAN 検索（同一JAN複数時は最新1件のみ取得）
     if (supabaseUrl && supabaseKey) {
       try {
         console.log("📡 Step 1: Supabase (inbound_itemsテーブル) 検索中...");
-        const { data: product, error } = await supabase
+        const { data: rows, error } = await supabase
           .from("inbound_items")
           .select("jan_code, brand, product_name, model_number")
           .eq("jan_code", jan)
-          .maybeSingle();
+          .order("created_at", { ascending: false })
+          .limit(1);
 
         if (error) {
           console.log("❌ DBエラー発生:", error.message);
-        } else if (product) {
+        } else {
+          const product = rows?.[0] ?? null;
+          if (product) {
           console.log("✅ DBヒット成功! 登録情報を引用します:", product.product_name);
           if (dbOnly) {
             console.log("✅ [dbOnly] DBで解決したため、AIは起動しません。");
@@ -158,7 +187,7 @@ export async function POST(request: NextRequest) {
             inferred: false,
             source: "db",
           });
-        } else {
+          }
           console.log("⚠️ DBには登録されていませんでした。外部APIへ移行します。");
         }
       } catch (dbErr) {
@@ -261,7 +290,7 @@ export async function POST(request: NextRequest) {
 async function inferWithGemini(jan: string, apiKey: string): Promise<InferJanResponse> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
   
-  const res = await fetch(url, {
+  const res = await fetchWith503Retry(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -302,7 +331,7 @@ async function inferWithGeminiFromApiBuffer(
   apiKey: string
 ): Promise<InferJanResponse> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
-  const res = await fetch(url, {
+  const res = await fetchWith503Retry(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

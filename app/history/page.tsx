@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Pencil, Save, X, ChevronLeft } from "lucide-react";
+import { Pencil, Save, X, ChevronLeft, Download, Upload } from "lucide-react";
 
 type RecordRow = {
   id: number;
@@ -67,6 +67,7 @@ export default function HistoryPage() {
   const [bulkSnapshot, setBulkSnapshot] = useState<RecordRow[] | null>(null);
   const [bulkAction, setBulkAction] = useState<string>("bulk_delete");
   const [saving, setSaving] = useState(false);
+  const csvInputRef = useRef<HTMLInputElement>(null);
 
   const fetchRecords = useCallback(async () => {
     try {
@@ -281,6 +282,136 @@ export default function HistoryPage() {
     }
   }, [bulkAction, selectedIds, fetchRecords]);
 
+  const escapeCsv = (v: string | number | null | undefined): string => {
+    const s = String(v ?? "");
+    if (s.includes(",") || s.includes('"') || s.includes("\n")) return `"${s.replace(/"/g, '""')}"`;
+    return s;
+  };
+
+  const handleCsvExport = useCallback(() => {
+    const header = "id,jan_code,brand,product_name,model_number,supplier,genre,base_price,effective_unit_price,created_at";
+    const lines = rows.map((r) =>
+      [
+        r.id,
+        r.jan_code ?? "",
+        r.brand ?? "",
+        r.product_name ?? "",
+        r.model_number ?? "",
+        r.header?.supplier ?? "",
+        r.header?.genre ?? "",
+        r.base_price,
+        r.effective_unit_price,
+        r.created_at ?? "",
+      ].map(escapeCsv).join(",")
+    );
+    const csv = [header, ...lines].join("\r\n");
+    const bom = "\uFEFF";
+    const blob = new Blob([bom + csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `inventory_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [rows]);
+
+  const parseCsvLine = (line: string): string[] => {
+    const result: string[] = [];
+    let i = 0;
+    while (i < line.length) {
+      if (line[i] === '"') {
+        i++;
+        let s = "";
+        while (i < line.length) {
+          if (line[i] === '"') {
+            i++;
+            if (line[i] === '"') {
+              s += '"';
+              i++;
+            } else break;
+          } else s += line[i++];
+        }
+        result.push(s);
+        if (line[i] === ",") i++;
+      } else {
+        let s = "";
+        while (i < line.length && line[i] !== ",") s += line[i++];
+        result.push(s.trim());
+        i++;
+      }
+    }
+    return result;
+  };
+
+  const handleCsvImport = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      e.target.value = "";
+      if (!file) return;
+      setSaving(true);
+      try {
+        const text = await file.text();
+        const rawLines = text.split(/\r?\n/).filter((line) => line.trim());
+        if (rawLines.length < 2) {
+          alert("CSVにデータ行がありません");
+          return;
+        }
+        const headers = parseCsvLine(rawLines[0]).map((h) => h.toLowerCase().trim());
+        const idIdx = headers.findIndex((h) => h === "id");
+        const get = (arr: string[], key: string) => {
+          const i = headers.findIndex((h) => h === key);
+          return i >= 0 ? arr[i] ?? "" : "";
+        };
+        const items: Array<{
+          id: number;
+          brand?: string;
+          product_name?: string;
+          model_number?: string;
+          supplier?: string;
+          genre?: string;
+          base_price?: number;
+          effective_unit_price?: number;
+          created_at?: string;
+        }> = [];
+        for (let i = 1; i < rawLines.length; i++) {
+          const cells = parseCsvLine(rawLines[i]);
+          const id = idIdx >= 0 ? Number(cells[idIdx]) : NaN;
+          if (!Number.isFinite(id)) continue;
+          const bp = get(cells, "base_price");
+          const ep = get(cells, "effective_unit_price");
+          items.push({
+            id,
+            brand: get(cells, "brand") || undefined,
+            product_name: get(cells, "product_name") || undefined,
+            model_number: get(cells, "model_number") || undefined,
+            supplier: get(cells, "supplier") || undefined,
+            genre: get(cells, "genre") || undefined,
+            base_price: bp === "" ? undefined : Number(bp),
+            effective_unit_price: ep === "" ? undefined : Number(ep),
+            created_at: get(cells, "created_at") || undefined,
+          });
+        }
+        if (items.length === 0) {
+          alert("更新対象の行（id が数値の行）がありません");
+          return;
+        }
+        const res = await fetch("/api/infer-jan", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items }),
+        });
+        if (!res.ok) throw new Error("CSV取込に失敗しました");
+        await fetchRecords();
+        alert(`${items.length} 件を更新しました`);
+      } catch (err) {
+        alert(err instanceof Error ? err.message : "CSV取込に失敗しました");
+      } finally {
+        setSaving(false);
+      }
+    },
+    [fetchRecords]
+  );
+
   return (
     <div className="flex min-h-screen flex-col bg-slate-50 font-sans text-slate-900">
       <header className="sticky top-0 z-30 w-full border-b bg-white/80 backdrop-blur-md shadow-sm">
@@ -346,8 +477,32 @@ export default function HistoryPage() {
                     </button>
                   </div>
                   
-                  {/* 右側：一括編集ボタン */}
-                  <div className="ml-auto">
+                  {/* 右側：CSV出力・取込、一括編集 */}
+                  <div className="ml-auto flex items-center gap-3">
+                    <input
+                      type="file"
+                      accept=".csv"
+                      ref={csvInputRef}
+                      className="hidden"
+                      onChange={handleCsvImport}
+                    />
+                    <button
+                      type="button"
+                      onClick={handleCsvExport}
+                      className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300`}
+                    >
+                      <Download className="mr-2 h-4 w-4" />
+                      CSV出力（Download）
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => csvInputRef.current?.click()}
+                      disabled={saving}
+                      className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300 disabled:opacity-50`}
+                    >
+                      <Upload className="mr-2 h-4 w-4" />
+                      CSV取込（Upload）
+                    </button>
                     <button
                         type="button"
                         onClick={startBulkEdit}
