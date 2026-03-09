@@ -346,7 +346,7 @@ async function fetchYahooShopping(jan: string): Promise<string | null> {
     const hits = data.hits;
     if (!Array.isArray(hits) || hits.length === 0) return null;
     const parts: string[] = [];
-    for (const h of hits.slice(0, 2)) {
+    for (const h of hits.slice(0, 5)) {
       if (h.name) parts.push(`商品名: ${h.name}`);
       if (h.brand?.name) parts.push(`ブランド: ${h.brand.name}`);
     }
