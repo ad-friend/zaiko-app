@@ -7,7 +7,7 @@ export type InferJanResponse = {
   inferred: boolean;
 };
 
-// 1分間の利用枠に余裕がある 3.1 Flash Lite を指定
+// 1分間のリクエスト制限に強い 3.1 Flash Lite を指定
 const GEMINI_MODEL = "gemini-3.1-flash-lite";
 
 export async function POST(request: NextRequest) {
@@ -27,10 +27,10 @@ export async function POST(request: NextRequest) {
         return NextResponse.json(result);
       } catch (geminiError) {
         console.error("[infer-jan] Gemini Error:", geminiError);
-        // AIが失敗した時のみバックアップを動かす
       }
     }
 
+    // AIが制限(429)などで失敗した場合は、独自の推論ロジックを返却
     return NextResponse.json(inferHeuristic(jan));
 
   } catch (e) {
@@ -64,7 +64,7 @@ async function inferWithGemini(jan: string, apiKey: string): Promise<InferJanRes
   const data = await res.json();
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
   
-  // ビルドエラーを回避するための正規表現
+  // ビルドエラー回避のため、古い環境でも動く正規表現を使用
   const match = text.match(/\{[\s\S]*\}/);
   const parsed = match ? JSON.parse(match[0]) : {};
 
@@ -80,6 +80,7 @@ function inferHeuristic(jan: string): InferJanResponse {
   const digits = jan.replace(/\D/g, "");
   let brand = "（推論）不明ブランド";
   
+  // 国産品などの簡易判定ロジック
   if (digits.startsWith("45") || digits.startsWith("49")) {
     brand = "（推論）国産品";
   } else if (digits.startsWith("4")) {
