@@ -398,12 +398,21 @@ export default function InboundPage() {
     }
   }, []);
 
+  // ===== ここからコピー =====
+  // カメラ起動中に商品リストが更新されてもエラーにならないようにする「裏ルート」
+  const handleJanRef = useRef(handleJanBlurOrEnter);
+  useEffect(() => {
+    handleJanRef.current = handleJanBlurOrEnter;
+  }, [handleJanBlurOrEnter]);
+
   useEffect(() => {
     if (!cameraOpen) return;
     const el = document.getElementById("barcode-reader");
     if (!el) return;
+    
     const html5Qr = new Html5Qrcode("barcode-reader");
     scannerRef.current = html5Qr;
+    
     html5Qr
       .start(
         { facingMode: "environment" },
@@ -411,8 +420,11 @@ export default function InboundPage() {
         (decodedText) => {
           const trimmed = decodedText.trim();
           if (trimmed.length >= 8) {
-            handleJanBlurOrEnter(trimmed);
-            closeCamera();
+            // スキャン成功後、0.1秒だけ待ってから処理を実行（衝突防止の特効薬）
+            setTimeout(() => {
+              handleJanRef.current(trimmed);
+              closeCamera();
+            }, 100);
           }
         },
         () => {}
@@ -422,12 +434,18 @@ export default function InboundPage() {
         console.error(err);
         setScannerReady(false);
       });
+      
     return () => {
-      html5Qr.stop().catch(() => {});
-      html5Qr.clear();
-      scannerRef.current = null;
+      if (scannerRef.current) {
+        scannerRef.current.stop().then(() => {
+          scannerRef.current?.clear();
+          scannerRef.current = null;
+        }).catch(() => {});
+      }
     };
-  }, [cameraOpen, closeCamera, handleJanBlurOrEnter]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameraOpen, closeCamera]);
+  // ===== ここまでコピー =====
 
   // 集計値
   const totalCost = totalNum + shippingNum - discountNum;
