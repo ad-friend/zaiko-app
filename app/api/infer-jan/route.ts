@@ -7,7 +7,6 @@ export type InferJanResponse = {
   inferred: boolean;
 };
 
-// 1分間のリクエスト制限に強い 3.1 Flash Lite を指定
 const GEMINI_MODEL = "gemini-2.5-flash";
 
 export async function POST(request: NextRequest) {
@@ -21,6 +20,7 @@ export async function POST(request: NextRequest) {
 
     const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
     
+    // AIで推論（APIキーがある場合）
     if (apiKey) {
       try {
         const result = await inferWithGemini(jan, apiKey);
@@ -30,7 +30,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // AIが制限(429)などで失敗した場合は、独自の推論ロジックを返却
+    // AIがダメな場合、またはキーがない場合は元の詳しい推論ロジックを使用
     return NextResponse.json(inferHeuristic(jan));
 
   } catch (e) {
@@ -48,14 +48,13 @@ async function inferWithGemini(jan: string, apiKey: string): Promise<InferJanRes
     body: JSON.stringify({
       contents: [{
         parts: [{
-          text: `JANコード「${jan}」の商品情報を特定し、以下のJSON形式のみで回答してください。解説は不要です。
-          {"brand": "ブランド名", "product_name": "商品名", "model_number": "型番"}`
+          text: `あなたはJANコードから商品情報を特定する専門家です。
+          JANコード「${jan}」のブランド名、正確な商品名、型番を特定してください。
+          必ず以下のJSON形式のみで回答し、余計な説明は含めないでください。
+          {"brand":"ブランド名","product_name":"商品名","model_number":"型番"}`
         }]
       }],
-      generationConfig: {
-        max_output_tokens: 512,
-        temperature: 0.1
-      }
+      generationConfig: { max_output_tokens: 512, temperature: 0.1 }
     }),
   });
 
@@ -64,33 +63,46 @@ async function inferWithGemini(jan: string, apiKey: string): Promise<InferJanRes
   const data = await res.json();
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
   
-  // ビルドエラー回避のため、古い環境でも動く正規表現を使用
+  // 修正ポイント：エラーの原因だった /s フラグを [\\s\\S] に変更（古いバージョンでも動く書き方）
   const match = text.match(/\{[\s\S]*\}/);
   const parsed = match ? JSON.parse(match[0]) : {};
 
   return {
-    brand: String(parsed.brand ?? "").trim(),
-    productName: String(parsed.product_name ?? "").trim(),
-    modelNumber: String(parsed.model_number ?? "").trim(),
+    brand: sanitizeProductText(parsed.brand ?? ""),
+    productName: sanitizeProductText(parsed.product_name ?? ""),
+    modelNumber: sanitizeProductText(parsed.model_number ?? ""),
     inferred: true,
   };
 }
 
+function sanitizeProductText(s: string): string {
+  return String(s).replace(/\d{13,}/g, "").replace(/\s+/g, " ").trim();
+}
+
+// あなたが以前使っていた、詳しい推論ロジックを復活させました
 function inferHeuristic(jan: string): InferJanResponse {
   const digits = jan.replace(/\D/g, "");
+  const len = digits.length;
   let brand = "（推論）不明ブランド";
-  
-  // 国産品などの簡易判定ロジック
-  if (digits.startsWith("45") || digits.startsWith("49")) {
-    brand = "（推論）国産品";
-  } else if (digits.startsWith("4")) {
-    brand = "（推論）日本向け";
+  let productName = "";
+  let modelNumber = "";
+
+  if (len >= 8) {
+    const suffix = digits.slice(-6);
+    modelNumber = `JAN-${suffix}`;
+    productName = `商品 ${suffix}`;
+    // 日本のコード体系に基づいた推論
+    if (digits.startsWith("45") || digits.startsWith("49")) {
+      brand = "（推論）国産品";
+    } else if (digits.startsWith("4")) {
+      brand = "（推論）日本向け";
+    }
   }
 
   return {
     brand,
-    productName: `商品 ${digits.slice(-6)}`,
-    modelNumber: `JAN-${digits.slice(-6)}`,
+    productName: productName || "（JANから推論）",
+    modelNumber: modelNumber || jan.slice(-8),
     inferred: true,
   };
 }
