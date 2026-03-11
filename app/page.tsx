@@ -31,6 +31,8 @@ type HeaderInfo = {
 type ValidationError = {
   fixedTotalExceedsPurchase?: boolean;
   missingFields?: string[];
+  /** 按分を1件でも使っているのに仕入総額が未入力 */
+  purchaseRequiredWhenDistribute?: boolean;
 };
 
 // 商品名からJAN（13桁以上の数字）を除去し、純粋な名称のみにする
@@ -98,20 +100,24 @@ function calcEffectiveUnitPrice(
 function validate(
   totalPurchase: number,
   headerInfo: HeaderInfo,
-  rows: ProductRow[]
+  rows: ProductRow[],
+  totalPurchaseRaw: string
 ): ValidationError {
   const err: ValidationError = {};
-  const totalCost = totalPurchase + headerInfo.shipping - headerInfo.discount;
-  
-  // バリデーションもロジック変更に合わせて修正
-  // チェックなし商品の合計が仕入総額を超えていないかチェック
+  const hasAnyDistribute = rows.some((r) => r.fixedUnitPrice);
+  const totalPurchaseEmpty = totalPurchaseRaw.trim() === "";
+
+  // 按分を1件でも使っている場合は仕入総額必須
+  if (hasAnyDistribute && totalPurchaseEmpty) {
+    err.purchaseRequiredWhenDistribute = true;
+  }
+
+  // チェックなし商品の合計が仕入総額を超えていないかチェック（按分利用時のみ totalPurchase を比較に使う）
   const fixedTotal = rows
     .filter((r) => !r.fixedUnitPrice)
     .reduce((sum, r) => sum + r.basePrice * r.quantity, 0);
 
-  // 送料・割引を含めた総コストと比較するか、仕入総額単体と比較するかは要件次第だが、
-  // ここでは「固定費が仕入総額を超えたらおかしい（按分原資がない）」としてチェック
-  if (fixedTotal > totalPurchase) {
+  if (hasAnyDistribute && fixedTotal > totalPurchase) {
     err.fixedTotalExceedsPurchase = true;
   }
   const missing: string[] = [];
@@ -163,7 +169,7 @@ export default function InboundPage() {
     discount: discountNum
   };
 
-  const validation = validate(totalNum, headerInfo, rows);
+  const validation = validate(totalNum, headerInfo, rows, totalPurchase);
 
   // マウント時に仕入先リストを取得
   useEffect(() => {
@@ -349,6 +355,11 @@ export default function InboundPage() {
 
   // 登録処理（MySQLへの保存）
   const handleRegister = useCallback(async () => {
+    const hasAnyDistribute = rows.some((r) => r.fixedUnitPrice);
+    if (hasAnyDistribute && totalPurchase.trim() === "") {
+      alert("按分を使用しているため、仕入総額の入力が必要です。");
+      return;
+    }
     if (!confirm("入力内容をデータベースに保存しますか？")) return;
 
     setIsSubmitting(true);
@@ -400,7 +411,7 @@ export default function InboundPage() {
     } finally {
         setIsSubmitting(false);
     }
-  }, [headerInfo, rows, totalNum, shippingNum, discountNum, purchaseDate, supplier, genre]);
+  }, [headerInfo, rows, totalNum, shippingNum, discountNum, purchaseDate, supplier, genre, totalPurchase]);
 
   const openCamera = useCallback(() => {
     setCameraOpen(true);
@@ -661,7 +672,12 @@ export default function InboundPage() {
                     <button
                       type="button"
                       onClick={handleRegister}
-                      disabled={rows.length === 0 || totalNum <= 0 || isSubmitting}
+                      disabled={
+                        rows.length === 0 ||
+                        isSubmitting ||
+                        (rows.some((r) => r.fixedUnitPrice) &&
+                          (totalPurchase.trim() === "" || totalNum <= 0))
+                      }
                       className={`${buttonClass} w-full bg-primary text-white hover:bg-primary/90 shadow-lg shadow-primary/20 h-12 text-base font-bold tracking-wide transition-all disabled:grayscale disabled:opacity-70`}
                     >
                       {isSubmitting ? (
@@ -681,13 +697,16 @@ export default function InboundPage() {
               </div>
 
               {/* エラーメッセージ */}
-              {(validation.fixedTotalExceedsPurchase || (validation.missingFields?.length ?? 0) > 0) && (
+              {(validation.fixedTotalExceedsPurchase || validation.purchaseRequiredWhenDistribute || (validation.missingFields?.length ?? 0) > 0) && (
                 <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800 shadow-sm animate-in fade-in slide-in-from-top-2">
                   <div className="flex items-start gap-3">
                     <AlertCircleIcon className="h-5 w-5 shrink-0 text-red-600 mt-0.5" />
                     <div className="space-y-1">
                       <h4 className="font-semibold text-red-900">入力内容を確認してください</h4>
                       <ul className="list-disc list-inside text-red-700 opacity-90 text-xs leading-relaxed">
+                        {validation.purchaseRequiredWhenDistribute && (
+                          <li>按分を使用している場合は仕入総額を入力してください</li>
+                        )}
                         {validation.fixedTotalExceedsPurchase && (
                           <li>固定商品の合計が仕入総額を超過しています（按分原資が不足）</li>
                         )}
@@ -784,7 +803,7 @@ export default function InboundPage() {
                     <thead className="bg-slate-50/80 border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold tracking-wider">
                       <tr>
                         <th className="px-6 py-4 w-[140px]">JAN / 状態</th>
-                        <th className="px-6 py-4 min-w-[200px]">商品情報</th>
+                        <th className="px-6 py-4 min-w-[300px]">商品情報</th>
                         <th className="px-6 py-4 w-[100px] text-right">数量</th>
                         <th className="px-6 py-4 w-[130px] text-right">基準価格</th>
                         {/* チェックボックスのラベルを変更 */}
@@ -842,24 +861,24 @@ export default function InboundPage() {
                                 </select>
                               </div>
                             </td>
-                            <td className="px-6 py-4 align-top space-y-3">
+                            <td className="px-6 py-4 align-top space-y-3 min-w-[300px]">
                                <input
                                  value={row.productName}
                                  onChange={(e) => updateRow(row.id, { productName: e.target.value })}
-                                 className={`${inputClass} font-medium h-10 shadow-sm`}
+                                 className={`${inputClass} font-medium h-10 shadow-sm w-full`}
                                  placeholder="商品名"
                                />
                                <div className="flex gap-3">
                                  <input
                                    value={row.brand}
                                    onChange={(e) => updateRow(row.id, { brand: e.target.value })}
-                                   className={`${inputClass} text-xs h-9 bg-white/50 shadow-sm`}
+                                   className={`${inputClass} text-xs h-9 bg-white/50 shadow-sm flex-1 min-w-0`}
                                    placeholder="ブランド"
                                  />
                                  <input
                                    value={row.modelNumber}
                                    onChange={(e) => updateRow(row.id, { modelNumber: e.target.value })}
-                                   className={`${inputClass} text-xs h-9 bg-white/50 shadow-sm`}
+                                   className={`${inputClass} text-xs h-9 bg-white/50 shadow-sm flex-[2] min-w-0`}
                                    placeholder="型番"
                                  />
                                </div>

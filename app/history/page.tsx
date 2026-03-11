@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Pencil, Save, X, ChevronLeft, Download, Upload } from "lucide-react";
+import { Pencil, Save, X, ChevronLeft, Download, Upload, Search, ArrowUp, ArrowDown, ArrowUpDown, Calendar } from "lucide-react";
 
 type RecordRow = {
   id: number;
@@ -69,6 +69,9 @@ export default function HistoryPage() {
   const [saving, setSaving] = useState(false);
   const csvInputRef = useRef<HTMLInputElement>(null);
 
+  const [searchTerm, setSearchTerm] = useState("");
+  const [sortConfig, setSortConfig] = useState<{ key: string | null; direction: "asc" | "desc" }>({ key: null, direction: "asc" });
+
   const fetchRecords = useCallback(async () => {
     try {
       const res = await fetch("/api/records");
@@ -86,6 +89,71 @@ export default function HistoryPage() {
     fetchRecords();
   }, [fetchRecords]);
 
+  const requestSort = (key: string) => {
+    setSortConfig((prev) => {
+      if (prev.key !== key) return { key, direction: "asc" };
+      if (prev.direction === "asc") return { key, direction: "desc" };
+      return { key: null, direction: "asc" };
+    });
+  };
+
+  const getSortValue = (row: RecordRow, key: string): string | number => {
+    switch (key) {
+      case "created_at":
+        return row.created_at ?? row.header?.created_at ?? "";
+      case "supplier":
+        return row.header?.supplier ?? "";
+      case "genre":
+        return row.header?.genre ?? "";
+      case "jan_code":
+        return row.jan_code ?? "";
+      case "product_name":
+        return row.product_name ?? "";
+      case "brand":
+        return row.brand ?? "";
+      case "model_number":
+        return row.model_number ?? "";
+      case "base_price":
+        return row.base_price ?? 0;
+      case "effective_unit_price":
+        return row.effective_unit_price ?? 0;
+      case "condition_type":
+        return row.condition_type ?? "";
+      default:
+        return "";
+    }
+  };
+
+  const processedRows = (() => {
+    let list = rows;
+    const term = searchTerm.trim().toLowerCase();
+    if (term) {
+      list = list.filter(
+        (r) =>
+          (r.jan_code ?? "").toLowerCase().includes(term) ||
+          (r.brand ?? "").toLowerCase().includes(term) ||
+          (r.product_name ?? "").toLowerCase().includes(term) ||
+          (r.model_number ?? "").toLowerCase().includes(term)
+      );
+    }
+    const { key, direction } = sortConfig;
+    if (key) {
+      list = [...list].sort((a, b) => {
+        const va = getSortValue(a, key);
+        const vb = getSortValue(b, key);
+        const isNum = typeof va === "number" && typeof vb === "number";
+        if (isNum) {
+          return direction === "asc" ? (va as number) - (vb as number) : (vb as number) - (va as number);
+        }
+        const sa = String(va);
+        const sb = String(vb);
+        const cmp = sa.localeCompare(sb, "ja");
+        return direction === "asc" ? cmp : -cmp;
+      });
+    }
+    return list;
+  })();
+
   const formatDate = (iso: string) => {
     if (!iso) return "—";
     try {
@@ -97,6 +165,45 @@ export default function HistoryPage() {
   };
 
   const toDateValue = (iso: string) => (iso ? iso.slice(0, 10) : "");
+
+  /** ISO または yyyy-MM-dd を yyyy/mm/dd 表示用に変換 */
+  const isoToSlashed = (iso: string): string => {
+    if (!iso) return "";
+    const d = iso.slice(0, 10).replace(/-/g, "/");
+    return d.length === 10 ? d : "";
+  };
+
+  /** 任意入力を yyyy/mm/dd に正規化（8桁・スラッシュ区切り等） */
+  const normalizeDateToSlashed = (raw: string): string => {
+    const s = (raw ?? "").trim().replace(/-/g, "/").replace(/\s/g, "");
+    if (!s) return "";
+    const digits = s.replace(/\D/g, "");
+    let y = "";
+    let m = "";
+    let d = "";
+    if (digits.length >= 8) {
+      y = digits.slice(0, 4);
+      m = digits.slice(4, 6);
+      d = digits.slice(6, 8);
+    } else {
+      const parts = s.split("/").filter(Boolean);
+      if (parts.length >= 3) {
+        y = parts[0].padStart(4, "0").slice(-4);
+        m = parts[1].padStart(2, "0").slice(-2);
+        d = parts[2].padStart(2, "0").slice(-2);
+      } else return s;
+    }
+    const mi = Math.min(12, Math.max(1, parseInt(m, 10) || 1));
+    const di = Math.min(31, Math.max(1, parseInt(d, 10) || 1));
+    return `${y}/${String(mi).padStart(2, "0")}/${String(di).padStart(2, "0")}`;
+  };
+
+  /** yyyy/mm/dd または yyyy-MM-dd を API 用 ISO 日付先頭に */
+  const slashedToIsoDate = (slashed: string): string => {
+    const n = normalizeDateToSlashed(slashed);
+    if (!n || n.length < 10) return "";
+    return n.replace(/\//g, "-");
+  };
 
   const toggleSelect = (id: number, shiftKey: boolean) => {
     setSelectedIds((prev) => {
@@ -145,7 +252,7 @@ export default function HistoryPage() {
       brand: row.brand ?? "",
       product_name: row.product_name ?? "",
       model_number: row.model_number ?? "",
-      created_at: toDateValue(row.created_at),
+      created_at: isoToSlashed(row.created_at) || normalizeDateToSlashed(toDateValue(row.created_at)),
       supplier: row.header?.supplier ?? "",
       genre: row.header?.genre ?? "",
       base_price: row.base_price,
@@ -162,7 +269,8 @@ export default function HistoryPage() {
     if (editingId == null || !editDraft) return;
     setSaving(true);
     try {
-      const created_at = editDraft.created_at ? `${editDraft.created_at}T00:00:00.000Z` : "";
+      const isoDate = slashedToIsoDate(editDraft.created_at);
+      const created_at = isoDate ? `${isoDate}T00:00:00.000Z` : "";
       const res = await fetch("/api/infer-jan", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -370,7 +478,7 @@ export default function HistoryPage() {
     const createdAt = (row.created_at ?? "").trim();
     const effPrice = (row.effective_unit_price ?? "").trim();
     const status = (row.status ?? "").trim();
-    if (!createdAt) reasons.push("必須A: インポート日付（登録日）が未入力");
+    if (!createdAt) reasons.push("必須A: インポート日付（仕入日）が未入力");
     if (!effPrice) reasons.push("必須A: 実質価格が未入力");
     if (!status) reasons.push("必須A: 状態が未入力");
     const jan = (row.jan_code ?? "").trim();
@@ -417,7 +525,7 @@ export default function HistoryPage() {
           jan_code: ["jan_code", "jan", "janコード"],
           product_name: ["product_name", "商品名"],
           model_number: ["model_number", "型番"],
-          created_at: ["created_at", "登録日", "インポート日付"],
+          created_at: ["created_at", "仕入日", "登録日", "インポート日付"],
           effective_unit_price: ["effective_unit_price", "実質価格", "実質単価"],
           status: ["status", "状態"],
           brand: ["brand", "ブランド"],
@@ -565,6 +673,21 @@ export default function HistoryPage() {
           </div>
 
           {!loading && !error && rows.length > 0 && (
+            <div className="px-6 py-3 border-b border-slate-100 bg-white">
+              <div className="relative rounded-lg border border-slate-200 bg-white shadow-sm focus-within:ring-2 focus-within:ring-primary/20 focus-within:border-primary/40 transition-all max-w-md">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                <input
+                  type="text"
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  placeholder="商品名やJANで検索..."
+                  className={`${inputClass} pl-10 rounded-lg border-0 focus-visible:ring-0`}
+                />
+              </div>
+            </div>
+          )}
+
+          {!loading && !error && rows.length > 0 && (
             <div className="flex flex-wrap items-center gap-3 px-6 py-3 border-b border-slate-100 bg-white">
               {!isBulkEditing ? (
                 <>
@@ -674,21 +797,71 @@ export default function HistoryPage() {
                   <thead className="bg-slate-50/80 border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold tracking-wider">
                     <tr>
                       <th className="px-6 py-4 w-[44px] text-center"></th>
-                      <th className="px-6 py-4">登録日</th>
-                      <th className="px-6 py-4">仕入先</th>
-                      <th className="px-6 py-4">ジャンル</th>
-                      <th className="px-6 py-4 w-[140px]">JAN</th>
-                      <th className="px-6 py-4 min-w-[180px]">商品名</th>
-                      <th className="px-6 py-4">ブランド</th>
-                      <th className="px-6 py-4">型番</th>
-                      <th className="px-6 py-4 text-right">基準価格</th>
-                      <th className="px-6 py-4 text-right">実質単価</th>
-                      <th className="px-6 py-4">状態</th>
+                      <th className="px-6 py-4">
+                        <button type="button" onClick={() => requestSort("created_at")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
+                          仕入日
+                          {sortConfig.key === "created_at" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
+                        </button>
+                      </th>
+                      <th className="px-6 py-4">
+                        <button type="button" onClick={() => requestSort("supplier")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
+                          仕入先
+                          {sortConfig.key === "supplier" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
+                        </button>
+                      </th>
+                      <th className="px-6 py-4">
+                        <button type="button" onClick={() => requestSort("genre")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
+                          ジャンル
+                          {sortConfig.key === "genre" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
+                        </button>
+                      </th>
+                      <th className="px-6 py-4 w-[140px]">
+                        <button type="button" onClick={() => requestSort("jan_code")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
+                          JAN
+                          {sortConfig.key === "jan_code" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
+                        </button>
+                      </th>
+                      <th className="px-6 py-4 min-w-[180px]">
+                        <button type="button" onClick={() => requestSort("product_name")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
+                          商品名
+                          {sortConfig.key === "product_name" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
+                        </button>
+                      </th>
+                      <th className="px-6 py-4">
+                        <button type="button" onClick={() => requestSort("brand")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
+                          ブランド
+                          {sortConfig.key === "brand" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
+                        </button>
+                      </th>
+                      <th className="px-6 py-4">
+                        <button type="button" onClick={() => requestSort("model_number")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
+                          型番
+                          {sortConfig.key === "model_number" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
+                        </button>
+                      </th>
+                      <th className="px-6 py-4 text-right">
+                        <button type="button" onClick={() => requestSort("base_price")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded ml-auto">
+                          基準価格
+                          {sortConfig.key === "base_price" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
+                        </button>
+                      </th>
+                      <th className="px-6 py-4 text-right">
+                        <button type="button" onClick={() => requestSort("effective_unit_price")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded ml-auto">
+                          実質単価
+                          {sortConfig.key === "effective_unit_price" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
+                        </button>
+                      </th>
+                      <th className="px-6 py-4">
+                        <button type="button" onClick={() => requestSort("condition_type")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
+                          状態
+                          {sortConfig.key === "condition_type" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
+                        </button>
+                      </th>
                       <th className="px-6 py-4 w-[100px] text-center">操作</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 bg-white">
-                    {rows.map((row) => {
+                    {processedRows.map((row) => {
                       const isIndividualEdit = editingId === row.id;
                       const isEditMode = isIndividualEdit || isBulkEditing;
                       const displayDate = formatDate(row.header?.created_at ?? row.created_at);
@@ -709,16 +882,61 @@ export default function HistoryPage() {
                           </td>
                           <td className="px-6 py-4 text-slate-600 whitespace-nowrap">
                             {isEditMode ? (
-                              <input
-                                type="date"
-                                value={isIndividualEdit && editDraft ? editDraft.created_at : toDateValue(row.created_at)}
-                                onChange={(e) =>
-                                  isIndividualEdit && editDraft
-                                    ? setEditDraft((d) => (d ? { ...d, created_at: e.target.value } : d))
-                                    : updateRowField(row.id, "created_at", e.target.value ? `${e.target.value}T00:00:00.000Z` : "")
-                                }
-                                className={`${inputClass} h-9 text-xs`}
-                              />
+                              <div className="flex items-center gap-1">
+                                <input
+                                  type="text"
+                                  inputMode="numeric"
+                                  placeholder="yyyy/mm/dd"
+                                  {...(isIndividualEdit && editDraft
+                                    ? {
+                                        value: editDraft.created_at,
+                                        onChange: (e: React.ChangeEvent<HTMLInputElement>) =>
+                                          setEditDraft((d) => (d ? { ...d, created_at: e.target.value } : d)),
+                                      }
+                                    : {
+                                        key: `${row.id}-${row.created_at}`,
+                                        defaultValue: isoToSlashed(row.created_at),
+                                      })}
+                                  onBlur={(e) => {
+                                    const n = normalizeDateToSlashed(e.target.value);
+                                    if (isIndividualEdit && editDraft) {
+                                      setEditDraft((d) => (d ? { ...d, created_at: n } : d));
+                                    } else if (n) {
+                                      updateRowField(row.id, "created_at", `${slashedToIsoDate(n)}T00:00:00.000Z`);
+                                    }
+                                  }}
+                                  className={`${inputClass} h-9 text-xs min-w-[110px]`}
+                                />
+                                <input
+                                  type="date"
+                                  className="sr-only"
+                                  tabIndex={-1}
+                                  aria-hidden
+                                  onChange={(e) => {
+                                    const v = e.target.value;
+                                    if (!v) return;
+                                    const slashed = isoToSlashed(v + "T00:00:00.000Z");
+                                    if (isIndividualEdit && editDraft) {
+                                      setEditDraft((d) => (d ? { ...d, created_at: slashed } : d));
+                                    } else {
+                                      updateRowField(row.id, "created_at", `${v}T00:00:00.000Z`);
+                                    }
+                                    e.target.value = "";
+                                  }}
+                                />
+                                <button
+                                  type="button"
+                                  title="カレンダーで選択"
+                                  className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 hover:bg-slate-50 hover:text-primary"
+                                  onClick={(e) => {
+                                    const wrap = e.currentTarget.parentElement;
+                                    const dateInp = wrap?.querySelector('input[type="date"]') as HTMLInputElement | null;
+                                    dateInp?.showPicker?.();
+                                  }}
+                                >
+                                  <Calendar className="h-4 w-4" />
+                                </button>
+                              </div>
                             ) : (
                               displayDate
                             )}
