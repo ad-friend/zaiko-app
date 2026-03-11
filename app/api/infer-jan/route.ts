@@ -315,7 +315,7 @@ async function fetchAmazonSpApi(jan: string): Promise<string | null> {
 
   try {
     // 認証情報を使ってAmazon SP-APIのクライアントを作成
-    const spClient = new SellingPartnerAPI({
+    const spClient = new(SellingPartnerAPI as any)({
       region: "fe",
       refresh_token: refreshToken,
       credentials: {
