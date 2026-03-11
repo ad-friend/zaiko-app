@@ -1,9 +1,9 @@
-/** JAN自動検索プログラム*/
+/** JAN自動検索プログラム (Amazon SP-API対応版) */
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { createHmac, createHash } from "crypto";
+import SellingPartnerAPI from "amazon-sp-api";
 
-// 💡 追加: Supabaseの準備
+// 💡 Supabaseの準備
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
 const supabase = createClient(supabaseUrl, supabaseKey);
@@ -16,9 +16,7 @@ export type InferJanResponse = {
   source?: "db" | "api" | "ai";
 };
 
-// 1. モデル名はご指摘のプレビュー版を使用
 const GEMINI_MODEL = "gemini-3.1-flash-lite-preview";
-
 const RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 16000];
 
 function sleep(ms: number): Promise<void> {
@@ -45,7 +43,7 @@ async function fetchWith503Retry(
   return lastRes!;
 }
 
-// 💡 追加: 登録商品を確認（取得）するためだけの GET メソッド
+// 💡 登録商品を確認（取得）するためだけの GET メソッド
 export async function GET() {
   try {
     const { data, error } = await supabase
@@ -55,7 +53,6 @@ export async function GET() {
       .limit(10);
 
     if (error) throw error;
-
     return NextResponse.json(data);
   } catch (e: any) {
     return NextResponse.json({ error: e.message }, { status: 500 });
@@ -85,10 +82,7 @@ export async function PATCH(request: NextRequest) {
         if (item.registered_at !== undefined) update.registered_at = item.registered_at;
 
         if (Object.keys(update).length > 0) {
-          const { error } = await supabase
-            .from("inbound_items")
-            .update(update)
-            .eq("id", id);
+          const { error } = await supabase.from("inbound_items").update(update).eq("id", id);
           if (error) throw error;
         }
 
@@ -137,7 +131,6 @@ export async function PATCH(request: NextRequest) {
         const { error: insertError } = await supabase.from("inbound_items").insert(rows);
         if (insertError) throw new Error(insertError.message);
       }
-
       return NextResponse.json({ ok: true });
     }
 
@@ -154,16 +147,11 @@ export async function PATCH(request: NextRequest) {
     if (body.registered_at !== undefined) update.registered_at = body.registered_at;
 
     if (Object.keys(update).length > 0) {
-        const { error } = await supabase
-        .from("inbound_items")
-        .update(update)
-        .eq("id", id);
+        const { error } = await supabase.from("inbound_items").update(update).eq("id", id);
         if (error) throw error;
     }
 
-    // header情報の更新 (supplier, genre)
     if (body.supplier !== undefined || body.genre !== undefined) {
-        // item.id から header_id を取得
         const { data: currentItem } = await supabase.from("inbound_items").select("header_id").eq("id", id).single();
         if (currentItem?.header_id) {
             const headerUpdate: Record<string, unknown> = {};
@@ -174,7 +162,6 @@ export async function PATCH(request: NextRequest) {
             }
         }
     }
-    
     return NextResponse.json({ ok: true });
   } catch (e: any) {
     return NextResponse.json({ error: e.message }, { status: 500 });
@@ -186,7 +173,6 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const jan = String(body.jan ?? "").trim().replace(/\D/g, "");
     
-    // 💡 ログ追加：処理の開始を記録
     console.log("=========================================");
     console.log("🚀 [infer-jan] 検索開始 | JAN:", jan);
     
@@ -197,7 +183,7 @@ export async function POST(request: NextRequest) {
 
     const dbOnly = body.dbOnly === true;
 
-    // Step 1: 自社DB (inbound_items) で JAN 検索（同一JAN複数時は最新1件のみ取得）
+    // Step 1: 自社DB (inbound_items) で JAN 検索
     if (supabaseUrl && supabaseKey) {
       try {
         console.log("📡 Step 1: Supabase (inbound_itemsテーブル) 検索中...");
@@ -214,9 +200,7 @@ export async function POST(request: NextRequest) {
           const product = rows?.[0] ?? null;
           if (product) {
           console.log("✅ DBヒット成功! 登録情報を引用します:", product.product_name);
-          if (dbOnly) {
-            console.log("✅ [dbOnly] DBで解決したため、AIは起動しません。");
-          }
+          if (dbOnly) console.log("✅ [dbOnly] DBで解決したため、AIは起動しません。");
           return NextResponse.json({
             brand: sanitizeProductText(product.brand ?? ""),
             productName: sanitizeProductText(product.product_name ?? ""),
@@ -232,31 +216,27 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // dbOnly の場合は DB にデータがなかったことを返し、AI は起動しない（フロントで後からフル検索を呼ぶ）
     if (dbOnly) {
       console.log("📡 [dbOnly] Step 1 のみ実行 → DBにデータなし。フロントでAI起動してください。");
-      return NextResponse.json({
-        found: false,
-        brand: "",
-        productName: "",
-        modelNumber: "",
-        inferred: false,
-      });
+      return NextResponse.json({ found: false, brand: "", productName: "", modelNumber: "", inferred: false });
     }
 
-    // Step 2: 外部3社APIを順次実行し、取得できた情報をバッファに蓄積（スキップ可）
+    // Step 2: 外部3社APIを順次実行
     const apiBuffer: string[] = [];
-    console.log("📡 Step 2: 外部3社APIへの問い合わせを開始...");
+    console.log("📡 Step 2: 外部APIへの問い合わせを開始...");
 
     try {
-      const amazon = await fetchAmazonPaApi(jan);
+      // 💡 ここが新しい Amazon SP-API の呼び出し
+      const amazon = await fetchAmazonSpApi(jan);
       if (amazon) {
-        console.log("📦 Amazon: 取得成功");
+        console.log("📦 Amazon SP-API: 取得成功");
         apiBuffer.push(`【Amazon】\n${amazon}`);
       } else {
-        console.log("📦 Amazon: データなし");
+        console.log("📦 Amazon SP-API: データなし");
       }
-    } catch (_) { console.log("📦 Amazon: エラーによりスキップ"); }
+    } catch (e: any) { 
+        console.log("📦 Amazon SP-API: エラーによりスキップ", e.message); 
+    }
 
     try {
       const rakuten = await fetchRakuten(jan);
@@ -281,7 +261,7 @@ export async function POST(request: NextRequest) {
     const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
     const combinedBuffer = apiBuffer.length > 0 ? apiBuffer.join("\n\n") : "";
 
-    // Step 3: AIで精査（バッファあり）。API情報が全くない場合は空欄で返す
+    // Step 3: AIで精査
     if (apiKey) {
       try {
         if (combinedBuffer) {
@@ -292,13 +272,7 @@ export async function POST(request: NextRequest) {
         }
         
         console.log("🤖 Step 3: API情報がないため、空欄を返します。");
-        return NextResponse.json({
-          brand: "",
-          productName: "",
-          modelNumber: "",
-          inferred: true,
-          source: "ai",
-        });
+        return NextResponse.json({ brand: "", productName: "", modelNumber: "", inferred: true, source: "ai" });
       } catch (geminiError: any) {
         console.error("❌ Gemini Error:", geminiError);
         return NextResponse.json({
@@ -324,9 +298,133 @@ export async function POST(request: NextRequest) {
   }
 }
 
+// 💡 【新規追加】Amazon SP-API を使ってJAN検索を行う関数
+async function fetchAmazonSpApi(jan: string): Promise<string | null> {
+  // .env.localから今日取得した鍵を読み込む
+  const clientId = process.env.SP_API_CLIENT_ID;
+  const clientSecret = process.env.SP_API_CLIENT_SECRET;
+  const refreshToken = process.env.SP_API_REFRESH_TOKEN;
+  const accessKey = process.env.SP_API_AWS_ACCESS_KEY;
+  const secretKey = process.env.SP_API_AWS_SECRET_KEY;
+  const region = process.env.SP_API_REGION || "fe-prime";
+
+  if (!clientId || !clientSecret || !refreshToken || !accessKey || !secretKey) {
+    console.log("⚠️ SP-APIの認証情報が.env.localに不足しています。");
+    return null;
+  }
+
+  try {
+    // 認証情報を使ってAmazon SP-APIのクライアントを作成
+    const spClient = new SellingPartnerAPI({
+      region: region,
+      refresh_token: refreshToken,
+      credentials: {
+        SELLING_PARTNER_APP_CLIENT_ID: clientId,
+        SELLING_PARTNER_APP_CLIENT_SECRET: clientSecret,
+        AWS_ACCESS_KEY_ID: accessKey,
+        AWS_SECRET_ACCESS_KEY: secretKey,
+        AWS_SELLING_PARTNER_ROLE: "" // IAMユーザーのアクセスキーを直接使うのでRoleは空でOK
+      }
+    });
+
+    // カタログAPIを叩いて、JAN(EAN)コードで検索
+    const res = await spClient.callAPI({
+      operation: 'searchCatalogItems',
+      endpoint: 'catalogItems',
+      query: {
+        keywords: [jan],
+        marketplaceIds: ['A1VC38T7YXB528'], // 日本のマーケットプレイスID
+        includedData: ['summaries', 'attributes'] // 商品名やブランド情報を取得
+      }
+    });
+
+    // 検索結果のチェック
+    const items = res.items;
+    if (!items || items.length === 0) return null;
+
+    // 一番最初の検索結果を取得
+    const topItem = items[0];
+    const parts: string[] = [];
+
+    // 商品名を抽出
+    const title = topItem.summaries?.[0]?.itemName;
+    if (title) parts.push(`商品名: ${title}`);
+
+    // ブランドを抽出
+    const brand = topItem.summaries?.[0]?.brand;
+    if (brand) parts.push(`ブランド: ${brand}`);
+
+    // もし型番（partNumber）があれば抽出
+    const partNumber = topItem.summaries?.[0]?.partNumber;
+    if (partNumber) parts.push(`型番: ${partNumber}`);
+
+    return parts.length ? parts.join("\n") : null;
+
+  } catch (error: any) {
+    console.error("❌ SP-API 呼び出しエラー詳細:", error.response?.data || error.message);
+    throw new Error(`Amazon SP-API エラー: ${error.message}`);
+  }
+}
+
+async function fetchRakuten(jan: string): Promise<string | null> {
+  const appId = process.env.RAKUTEN_APPLICATION_ID;
+  if (!appId) return null;
+  try {
+    const url = `https://app.rakuten.co.jp/services/api/IchibaItem/Search/20170706?applicationId=${encodeURIComponent(appId)}&itemCode=${encodeURIComponent(jan)}&format=json`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const items = data.Items;
+    if (!Array.isArray(items) || items.length === 0) return null;
+    const item = items[0].Item ?? items[0];
+    const parts: string[] = [];
+    if (item.itemName) parts.push(`商品名: ${item.itemName}`);
+    if (item.brandName) parts.push(`ブランド: ${item.brandName}`);
+    if (item.itemCaption) parts.push(`説明: ${String(item.itemCaption).slice(0, 300)}`);
+    return parts.length ? parts.join("\n") : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchYahooShopping(jan: string): Promise<string | null> {
+  const appId = process.env.YAHOO_SHOPPING_APP_ID ?? process.env.YAHOO_APP_ID;
+  console.log("🔍 [Yahoo Debug] App ID 読み込み確認:", appId ? "OK" : "NG (空っぽです)");
+  if (!appId) return null;
+  
+  try {
+    const url = `https://shopping.yahooapis.jp/ShoppingWebService/V3/itemSearch?appid=${encodeURIComponent(appId)}&jan_code=${encodeURIComponent(jan)}&results=5`;
+    const res = await fetch(url);
+    console.log("🔍 [Yahoo Debug] HTTPステータス:", res.status);
+
+    if (!res.ok) {
+      const errorText = await res.text();
+      console.log("❌ [Yahoo Debug] エラーレスポンス:", errorText);
+      return null;
+    }
+
+    const data = await res.json();
+    const hits = data.hits;
+    if (!Array.isArray(hits) || hits.length === 0) {
+      console.log("⚠️ [Yahoo Debug] 検索は成功しましたが、該当商品が0件でした");
+      return null;
+    }
+
+    console.log(`🔍 [Yahoo Debug] 取得できた件数: ${hits.length}件`);
+    const parts: string[] = [];
+    for (const h of hits.slice(0, 5)) {
+      if (h.name) parts.push(`商品名: ${h.name}`);
+      if (h.brand?.name) parts.push(`ブランド: ${h.brand.name}`);
+    }
+    return parts.length ? [...new Set(parts)].join("\n") : null;
+  } catch (e: any) {
+    console.log("❌ [Yahoo Debug] プログラム実行エラー:", e.message);
+    return null;
+  }
+}
+
 async function inferWithGemini(jan: string, apiKey: string): Promise<InferJanResponse> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
-  
   const res = await fetchWith503Retry(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -415,157 +513,6 @@ function tryParseFirstLineFromBuffer(buffer: string): InferJanResponse | null {
     inferred: true,
     source: "api",
   };
-}
-
-async function fetchAmazonPaApi(jan: string): Promise<string | null> {
-  const accessKey = process.env.AMAZON_PAAPI_ACCESS_KEY ?? process.env.AMAZON_ACCESS_KEY;
-  const secretKey = process.env.AMAZON_PAAPI_SECRET_KEY ?? process.env.AMAZON_SECRET_KEY;
-  const partnerTag = process.env.AMAZON_PAAPI_PARTNER_TAG ?? process.env.AMAZON_PARTNER_TAG;
-  if (!accessKey || !secretKey || !partnerTag) return null;
-  try {
-    const body = JSON.stringify({
-      ItemIds: [jan],
-      ItemIdType: "EAN",
-      PartnerTag: partnerTag,
-      Marketplace: "www.amazon.co.jp",
-      Resources: ["ItemInfo.Title", "ItemInfo.ByLineInfo", "ItemInfo.Features"],
-    });
-    const host = "webservices.amazon.co.jp";
-    const path = "/paapi5/getitems";
-    const region = "us-west-2";
-    const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, "").slice(0, 15) + "Z";
-    const req = await signAwsSigV4("POST", host, path, region, "ProductAdvertisingAPI", body, accessKey, secretKey, amzDate);
-    const res = await fetch(`https://${host}${path}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json; charset=utf-8",
-        "X-Amz-Date": amzDate,
-        "X-Amz-Target": "com.amazon.paapi5.v1.ProductAdvertisingAPIv1.GetItems",
-        "Host": host,
-        "Authorization": req.headers.Authorization,
-      },
-      body,
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    const item = data.ItemsResult?.Items?.[0];
-    if (!item) return null;
-    const parts: string[] = [];
-    const title = item.ItemInfo?.Title?.DisplayValue;
-    if (title) parts.push(`商品名: ${title}`);
-    const brand = item.ItemInfo?.ByLineInfo?.Brand?.DisplayValue;
-    if (brand) parts.push(`ブランド: ${brand}`);
-    const features = item.ItemInfo?.Features?.DisplayValues;
-    if (Array.isArray(features) && features.length) parts.push(`特徴: ${features.join(" ")}`);
-    return parts.length ? parts.join("\n") : null;
-  } catch {
-    return null;
-  }
-}
-
-async function fetchRakuten(jan: string): Promise<string | null> {
-  const appId = process.env.RAKUTEN_APPLICATION_ID;
-  if (!appId) return null;
-  try {
-    const url = `https://app.rakuten.co.jp/services/api/IchibaItem/Search/20170706?applicationId=${encodeURIComponent(appId)}&itemCode=${encodeURIComponent(jan)}&format=json`;
-    const res = await fetch(url);
-    if (!res.ok) return null;
-    const data = await res.json();
-    const items = data.Items;
-    if (!Array.isArray(items) || items.length === 0) return null;
-    const item = items[0].Item ?? items[0];
-    const parts: string[] = [];
-    if (item.itemName) parts.push(`商品名: ${item.itemName}`);
-    if (item.brandName) parts.push(`ブランド: ${item.brandName}`);
-    if (item.itemCaption) parts.push(`説明: ${String(item.itemCaption).slice(0, 300)}`);
-    return parts.length ? parts.join("\n") : null;
-  } catch {
-    return null;
-  }
-}
-
-// 💡 一時的なデバッグ版（犯人特定用）
-async function fetchYahooShopping(jan: string): Promise<string | null> {
-  const appId = process.env.YAHOO_SHOPPING_APP_ID ?? process.env.YAHOO_APP_ID;
-  
-  // 💡 ここで環境変数が本当に読み込めているかチェック！
-  console.log("🔍 [Yahoo Debug] App ID 読み込み確認:", appId ? "OK" : "NG (空っぽです)");
-  
-  if (!appId) return null;
-  
-  try {
-    const url = `https://shopping.yahooapis.jp/ShoppingWebService/V3/itemSearch?appid=${encodeURIComponent(appId)}&jan_code=${encodeURIComponent(jan)}&results=5`;
-    const res = await fetch(url);
-    
-    // 💡 Yahooから返ってきたHTTPステータス（200なら成功）
-    console.log("🔍 [Yahoo Debug] HTTPステータス:", res.status);
-
-    if (!res.ok) {
-      // 💡 エラーだった場合、Yahooが言っている本当の文句を出力
-      const errorText = await res.text();
-      console.log("❌ [Yahoo Debug] エラーレスポンス:", errorText);
-      return null;
-    }
-
-    const data = await res.json();
-    const hits = data.hits;
-    
-    if (!Array.isArray(hits) || hits.length === 0) {
-      console.log("⚠️ [Yahoo Debug] 検索は成功しましたが、該当商品が0件でした");
-      return null;
-    }
-
-    // 💡 無事に5件取得できたか確認
-    console.log(`🔍 [Yahoo Debug] 取得できた件数: ${hits.length}件`);
-
-    const parts: string[] = [];
-    for (const h of hits.slice(0, 5)) {
-      if (h.name) parts.push(`商品名: ${h.name}`);
-      if (h.brand?.name) parts.push(`ブランド: ${h.brand.name}`);
-    }
-    return parts.length ? [...new Set(parts)].join("\n") : null;
-  } catch (e: any) {
-    // 💡 fetch自体の失敗（ネットワークエラー等）
-    console.log("❌ [Yahoo Debug] プログラム実行エラー:", e.message);
-    return null;
-  }
-}
-async function signAwsSigV4(
-  method: string,
-  host: string,
-  path: string,
-  region: string,
-  service: string,
-  body: string,
-  accessKey: string,
-  secretKey: string,
-  amzDate: string
-): Promise<{ headers: { Authorization: string } }> {
-  const dateStamp = amzDate.slice(0, 8);
-  const algorithm = "AWS4-HMAC-SHA256";
-  const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
-
-  const canonicalUri = path || "/";
-  const canonicalQuerystring = "";
-  const canonicalHeaders = `content-type:application/json; charset=utf-8\nhost:${host}\nx-amz-date:${amzDate}\nx-amz-target:com.amazon.paapi5.v1.ProductAdvertisingAPIv1.GetItems\n`;
-  const signedHeaders = "content-type;host;x-amz-date;x-amz-target";
-  const payloadHash = sha256HexSync(body);
-  const canonicalRequest = [method, canonicalUri, canonicalQuerystring, canonicalHeaders, signedHeaders, payloadHash].join("\n");
-
-  const stringToSign = [algorithm, amzDate, credentialScope, sha256HexSync(canonicalRequest)].join("\n");
-  const kSecret = Buffer.from(`AWS4${secretKey}`, "utf8");
-  const kDate = createHmac("sha256", kSecret).update(dateStamp).digest();
-  const kRegion = createHmac("sha256", kDate).update(region).digest();
-  const kService = createHmac("sha256", kRegion).update(service).digest();
-  const kSigning = createHmac("sha256", kService).update("aws4_request").digest();
-  const signature = createHmac("sha256", kSigning).update(stringToSign).digest("hex");
-
-  const authorization = `${algorithm} Credential=${accessKey}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
-  return { headers: { Authorization: authorization } };
-}
-
-function sha256HexSync(text: string): string {
-  return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
 function sanitizeProductText(s: string): string {
