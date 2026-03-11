@@ -49,6 +49,7 @@ type EditDraft = {
   product_name: string;
   model_number: string;
   created_at: string;
+  registered_at: string;
   supplier: string;
   genre: string;
   base_price: number;
@@ -256,6 +257,7 @@ export default function HistoryPage() {
       product_name: row.product_name ?? "",
       model_number: row.model_number ?? "",
       created_at: isoToSlashed(row.created_at) || normalizeDateToSlashed(toDateValue(row.created_at)),
+      registered_at: isoToSlashed(row.registered_at ?? row.created_at) || normalizeDateToSlashed(toDateValue(row.registered_at ?? row.created_at)),
       supplier: row.header?.supplier ?? "",
       genre: row.header?.genre ?? "",
       base_price: row.base_price,
@@ -274,6 +276,8 @@ export default function HistoryPage() {
     try {
       const isoDate = slashedToIsoDate(editDraft.created_at);
       const created_at = isoDate ? `${isoDate}T00:00:00.000Z` : "";
+      const isoRegistered = slashedToIsoDate(editDraft.registered_at);
+      const registered_at = isoRegistered ? `${isoRegistered}T00:00:00.000Z` : "";
       const res = await fetch("/api/infer-jan", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -340,6 +344,7 @@ export default function HistoryPage() {
         effective_unit_price: r.effective_unit_price,
         supplier: r.header?.supplier ?? "",
         genre: r.header?.genre ?? "",
+        registered_at: r.registered_at, //
         ...(r.created_at && { created_at: r.created_at }),
       }));
       const res = await fetch("/api/infer-jan", {
@@ -952,11 +957,67 @@ export default function HistoryPage() {
                               displayDate
                             )}
                           </td>
-                          <td className="px-6 py-4 text-slate-600 whitespace-nowrap text-xs">
-                            {row.registered_at
-                              ? new Date(row.registered_at).toLocaleString("ja-JP", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
-                              : formatDate(row.created_at)}
-                          </td>
+                          <td className="px-6 py-4 text-slate-600 whitespace-nowrap">
+  {isEditMode ? (
+    <div className="flex items-center gap-1">
+      <input
+        type="text"
+        inputMode="numeric"
+        placeholder="yyyy/mm/dd"
+        {...(isIndividualEdit && editDraft
+          ? {
+              value: editDraft.registered_at,
+              onChange: (e: React.ChangeEvent<HTMLInputElement>) =>
+                setEditDraft((d) => (d ? { ...d, registered_at: e.target.value } : d)),
+            }
+          : {
+              key: `${row.id}-${row.registered_at}`,
+              defaultValue: isoToSlashed(row.registered_at ?? ""),
+            })}
+        onBlur={(e) => {
+          const n = normalizeDateToSlashed(e.target.value);
+          if (isIndividualEdit && editDraft) {
+            setEditDraft((d) => (d ? { ...d, registered_at: n } : d));
+          } else if (n) {
+            updateRowField(row.id, "registered_at", `${slashedToIsoDate(n)}T00:00:00.000Z`);
+          }
+        }}
+        className={`${inputClass} h-9 text-xs min-w-[110px]`}
+      />
+      <input
+        type="date"
+        className="sr-only"
+        tabIndex={-1}
+        aria-hidden
+        onChange={(e) => {
+          const v = e.target.value;
+          if (!v) return;
+          const slashed = isoToSlashed(v + "T00:00:00.000Z");
+          if (isIndividualEdit && editDraft) {
+            setEditDraft((d) => (d ? { ...d, registered_at: slashed } : d));
+          } else {
+            updateRowField(row.id, "registered_at", `${v}T00:00:00.000Z`);
+          }
+          e.target.value = "";
+        }}
+      />
+      <button
+        type="button"
+        title="カレンダーで選択"
+        className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 hover:bg-slate-50 hover:text-primary"
+        onClick={(e) => {
+          const wrap = e.currentTarget.parentElement;
+          const dateInp = wrap?.querySelector('input[type="date"]') as HTMLInputElement | null;
+          dateInp?.showPicker?.();
+        }}
+      >
+        <Calendar className="h-4 w-4" />
+      </button>
+    </div>
+  ) : (
+    formatDate(row.registered_at ?? row.created_at)
+  )}
+</td>
                           <td className="px-6 py-4 text-slate-700">
                              {isEditMode ? (
                                 <input

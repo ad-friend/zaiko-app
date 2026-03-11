@@ -82,6 +82,7 @@ export async function PATCH(request: NextRequest) {
         if (item.effective_unit_price !== undefined) update.effective_unit_price = item.effective_unit_price;
         if (item.created_at !== undefined) update.created_at = item.created_at;
         if (item.condition_type !== undefined) update.condition_type = item.condition_type;
+        if (item.registered_at !== undefined) update.registered_at = item.registered_at;
 
         if (Object.keys(update).length > 0) {
           const { error } = await supabase
@@ -150,6 +151,7 @@ export async function PATCH(request: NextRequest) {
     if (body.base_price !== undefined) update.base_price = body.base_price;
     if (body.effective_unit_price !== undefined) update.effective_unit_price = body.effective_unit_price;
     if (body.created_at !== undefined) update.created_at = body.created_at;
+    if (body.registered_at !== undefined) update.registered_at = body.registered_at;
 
     if (Object.keys(update).length > 0) {
         const { error } = await supabase
