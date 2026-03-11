@@ -1,3 +1,4 @@
+/** 在庫一覧 */
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 
@@ -82,7 +83,9 @@ export async function GET() {
       base_price: Number(row.base_price ?? 0),
       effective_unit_price: Number(row.effective_unit_price ?? 0),
       created_at: row.created_at ?? "",
-      registered_at: row.registered_at ?? row.created_at ?? "",
+      registered_at: (row.registered_at || row.created_at)
+        ? new Date(row.registered_at || row.created_at).toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo", year: "numeric", month: "2-digit", day: "2-digit" }).replace(/\//g, "-")
+        : "",
       header: Array.isArray(row.inbound_headers) ? row.inbound_headers[0] : row.inbound_headers ?? null,
     }));
 

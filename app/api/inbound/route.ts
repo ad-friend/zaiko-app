@@ -1,3 +1,4 @@
+/** 入庫管理ページ */
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 

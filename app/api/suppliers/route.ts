@@ -1,3 +1,4 @@
+/** 仕入先リスト */
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 

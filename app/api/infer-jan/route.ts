@@ -1,3 +1,4 @@
+/** JAN自動検索プログラム*/
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { createHmac, createHash } from "crypto";
