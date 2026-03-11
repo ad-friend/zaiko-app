@@ -15,7 +15,7 @@ type ProductRow = {
   productName: string;
   modelNumber: string;
   basePrice: number;
-  quantity: number; // 数量を追加
+  quantity: number;
   fixedUnitPrice: boolean;
   inferredByAi: boolean;
   condition: ProductCondition;
@@ -29,14 +29,15 @@ type HeaderInfo = {
   discount: number;
 };
 
+// 🌟 変更: 仕入先のエラーメッセージを型に追加
 type ValidationError = {
   fixedTotalExceedsPurchase?: boolean;
   missingFields?: string[];
-  /** 按分を1件でも使っているのに仕入総額が未入力 */
   purchaseRequiredWhenDistribute?: boolean;
+  supplierKanaError?: string;
+  supplierNotExistsError?: string;
 };
 
-// 商品名からJAN（13桁以上の数字）を除去し、純粋な名称のみにする
 function cleanseProductName(value: string): string {
   return value
     .replace(/\d{13,}/g, "")
@@ -44,53 +45,35 @@ function cleanseProductName(value: string): string {
     .trim();
 }
 
-// 究極の按分計算ロジック（改訂版：チェックボックスの役割反転）
-// チェックなし: 「基準価格」をそのまま採用（固定）
-// チェックあり: チェック商品同士で「仕入総額」を按分
-// 送料・割引: 全商品に加算
 function calcEffectiveUnitPrice(
   row: ProductRow,
   totalPurchase: number,
   headerInfo: HeaderInfo,
   rows: ProductRow[]
 ): number {
-  // ステップ1: 仕入総額の按分
   let baseUnitCost = 0;
-
   if (!row.fixedUnitPrice) {
-    // チェックなし（通常）: 基準価格をそのまま原価とする
     baseUnitCost = row.basePrice;
   } else {
-    // チェックあり（按分モード）:
-    // (仕入総額 - チェックなし商品の基準価格合計) を チェックあり商品の基準価格比 で按分
-
-    // 「チェックなし」商品の基準価格合計（数量考慮）
     const fixedTotal = rows
       .filter((r) => !r.fixedUnitPrice)
       .reduce((sum, r) => sum + r.basePrice * r.quantity, 0);
 
-    // 「チェックあり」商品の基準価格合計（数量考慮）
     const distributeBaseSum = rows
       .filter((r) => r.fixedUnitPrice)
       .reduce((sum, r) => sum + r.basePrice * r.quantity, 0);
     
-    // 按分対象額 = 仕入総額 - 固定額合計
     const distributablePurchase = totalPurchase - fixedTotal;
 
     if (distributeBaseSum > 0 && distributablePurchase > 0) {
-      // 基準価格比で按分
       baseUnitCost = (distributablePurchase * row.basePrice) / distributeBaseSum;
     }
   }
 
-  // ステップ2: 送料・割引の按分 (全商品対象・数量考慮なし=1商品あたりに加算)
-  // 全商品の基準価格合計 (数量考慮)
   const totalBaseSum = rows.reduce((sum, r) => sum + r.basePrice * r.quantity, 0);
-  
   const extraCost = headerInfo.shipping - headerInfo.discount;
   let allocatedExtra = 0;
 
-  // 1個あたりの加算額
   if (totalBaseSum > 0 && extraCost !== 0) {
     allocatedExtra = (extraCost * row.basePrice) / totalBaseSum;
   }
@@ -98,22 +81,22 @@ function calcEffectiveUnitPrice(
   return baseUnitCost + allocatedExtra;
 }
 
+// 🌟 変更: 引数に「仕入先マスターのリスト(suppliers)」を追加し、リアルタイム検証を行う
 function validate(
   totalPurchase: number,
   headerInfo: HeaderInfo,
   rows: ProductRow[],
-  totalPurchaseRaw: string
+  totalPurchaseRaw: string,
+  suppliers: { id: number; name: string; kana: string }[]
 ): ValidationError {
   const err: ValidationError = {};
   const hasAnyDistribute = rows.some((r) => r.fixedUnitPrice);
   const totalPurchaseEmpty = totalPurchaseRaw.trim() === "";
 
-  // 按分を1件でも使っている場合は仕入総額必須
   if (hasAnyDistribute && totalPurchaseEmpty) {
     err.purchaseRequiredWhenDistribute = true;
   }
 
-  // チェックなし商品の合計が仕入総額を超えていないかチェック（按分利用時のみ totalPurchase を比較に使う）
   const fixedTotal = rows
     .filter((r) => !r.fixedUnitPrice)
     .reduce((sum, r) => sum + r.basePrice * r.quantity, 0);
@@ -121,11 +104,27 @@ function validate(
   if (hasAnyDistribute && fixedTotal > totalPurchase) {
     err.fixedTotalExceedsPurchase = true;
   }
+  
   const missing: string[] = [];
+
+  // 🌟 追加: 仕入先のリアルタイムバリデーション
+  const kanaSupplier = headerInfo.supplier.trim();
+  if (!kanaSupplier) {
+    missing.push("伝票情報の「仕入先カナ」");
+  } else if (!/^[ア-ンヴー・\s]+$/.test(kanaSupplier)) {
+    err.supplierKanaError = "仕入先はカタカナで入力してください（英数字・漢字は不可）。";
+  } else if (suppliers.length > 0) {
+    const exists = suppliers.some(s => s.kana === kanaSupplier);
+    if (!exists) {
+      err.supplierNotExistsError = `入力されたカナ「${kanaSupplier}」はマスターに未登録です。`;
+    }
+  }
+
   rows.forEach((r, i) => {
-    if (!r.jan.trim()) missing.push(`行${i + 1}: JAN`);
-    if (r.basePrice <= 0 && !r.fixedUnitPrice) missing.push(`行${i + 1}: 基準価格`);
+    if (!r.jan.trim()) missing.push(`商品リスト 行${i + 1} の「JAN」`);
+    if (r.basePrice <= 0 && !r.fixedUnitPrice) missing.push(`商品リスト 行${i + 1} の「基準価格」`);
   });
+  
   if (missing.length) err.missingFields = missing;
   return err;
 }
@@ -135,7 +134,6 @@ function generateId() {
 }
 
 export default function InboundPage() {
-  // ヘッダー情報
   const [purchaseDate, setPurchaseDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [supplier, setSupplier] = useState<string>("");
   const [genre, setGenre] = useState<string>("");
@@ -151,14 +149,23 @@ export default function InboundPage() {
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const lastAddedIdRef = useRef<string | null>(null);
   
-  // 仕入先サジェスト（カナ前方一致）
   type SupplierSuggest = { id: number; name: string; kana: string };
   const [supplierSuggestList, setSupplierSuggestList] = useState<SupplierSuggest[]>([]);
   const [supplierSuggestOpen, setSupplierSuggestOpen] = useState(false);
   const supplierSuggestTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // 保存処理中フラグ
+  
+  // 🌟 追加: ページを開いた時に仕入先マスターを全件読み込んでおく（リアルタイム検証用）
+  const [masterSuppliers, setMasterSuppliers] = useState<SupplierSuggest[]>([]);
+  useEffect(() => {
+    fetch("/api/suppliers")
+      .then(res => res.ok && res.json())
+      .then(data => {
+        if (Array.isArray(data)) setMasterSuppliers(data);
+      })
+      .catch(console.error);
+  }, []);
+
   const [isSubmitting, setIsSubmitting] = useState(false);
-  // 登録情報確認モーダル
   const [showConfirmModal, setShowConfirmModal] = useState(false);
 
   const totalNum = Number(totalPurchase) || 0;
@@ -173,11 +180,17 @@ export default function InboundPage() {
     discount: discountNum
   };
 
-  const validation = validate(totalNum, headerInfo, rows, totalPurchase);
+  // 🌟 変更: validate関数にマスターリストを渡す
+  const validation = validate(totalNum, headerInfo, rows, totalPurchase, masterSuppliers);
 
-  // 仕入先サジェストは入力に応じてインクリメンタル取得（page.tsx 内で fetch）
+  // 🌟 追加: エラーが1つでもあれば true になるフラグ
+  const hasErrors = 
+    !!validation.fixedTotalExceedsPurchase || 
+    !!validation.purchaseRequiredWhenDistribute || 
+    (validation.missingFields && validation.missingFields.length > 0) ||
+    !!validation.supplierKanaError ||
+    !!validation.supplierNotExistsError;
 
-  // 自動フォーカス
   useEffect(() => {
     if (!janInputRef.current) return;
     const timer = requestAnimationFrame(() => {
@@ -193,26 +206,19 @@ export default function InboundPage() {
     }
   }, [rows]);
 
-  // JAN入力時: まずDB検索 → データがない場合のみAI推論を起動（プロセス分離）
   const handleJanBlurOrEnter = useCallback(
     async (jan: string, rowId?: string) => {
       const trimmed = jan.trim().replace(/\D/g, "");
       if (trimmed.length !== 13) return;
 
-      const target = rowId
-        ? rows.find((r) => r.id === rowId)
-        : null;
-
-      if (target && (target.brand || target.productName || target.modelNumber)) {
-        return;
-      }
+      const target = rowId ? rows.find((r) => r.id === rowId) : null;
+      if (target && (target.brand || target.productName || target.modelNumber)) return;
 
       let brand = "";
       let productName = "";
       let modelNumber = "";
 
       try {
-        // ① まずDB検索のみ実行（AIは起動しない）
         const dbRes = await fetch("/api/infer-jan", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -221,7 +227,6 @@ export default function InboundPage() {
         if (dbRes.ok) {
           const dbData = await dbRes.json();
           if (dbData.source === "db") {
-            // DBで解決 → 即反映し、AIプロセスは起動しない
             brand = cleanseProductName(dbData.brand ?? "");
             productName = cleanseProductName(dbData.productName ?? "");
             modelNumber = cleanseProductName(dbData.modelNumber ?? "");
@@ -230,7 +235,6 @@ export default function InboundPage() {
           }
         }
 
-        // ② DBにデータがないことが確定 → この時点で「AI推論中」を表示し、AIプロセス開始
         setInferringJan(trimmed);
         const res = await fetch("/api/infer-jan", {
           method: "POST",
@@ -245,31 +249,17 @@ export default function InboundPage() {
         }
         applyJanResult(trimmed, brand, productName, modelNumber, rowId);
       } catch (e) {
-        console.warn("API Error, falling back to manual input", e);
         applyJanResult(trimmed, brand, productName, modelNumber, rowId);
       } finally {
         setInferringJan(null);
       }
 
-      function applyJanResult(
-        trimmed: string,
-        brand: string,
-        productName: string,
-        modelNumber: string,
-        rowId?: string
-      ) {
+      function applyJanResult(trimmed: string, brand: string, productName: string, modelNumber: string, rowId?: string) {
         if (rowId) {
           setRows((prev) =>
             prev.map((r) =>
               r.id === rowId
-                ? {
-                    ...r,
-                    jan: r.jan || trimmed,
-                    brand: r.brand || brand,
-                    productName: r.productName || productName,
-                    modelNumber: r.modelNumber || modelNumber,
-                    inferredByAi: !!productName,
-                  }
+                ? { ...r, jan: r.jan || trimmed, brand: r.brand || brand, productName: r.productName || productName, modelNumber: r.modelNumber || modelNumber, inferredByAi: !!productName }
                 : r
             )
           );
@@ -279,14 +269,7 @@ export default function InboundPage() {
             if (last && !last.jan && !last.brand && !last.productName) {
               return prev.map((r, i) =>
                 i === prev.length - 1
-                  ? {
-                      ...r,
-                      jan: trimmed,
-                      brand,
-                      productName,
-                      modelNumber,
-                      inferredByAi: !!productName,
-                    }
+                  ? { ...r, jan: trimmed, brand, productName, modelNumber, inferredByAi: !!productName }
                   : r
               );
             }
@@ -343,18 +326,12 @@ export default function InboundPage() {
     setRows((prev) => prev.filter((r) => r.id !== id));
   }, []);
 
-  // 登録処理（MySQLへの保存）
   const handleRegister = useCallback(async () => {
-    const hasAnyDistribute = rows.some((r) => r.fixedUnitPrice);
-    if (hasAnyDistribute && totalPurchase.trim() === "") {
-      alert("按分を使用しているため、仕入総額の入力が必要です。");
-      return;
-    }
+    // 🌟 変更: エラーチェックはボタンの disabled で防ぐため、ここにあった alert() を削除
     if (!confirm("入力内容をデータベースに保存しますか？")) return;
 
     setIsSubmitting(true);
     try {
-        // 数量 > 1 の行を展開してフラットなリストを作成
         const expandedItems = rows.flatMap(row => {
             const items = [];
             const effectivePrice = calcEffectiveUnitPrice(row, totalNum, headerInfo, rows);
@@ -370,7 +347,7 @@ export default function InboundPage() {
         const fullData = {
             header: {
                 purchaseDate,
-                supplier,
+                supplier: supplier.trim(), // すでにカナに整形・検証済み
                 genre,
                 totalPurchase: totalNum,
                 shipping: shippingNum,
@@ -410,7 +387,6 @@ export default function InboundPage() {
 
   const closeCamera = useCallback(() => {
     if (scannerRef.current) {
-      // カメラが完全に停止するのを「待ってから」画面を閉じるように修正
       scannerRef.current.stop().then(() => {
         scannerRef.current?.clear();
         scannerRef.current = null;
@@ -428,8 +404,6 @@ export default function InboundPage() {
     }
   }, []);
 
-  // ===== ここからコピー =====
-  // カメラ起動中に商品リストが更新されてもエラーにならないようにする「裏ルート」
   const handleJanRef = useRef(handleJanBlurOrEnter);
   useEffect(() => {
     handleJanRef.current = handleJanBlurOrEnter;
@@ -450,7 +424,6 @@ export default function InboundPage() {
         (decodedText) => {
           const trimmed = decodedText.trim();
           if (trimmed.length >= 8) {
-            // スキャン成功後、0.1秒だけ待ってから処理を実行（衝突防止の特効薬）
             setTimeout(() => {
               handleJanRef.current(trimmed);
               closeCamera();
@@ -473,31 +446,24 @@ export default function InboundPage() {
         }).catch(() => {});
       }
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameraOpen, closeCamera]);
-  // ===== ここまでコピー =====
 
-  // 集計値
   const totalCost = totalNum + shippingNum - discountNum;
   
-  // 「チェックなし」（固定価格）商品の合計（数量考慮）
   const fixedTotal = rows
     .filter((r) => !r.fixedUnitPrice)
     .reduce((sum, r) => sum + r.basePrice * r.quantity, 0);
   
-  // 「チェックあり」（按分対象）商品の基準価格合計（数量考慮）
   const unfixedBaseSum = rows
     .filter((r) => r.fixedUnitPrice)
     .reduce((sum, r) => sum + r.basePrice * r.quantity, 0);
 
-  //shadcn/ui風の共通inputクラス
   const inputClass = "flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 transition-all duration-200 shadow-sm";
   const buttonClass = "inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 h-10 px-6 py-2 shadow-sm active:scale-[0.98] duration-100";
 
   return (
     <div className="flex min-h-screen flex-col bg-slate-50 font-sans text-slate-900">
       
-      {/* グローバルヘッダー */}
       <header className="sticky top-0 z-30 w-full border-b bg-white/80 backdrop-blur-md shadow-sm">
         <div className="container mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
           <div className="flex items-center gap-2">
@@ -507,39 +473,27 @@ export default function InboundPage() {
             <h1 className="text-xl font-bold tracking-tight text-slate-900">Zaiko Manager <span className="text-xs font-normal text-slate-500 ml-2 bg-slate-100 px-2 py-0.5 rounded-full">Professional</span></h1>
           </div>
           <div className="flex items-center gap-3">
-             {/* PC用メニュー */}
              <div className="hidden sm:flex items-center gap-1 text-sm text-slate-500 mr-4">
                 <span className="px-2">ユーザー: <strong>管理者</strong></span>
              </div>
-             <Link
-              href="/history"
-              className="text-sm font-medium text-slate-500 hover:text-primary transition-colors"
-            >
+             <Link href="/history" className="text-sm font-medium text-slate-500 hover:text-primary transition-colors">
               在庫一覧
             </Link>
-             <Link
-              href="/suppliers"
-              className="text-sm font-medium text-slate-500 hover:text-primary transition-colors"
-            >
+             <Link href="/suppliers" className="text-sm font-medium text-slate-500 hover:text-primary transition-colors">
               仕入先管理
             </Link>
-             <button
-              onClick={() => alert("ログアウト")}
-              className="text-sm font-medium text-slate-500 hover:text-destructive transition-colors"
-            >
+             <button onClick={() => alert("ログアウト")} className="text-sm font-medium text-slate-500 hover:text-destructive transition-colors">
               ログアウト
             </button>
           </div>
         </div>
       </header>
 
-      {/* メインコンテンツ */}
       <main className="flex-1 py-8 w-full max-w-7xl mx-auto">
         <div className="px-4 sm:px-6 lg:px-8">
           
           <div className="grid gap-8 lg:grid-cols-12 items-start">
             
-            {/* --- 左サイドパネル (伝票管理・集計) --- */}
             <div className="lg:col-span-4 space-y-6 lg:sticky lg:top-24">
               
               <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm transition-all hover:shadow-md">
@@ -551,7 +505,6 @@ export default function InboundPage() {
                 </div>
                 
                 <div className="p-6 space-y-5">
-                   {/* 伝票ヘッダー項目 */}
                    <div className="space-y-4">
                       <div>
                         <label className="text-xs font-semibold text-slate-500 mb-1.5 block uppercase tracking-wide">仕入日</label>
@@ -563,7 +516,7 @@ export default function InboundPage() {
                         />
                       </div>
                       <div className="relative">
-                        <label className="text-xs font-semibold text-slate-500 mb-1.5 block uppercase tracking-wide">仕入先</label>
+                        <label className="text-xs font-semibold text-slate-500 mb-1.5 block uppercase tracking-wide">仕入先カナ (必須)</label>
                         <input
                             type="text"
                             value={supplier}
@@ -592,10 +545,13 @@ export default function InboundPage() {
                                 }
                               }, 150);
                             }}
-                            onBlur={() => setTimeout(() => setSupplierSuggestOpen(false), 200)}
+                            onBlur={(e) => {
+                              setSupplier(normalizeToFullWidthKatakana(e.target.value));
+                              setTimeout(() => setSupplierSuggestOpen(false), 200);
+                            }}
                             onFocus={() => { if (supplierSuggestList.length) setSupplierSuggestOpen(true); }}
-                            placeholder="カナで検索（例: アド）または直接入力"
-                            className={inputClass}
+                            placeholder="カナで検索（例: アマゾン）"
+                            className={`${inputClass} ${validation.supplierKanaError || validation.supplierNotExistsError ? "border-red-400 focus-visible:ring-red-200" : ""}`}
                             autoComplete="off"
                         />
                         {supplierSuggestOpen && supplierSuggestList.length > 0 && (
@@ -606,7 +562,7 @@ export default function InboundPage() {
                                   type="button"
                                   className="w-full px-3 py-2 text-left text-sm hover:bg-slate-50"
                                   onMouseDown={(e) => e.preventDefault()}
-                                  onClick={() => { setSupplier(s.name); setSupplierSuggestOpen(false); }}
+                                  onClick={() => { setSupplier(s.kana); setSupplierSuggestOpen(false); }}
                                 >
                                   <span className="font-medium">{s.name}</span>
                                   <span className="ml-2 text-xs text-slate-500">{s.kana}</span>
@@ -630,7 +586,6 @@ export default function InboundPage() {
                    
                    <div className="h-px bg-slate-100" />
 
-                   {/* コスト調整 */}
                    <div className="space-y-4">
                       <div className="relative">
                         <label className="text-xs font-semibold text-slate-500 mb-1.5 block uppercase tracking-wide">仕入総額 (税込)</label>
@@ -640,7 +595,7 @@ export default function InboundPage() {
                                 <input
                                 type="number"
                                 min={0}
-                                className="flex h-11 w-full rounded-md border border-slate-200 bg-slate-50/50 pl-8 pr-4 text-xl font-bold text-slate-900 placeholder:text-slate-300 focus:bg-white focus:border-primary focus:outline-none focus:ring-4 focus:ring-primary/10 transition-all text-right shadow-sm"
+                                className={`flex h-11 w-full rounded-md border bg-slate-50/50 pl-8 pr-4 text-xl font-bold text-slate-900 placeholder:text-slate-300 focus:bg-white focus:outline-none focus:ring-4 transition-all text-right shadow-sm ${validation.purchaseRequiredWhenDistribute || validation.fixedTotalExceedsPurchase ? "border-red-400 focus:ring-red-100" : "border-slate-200 focus:border-primary focus:ring-primary/10"}`}
                                 placeholder="0"
                                 value={totalPurchase}
                                 onChange={(e) => setTotalPurchase(e.target.value)}
@@ -675,7 +630,6 @@ export default function InboundPage() {
                       </div>
                    </div>
 
-                   {/* サマリー情報 */}
                    <div className="rounded-lg bg-slate-50 p-4 border border-slate-100 space-y-3">
                       <div className="flex justify-between items-center text-sm">
                         <span className="text-slate-500">実質総コスト</span>
@@ -703,16 +657,12 @@ export default function InboundPage() {
                     >
                       登録情報を確認する
                     </button>
+                    {/* 🌟 変更: エラーがある場合はボタンを押せなくする */}
                     <button
                       type="button"
                       onClick={handleRegister}
-                      disabled={
-                        rows.length === 0 ||
-                        isSubmitting ||
-                        (rows.some((r) => r.fixedUnitPrice) &&
-                          (totalPurchase.trim() === "" || totalNum <= 0))
-                      }
-                      className={`${buttonClass} w-full bg-primary text-white hover:bg-primary/90 shadow-lg shadow-primary/20 h-12 text-base font-bold tracking-wide transition-all disabled:grayscale disabled:opacity-70`}
+                      disabled={rows.length === 0 || isSubmitting || hasErrors}
+                      className={`${buttonClass} w-full bg-primary text-white hover:bg-primary/90 shadow-lg shadow-primary/20 h-12 text-base font-bold tracking-wide transition-all disabled:bg-slate-300 disabled:text-slate-500 disabled:shadow-none disabled:cursor-not-allowed`}
                     >
                       {isSubmitting ? (
                         <span className="flex items-center gap-2">
@@ -723,15 +673,12 @@ export default function InboundPage() {
                         "入庫データを保存"
                       )}
                     </button>
-                    <p className="mt-2 text-center text-[10px] text-slate-400">
-                      伝票情報と商品リストを保存します (数量分を展開)
-                    </p>
                   </div>
                 </div>
               </div>
 
-              {/* エラーメッセージ */}
-              {(validation.fixedTotalExceedsPurchase || validation.purchaseRequiredWhenDistribute || (validation.missingFields?.length ?? 0) > 0) && (
+              {/* 🌟 変更: ここに仕入先のエラーもリストアップされるようになります */}
+              {hasErrors && (
                 <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800 shadow-sm animate-in fade-in slide-in-from-top-2">
                   <div className="flex items-start gap-3">
                     <AlertCircleIcon className="h-5 w-5 shrink-0 text-red-600 mt-0.5" />
@@ -744,8 +691,14 @@ export default function InboundPage() {
                         {validation.fixedTotalExceedsPurchase && (
                           <li>固定商品の合計が仕入総額を超過しています（按分原資が不足）</li>
                         )}
+                        {validation.supplierKanaError && (
+                          <li>{validation.supplierKanaError}</li>
+                        )}
+                        {validation.supplierNotExistsError && (
+                          <li>{validation.supplierNotExistsError}</li>
+                        )}
                         {validation.missingFields?.map((msg, i) => (
-                          <li key={i}>{msg}</li>
+                          <li key={i}>{msg} が入力されていません</li>
                         ))}
                       </ul>
                     </div>
@@ -754,9 +707,7 @@ export default function InboundPage() {
               )}
             </div>
 
-            {/* --- 右メインパネル (商品リスト) --- */}
             <div className="lg:col-span-8 space-y-4">
-              
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-2">
                 <div>
                   <h2 className="text-xl font-bold text-slate-900">
@@ -786,7 +737,6 @@ export default function InboundPage() {
                 </div>
               </div>
 
-              {/* JAN入力エリア (リスト上部固定) */}
               <div className="sticky top-[64px] z-20 -mx-4 sm:mx-0 px-4 sm:px-0 mb-4 bg-slate-50/95 backdrop-blur sm:bg-transparent pb-2 sm:pb-0">
                 <div className="relative rounded-xl border border-primary/30 bg-white p-1 shadow-md shadow-primary/5 ring-4 ring-primary/5 transition-all focus-within:ring-primary/20 focus-within:border-primary/50">
                    <div className="relative flex items-center">
@@ -828,10 +778,7 @@ export default function InboundPage() {
                 </div>
               </div>
 
-              {/* リスト表示エリア */}
               <div className="rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden min-h-[400px]">
-                
-                {/* --- デスクトップ表示 (テーブル) --- */}
                 <div className="hidden md:block overflow-x-auto">
                   <table className="w-full text-sm text-left">
                     <thead className="bg-slate-50/80 border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold tracking-wider">
@@ -840,7 +787,6 @@ export default function InboundPage() {
                         <th className="px-6 py-4 min-w-[300px]">商品情報</th>
                         <th className="px-6 py-4 w-[100px] text-right">数量</th>
                         <th className="px-6 py-4 w-[130px] text-right">基準価格</th>
-                        {/* チェックボックスのラベルを変更 */}
                         <th className="px-6 py-4 w-[70px] text-center">按分</th>
                         <th className="px-6 py-4 w-[130px] text-right">実質単価</th>
                         <th className="px-6 py-4 w-[50px]"></th>
@@ -861,10 +807,13 @@ export default function InboundPage() {
                       )}
                       {rows.map((row) => {
                         const effective = calcEffectiveUnitPrice(row, totalNum, headerInfo, rows);
-                        // 背景色: AI推論行は薄い青、固定行は薄いグレー
                         let rowBg = "bg-white";
                         if (row.fixedUnitPrice) rowBg = "bg-slate-50/70";
                         else if (row.inferredByAi) rowBg = "bg-indigo-50/30";
+
+                        // 🌟 追加: その行のエラーチェック（枠線を赤くするため）
+                        const isJanMissing = !row.jan.trim();
+                        const isPriceMissing = row.basePrice <= 0 && !row.fixedUnitPrice;
 
                         return (
                           <tr key={row.id} className={`group hover:bg-slate-50 transition-colors border-b border-slate-100 last:border-0 ${rowBg}`}>
@@ -878,7 +827,7 @@ export default function InboundPage() {
                                         const v = e.target.value.trim().replace(/\D/g, "");
                                         if (v.length === 13 && !row.brand && !row.productName) handleJanBlurOrEnter(v, row.id);
                                     }}
-                                    className={`${inputClass} font-mono text-xs h-9 shadow-sm`}
+                                    className={`${inputClass} font-mono text-xs h-9 shadow-sm ${isJanMissing ? "border-red-400 focus-visible:ring-red-200" : ""}`}
                                     placeholder="JAN"
                                     />
                                     {row.inferredByAi && (
@@ -934,7 +883,7 @@ export default function InboundPage() {
                                   min={0}
                                   value={row.basePrice || ""}
                                   onChange={(e) => updateRow(row.id, { basePrice: Number(e.target.value) || 0 })}
-                                  className={`${inputClass} text-right pl-6 h-10 font-medium shadow-sm`}
+                                  className={`${inputClass} text-right pl-6 h-10 font-medium shadow-sm ${isPriceMissing ? "border-red-400 focus-visible:ring-red-200" : ""}`}
                                   placeholder="0"
                                 />
                               </div>
@@ -966,7 +915,7 @@ export default function InboundPage() {
                   </table>
                 </div>
 
-                {/* --- スマホ表示 (カードリスト) --- */}
+                {/* --- スマホ表示 --- */}
                 <div className="md:hidden divide-y divide-slate-100">
                   {rows.length === 0 && (
                       <div className="p-10 text-center text-slate-400 text-sm bg-slate-50/30">
@@ -979,6 +928,8 @@ export default function InboundPage() {
                     let rowBg = "bg-white";
                     if (row.fixedUnitPrice) rowBg = "bg-slate-50/70";
                     else if (row.inferredByAi) rowBg = "bg-indigo-50/20";
+                    const isJanMissing = !row.jan.trim();
+                    const isPriceMissing = row.basePrice <= 0 && !row.fixedUnitPrice;
 
                     return (
                       <div key={row.id} className={`p-4 transition-colors ${rowBg}`}>
@@ -993,7 +944,7 @@ export default function InboundPage() {
                                         const v = e.target.value.trim().replace(/\D/g, "");
                                         if (v.length === 13 && !row.brand && !row.productName) handleJanBlurOrEnter(v, row.id);
                                     }}
-                                    className={`${inputClass} font-mono text-sm h-9 bg-white/80`}
+                                    className={`${inputClass} font-mono text-sm h-9 bg-white/80 ${isJanMissing ? "border-red-400" : ""}`}
                                     inputMode="numeric"
                                     placeholder="JAN"
                                     />
@@ -1009,10 +960,7 @@ export default function InboundPage() {
                                 </select>
                              </div>
                            </div>
-                           <button
-                              onClick={() => removeRow(row.id)}
-                              className="p-2 rounded-lg text-slate-400 hover:bg-red-50 hover:text-red-600 transition-colors"
-                           >
+                           <button onClick={() => removeRow(row.id)} className="p-2 rounded-lg text-slate-400 hover:bg-red-50 hover:text-red-600 transition-colors">
                               <TrashIcon className="h-5 w-5" />
                            </button>
                         </div>
@@ -1046,21 +994,9 @@ export default function InboundPage() {
                            <div className="col-span-2 flex items-center justify-between gap-4 border-b border-slate-200/50 pb-3 mb-1">
                               <label className="text-[10px] text-slate-400 font-bold block">数量</label>
                               <div className="flex items-center gap-3">
-                                <button
-                                  type="button"
-                                  onClick={() => updateRow(row.id, { quantity: Math.max(1, row.quantity - 1) })}
-                                  className="h-8 w-8 rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-                                >
-                                  -
-                                </button>
+                                <button type="button" onClick={() => updateRow(row.id, { quantity: Math.max(1, row.quantity - 1) })} className="h-8 w-8 rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50">-</button>
                                 <span className="font-bold text-slate-800 w-4 text-center">{row.quantity}</span>
-                                <button
-                                  type="button"
-                                  onClick={() => updateRow(row.id, { quantity: row.quantity + 1 })}
-                                  className="h-8 w-8 rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-                                >
-                                  +
-                                </button>
+                                <button type="button" onClick={() => updateRow(row.id, { quantity: row.quantity + 1 })} className="h-8 w-8 rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50">+</button>
                               </div>
                            </div>
                            
@@ -1073,7 +1009,7 @@ export default function InboundPage() {
                                  min={0}
                                  value={row.basePrice || ""}
                                  onChange={(e) => updateRow(row.id, { basePrice: Number(e.target.value) || 0 })}
-                                 className={`${inputClass} text-right pl-4 h-8 bg-white`}
+                                 className={`${inputClass} text-right pl-4 h-8 bg-white ${isPriceMissing ? "border-red-400" : ""}`}
                                />
                              </div>
                            </div>
@@ -1117,10 +1053,7 @@ export default function InboundPage() {
               </button>
             </div>
             <div className="overflow-hidden rounded-xl bg-black border border-slate-200 shadow-inner">
-              <div
-                id="barcode-reader"
-                style={{ width: "100%", minHeight: 250 }}
-              />
+              <div id="barcode-reader" style={{ width: "100%", minHeight: 250 }} />
             </div>
             <p className="mt-4 text-center text-sm font-medium text-slate-500">
               カメラを商品コードに向けてください
@@ -1147,8 +1080,8 @@ export default function InboundPage() {
                 <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">伝票情報</h4>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 text-sm">
                   <div><span className="text-slate-500">仕入日</span><div className="font-medium text-slate-900">{purchaseDate}</div></div>
-                  <div><span className="text-slate-500">仕入先</span><div className="font-medium text-slate-900">{supplier || "—"}</div></div>
-                  <div><span className="text-slate-500">ジャンル（カテゴリ）</span><div className="font-medium text-slate-900">{genre || "—"}</div></div>
+                  <div><span className="text-slate-500">仕入先カナ</span><div className="font-medium text-slate-900">{supplier || "—"}</div></div>
+                  <div><span className="text-slate-500">ジャンル</span><div className="font-medium text-slate-900">{genre || "—"}</div></div>
                   <div><span className="text-slate-500">仕入総額</span><div className="font-medium text-slate-900">{totalNum.toLocaleString()} 円</div></div>
                   <div><span className="text-slate-500">送料</span><div className="font-medium text-slate-900">{shippingNum.toLocaleString()} 円</div></div>
                   <div><span className="text-slate-500">割引</span><div className="font-medium text-slate-900">{discountNum.toLocaleString()} 円</div></div>

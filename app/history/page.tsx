@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Pencil, Save, X, ChevronLeft, Download, Upload, Search, ArrowUp, ArrowDown, ArrowUpDown, Calendar } from "lucide-react";
+import { normalizeToFullWidthKatakana } from "@/lib/kana"; // 🌟 追加
 
 type RecordRow = {
   id: number;
@@ -18,10 +19,17 @@ type RecordRow = {
   header: {
     id: number;
     purchase_date: string;
-    supplier: string | null;
+    supplier: string | null; // ここにはカナ（例: アマゾン）が入っている
     genre: string | null;
     created_at: string;
   } | null;
+};
+
+// 🌟 追加：仕入先マスターの型定義
+type SupplierMaster = {
+  id: number;
+  name: string;
+  kana: string;
 };
 
 function BarcodeIcon({ className }: { className?: string }) {
@@ -50,7 +58,7 @@ type EditDraft = {
   model_number: string;
   created_at: string;
   registered_at: string;
-  supplier: string;
+  supplier: string; // 編集用のドラフト
   genre: string;
   base_price: number;
   effective_unit_price: number;
@@ -58,6 +66,9 @@ type EditDraft = {
 
 export default function HistoryPage() {
   const [rows, setRows] = useState<RecordRow[]>([]);
+  // 🌟 追加：仕入先マスターのデータを保持する
+  const [suppliers, setSuppliers] = useState<SupplierMaster[]>([]);
+  
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -76,10 +87,20 @@ export default function HistoryPage() {
 
   const fetchRecords = useCallback(async () => {
     try {
-      const res = await fetch("/api/records");
-      if (!res.ok) throw new Error("取得に失敗しました");
-      const data = await res.json();
-      setRows(data);
+      // 🌟 変更点：在庫データと仕入先マスターデータを「同時に」取得する
+      const [recordsRes, suppliersRes] = await Promise.all([
+        fetch("/api/records"),
+        fetch("/api/suppliers") // これで仕入先一覧（ID, name, kana 等）を取得
+      ]);
+      
+      if (!recordsRes.ok) throw new Error("在庫データの取得に失敗しました");
+      const recordsData = await recordsRes.json();
+      setRows(recordsData);
+
+      if (suppliersRes.ok) {
+        const suppliersData = await suppliersRes.json();
+        setSuppliers(suppliersData);
+      }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "エラーが発生しました");
     } finally {
@@ -90,6 +111,20 @@ export default function HistoryPage() {
   useEffect(() => {
     fetchRecords();
   }, [fetchRecords]);
+
+  // 🌟 追加：「カナ」を渡すと、マスターから「正式名称（name）」を探して返す関数
+  const getSupplierName = useCallback((kanaOrName: string | null | undefined): string => {
+    if (!kanaOrName) return "—";
+    
+    // データベースには「アマゾン」などのカナが保存されている前提
+    // マスターの `kana` と完全に一致するものを探す
+    const match = suppliers.find(s => s.kana === kanaOrName);
+    
+    // もし見つかれば正式名称（例: Amazon）を返す。
+    // 見つからなければ、元々入っていた文字（古いデータなどで名前が直接入っているケース用）をそのまま返す
+    return match ? match.name : kanaOrName;
+  }, [suppliers]);
+
 
   const requestSort = (key: string) => {
     setSortConfig((prev) => {
@@ -106,7 +141,8 @@ export default function HistoryPage() {
       case "created_at":
         return row.created_at ?? row.header?.created_at ?? "";
       case "supplier":
-        return row.header?.supplier ?? "";
+        // 🌟 変更点：ソートする時も、正式名称で並び替えるようにする
+        return getSupplierName(row.header?.supplier);
       case "genre":
         return row.header?.genre ?? "";
       case "jan_code":
@@ -137,7 +173,10 @@ export default function HistoryPage() {
           (r.jan_code ?? "").toLowerCase().includes(term) ||
           (r.brand ?? "").toLowerCase().includes(term) ||
           (r.product_name ?? "").toLowerCase().includes(term) ||
-          (r.model_number ?? "").toLowerCase().includes(term)
+          (r.model_number ?? "").toLowerCase().includes(term) ||
+          // 🌟 変更点：検索時も「正式名称」と「カナ」の両方で引っかかるようにする
+          (getSupplierName(r.header?.supplier)).toLowerCase().includes(term) ||
+          (r.header?.supplier ?? "").toLowerCase().includes(term)
       );
     }
     const { key, direction } = sortConfig;
@@ -258,7 +297,7 @@ export default function HistoryPage() {
       model_number: row.model_number ?? "",
       created_at: isoToSlashed(row.created_at) || normalizeDateToSlashed(toDateValue(row.created_at)),
       registered_at: isoToSlashed(row.registered_at ?? row.created_at) || normalizeDateToSlashed(toDateValue(row.registered_at ?? row.created_at)),
-      supplier: row.header?.supplier ?? "",
+      supplier: row.header?.supplier ?? "", // 編集時も「カナ」をベースに扱う
       genre: row.header?.genre ?? "",
       base_price: row.base_price,
       effective_unit_price: row.effective_unit_price,
@@ -274,6 +313,9 @@ export default function HistoryPage() {
     if (editingId == null || !editDraft) return;
     setSaving(true);
     try {
+      // 🌟 追加：編集画面で仕入先が変更された場合も、必ずカナに変換して保存する
+      const kanaSupplier = normalizeToFullWidthKatakana(editDraft.supplier);
+
       const isoDate = slashedToIsoDate(editDraft.created_at);
       const created_at = isoDate ? `${isoDate}T00:00:00.000Z` : "";
       const isoRegistered = slashedToIsoDate(editDraft.registered_at);
@@ -286,7 +328,7 @@ export default function HistoryPage() {
           brand: editDraft.brand,
           product_name: editDraft.product_name,
           model_number: editDraft.model_number,
-          supplier: editDraft.supplier,
+          supplier: kanaSupplier, // 🌟 変換したカナを送信
           genre: editDraft.genre,
           base_price: editDraft.base_price,
           effective_unit_price: editDraft.effective_unit_price,
@@ -298,7 +340,7 @@ export default function HistoryPage() {
       setRows((prev) =>
         prev.map((r) => {
             if (r.id !== editingId) return r;
-            const newHeader = r.header ? { ...r.header, supplier: editDraft.supplier, genre: editDraft.genre } : r.header;
+            const newHeader = r.header ? { ...r.header, supplier: kanaSupplier, genre: editDraft.genre } : r.header;
             return {
                 ...r,
                 brand: editDraft.brand || null,
@@ -342,7 +384,7 @@ export default function HistoryPage() {
         model_number: r.model_number ?? "",
         base_price: r.base_price,
         effective_unit_price: r.effective_unit_price,
-        supplier: r.header?.supplier ?? "",
+        supplier: normalizeToFullWidthKatakana(r.header?.supplier ?? ""), // 🌟 一括保存時もカナ変換を強制
         genre: r.header?.genre ?? "",
         registered_at: r.registered_at, //
         ...(r.created_at && { created_at: r.created_at }),
@@ -419,7 +461,8 @@ export default function HistoryPage() {
         r.brand ?? "",
         r.product_name ?? "",
         r.model_number ?? "",
-        r.header?.supplier ?? "",
+        // 🌟 CSV出力時も、カナではなく「正式名称」を出力する
+        getSupplierName(r.header?.supplier), 
         r.header?.genre ?? "",
         r.base_price ?? "",
         r.effective_unit_price ?? "",
@@ -437,7 +480,7 @@ export default function HistoryPage() {
     a.download = `inventory_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.csv`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [rows]);
+  }, [rows, getSupplierName]); // 🌟 依存配列に追加
 
   const parseCsvLine = (line: string): string[] => {
     const result: string[] = [];
@@ -600,6 +643,10 @@ export default function HistoryPage() {
           const idNum = row.id.trim() ? Number(row.id) : NaN;
           const bp = row.base_price.trim();
           const ep = row.effective_unit_price.trim();
+          
+          // 🌟 変更点: CSV取込時も、仕入先が入力されていればカナに変換する
+          const kanaSupplier = row.supplier.trim() ? normalizeToFullWidthKatakana(row.supplier.trim()) : undefined;
+
           const item: {
             id?: number;
             jan_code?: string;
@@ -617,7 +664,7 @@ export default function HistoryPage() {
             brand: row.brand.trim() || undefined,
             product_name: row.product_name.trim() || undefined,
             model_number: row.model_number.trim() || undefined,
-            supplier: row.supplier.trim() || undefined,
+            supplier: kanaSupplier, // カナで保存
             genre: row.genre.trim() || undefined,
             base_price: bp === "" ? undefined : Number(bp),
             effective_unit_price: ep === "" ? undefined : Number(ep),
@@ -690,7 +737,7 @@ export default function HistoryPage() {
                   type="text"
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
-                  placeholder="商品名やJANで検索..."
+                  placeholder="商品名やJAN、仕入先で検索..."
                   className={`${inputClass} pl-10 rounded-lg border-0 focus-visible:ring-0`}
                 />
               </div>
@@ -1027,11 +1074,21 @@ export default function HistoryPage() {
                                           ? setEditDraft((d) => (d ? { ...d, supplier: e.target.value } : d))
                                           : updateRowHeaderField(row.id, "supplier", e.target.value)
                                     }
+                                    // 🌟 変更点: ここで編集してもカナ変換されるようにした
+                                    onBlur={(e) => {
+                                        const kana = normalizeToFullWidthKatakana(e.target.value);
+                                        if (isIndividualEdit && editDraft) {
+                                            setEditDraft((d) => (d ? { ...d, supplier: kana } : d));
+                                        } else {
+                                            updateRowHeaderField(row.id, "supplier", kana);
+                                        }
+                                    }}
                                     className={`${inputClass} h-9 text-xs`}
-                                    placeholder="仕入先"
+                                    placeholder="仕入先カナ"
                                 />
                              ) : (
-                                row.header?.supplier ?? "—"
+                                // 🌟 変更点: 表示時はマスターから正式名称を引いてくる！
+                                getSupplierName(row.header?.supplier)
                              )}
                           </td>
                           <td className="px-6 py-4 text-slate-600">
