@@ -65,14 +65,16 @@ export async function POST(req: Request) {
         is_fixed_price: item.fixedUnitPrice,
         effective_unit_price: item.effectiveUnitPrice,
       });
-      let rows = items.map((item) => ({ ...baseRow(item), registered_at: nowIso }));
-      let { error: itemsError } = await supabase.from('inbound_items').insert(rows);
-      if (itemsError?.message?.includes('registered_at') || itemsError?.code === '42703') {
-        rows = items.map(baseRow);
-        const retry = await supabase.from('inbound_items').insert(rows);
-        itemsError = retry.error;
-      }
 
+      // 登録日（registered_at）を含めてデータを作成
+      const rows = items.map((item) => ({ ...baseRow(item), registered_at: nowIso }));
+      
+      // データベースに保存（1回だけ実行）
+      const { error: itemsError } = await supabase.from('inbound_items').insert(rows);
+
+      // ▼ 余計なリトライ用の if文 (itemsError?.message?.includes...) はここにありましたが、削除しました ▼
+
+      // 保存に失敗した場合のエラーハンドリング
       if (itemsError) {
         console.error('Failed to save inbound items:', itemsError);
         return NextResponse.json({ success: false, error: 'Database Error' }, { status: 500 });
