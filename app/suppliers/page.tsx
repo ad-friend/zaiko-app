@@ -72,6 +72,17 @@ export default function SuppliersPage() {
     return list;
   })();
 
+  // 🌟 追加：仕入先名を入力したときの「オートカナ」機能
+  const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setName(val);
+
+    // 漢字が含まれていない（入力中のひらがな・カタカナ・英数字のみ）場合、カナ欄に自動反映
+    if (/^[\u3040-\u309F\u30A0-\u30FF\uFF65-\uFF9F\sA-Za-z0-9]*$/.test(val)) {
+      setKana(normalizeToFullWidthKatakana(val));
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim() || !kana.trim()) {
@@ -186,13 +197,15 @@ export default function SuppliersPage() {
             <form onSubmit={handleSubmit} className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               <div>
                 <label className="text-xs font-semibold text-slate-500 block mb-1">仕入先名（必須）</label>
-                <input value={name} onChange={(e) => setName(e.target.value)} className={inputClass} required />
+                {/* 🌟 変更：名前を入力した時に自動でカナ欄にも反映されるようにした */}
+                <input value={name} onChange={handleNameChange} className={inputClass} required />
               </div>
               <div>
                 <label className="text-xs font-semibold text-slate-500 block mb-1">カナ（必須）</label>
+                {/* 🌟 変更：入力中（onChange）はそのままにし、枠から外れた時（onBlur）に変換するようにした */}
                 <input
                   value={kana}
-                  onChange={(e) => setKana(normalizeToFullWidthKatakana(e.target.value))}
+                  onChange={(e) => setKana(e.target.value)}
                   onBlur={(e) => setKana(normalizeToFullWidthKatakana(e.target.value))}
                   className={inputClass}
                   required
@@ -262,8 +275,14 @@ export default function SuppliersPage() {
                           )}
                         </td>
                         <td className="px-6 py-4">
+                          {/* 🌟 下の表にある編集用のカナ入力も同じように修正しました！ */}
                           {editingId === row.id && editDraft ? (
-                            <input value={editDraft.kana} onChange={(e) => setEditDraft({ ...editDraft, kana: normalizeToFullWidthKatakana(e.target.value) })} onBlur={(e) => setEditDraft((d) => d ? { ...d, kana: normalizeToFullWidthKatakana(e.target.value) } : d)} className={`${inputClass} h-9`} />
+                            <input
+                              value={editDraft.kana}
+                              onChange={(e) => setEditDraft({ ...editDraft, kana: e.target.value })}
+                              onBlur={(e) => setEditDraft((d) => d ? { ...d, kana: normalizeToFullWidthKatakana(e.target.value) } : d)}
+                              className={`${inputClass} h-9`}
+                            />
                           ) : (
                             row.kana
                           )}
