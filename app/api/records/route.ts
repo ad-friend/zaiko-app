@@ -63,21 +63,15 @@ const SELECT_WITHOUT_REGISTERED = `
 
 export async function GET() {
   try {
-    let { data, error } = await supabase
+    const { data, error } = await supabase
       .from("inbound_items")
       .select(SELECT_WITH_REGISTERED)
       .order("created_at", { ascending: false });
 
-    if (error?.message?.includes("registered_at") || error?.code === "42703") {
-      const retry = await supabase
-        .from("inbound_items")
-        .select(SELECT_WITHOUT_REGISTERED)
-        .order("created_at", { ascending: false });
-      data = retry.data;
-      error = retry.error;
-    }
+    // エラーがあればここでキャッチ処理へ飛ばす
     if (error) throw error;
 
+    // 取得したデータを画面用に整形する
     const rows = (data || []).map((row: any) => ({
       id: row.id,
       jan_code: row.jan_code ?? null,
@@ -92,8 +86,11 @@ export async function GET() {
       header: Array.isArray(row.inbound_headers) ? row.inbound_headers[0] : row.inbound_headers ?? null,
     }));
 
+    // 画面にデータを返す
     return NextResponse.json(rows);
+    
   } catch (e: any) {
+    // 💡 さっき消えてしまっていたのはココです！ try とセットになる catch ブロック
     console.error("[records] GET error:", e);
     return NextResponse.json({ error: e.message }, { status: 500 });
   }
