@@ -1,7 +1,6 @@
 /** JAN自動検索プログラム (Amazon SP-API対応版) */
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import SellingPartnerAPI from "amazon-sp-api";
 
 // 💡 Supabaseの準備
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
@@ -315,7 +314,8 @@ async function fetchAmazonSpApi(jan: string): Promise<string | null> {
 
   try {
     // 認証情報を使ってAmazon SP-APIのクライアントを作成
-    const spClient = new(SellingPartnerAPI as any)({
+    const SellingPartnerAPI = require("amazon-sp-api"); // ←ここに追加！
+    const spClient = new SellingPartnerAPI({
       region: "fe",
       refresh_token: refreshToken,
       credentials: {
@@ -323,7 +323,7 @@ async function fetchAmazonSpApi(jan: string): Promise<string | null> {
         SELLING_PARTNER_APP_CLIENT_SECRET: clientSecret,
         AWS_ACCESS_KEY_ID: accessKey,
         AWS_SECRET_ACCESS_KEY: secretKey,
-        AWS_SELLING_PARTNER_ROLE: "" // IAMユーザーのアクセスキーを直接使うのでRoleは空でOK
+        AWS_SELLING_PARTNER_ROLE: "" 
       }
     });
 
