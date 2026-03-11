@@ -316,7 +316,7 @@ async function fetchAmazonSpApi(jan: string): Promise<string | null> {
   try {
     // 認証情報を使ってAmazon SP-APIのクライアントを作成
     const spClient = new SellingPartnerAPI({
-      region: region,
+      region: "fe",
       refresh_token: refreshToken,
       credentials: {
         SELLING_PARTNER_APP_CLIENT_ID: clientId,
@@ -334,7 +334,7 @@ async function fetchAmazonSpApi(jan: string): Promise<string | null> {
       query: {
         keywords: [jan],
         marketplaceIds: ['A1VC38T7YXB528'], // 日本のマーケットプレイスID
-        includedData: ['summaries', 'attributes'] // 商品名やブランド情報を取得
+        includedData: ['summaries'] // 商品名やブランド情報を取得
       }
     });
 
