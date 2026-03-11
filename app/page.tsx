@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { normalizeToFullWidthKatakana } from "@/lib/kana";
 import Link from "next/link";
 import { Html5Qrcode } from "html5-qrcode";
 
@@ -150,8 +151,11 @@ export default function InboundPage() {
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const lastAddedIdRef = useRef<string | null>(null);
   
-  // サジェスト用仕入先リスト
-  const [supplierSuggestions, setSupplierSuggestions] = useState<string[]>([]);
+  // 仕入先サジェスト（カナ前方一致）
+  type SupplierSuggest = { id: number; name: string; kana: string };
+  const [supplierSuggestList, setSupplierSuggestList] = useState<SupplierSuggest[]>([]);
+  const [supplierSuggestOpen, setSupplierSuggestOpen] = useState(false);
+  const supplierSuggestTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 保存処理中フラグ
   const [isSubmitting, setIsSubmitting] = useState(false);
   // 登録情報確認モーダル
@@ -171,21 +175,7 @@ export default function InboundPage() {
 
   const validation = validate(totalNum, headerInfo, rows, totalPurchase);
 
-  // マウント時に仕入先リストを取得
-  useEffect(() => {
-    async function fetchSuppliers() {
-      try {
-        const res = await fetch("/api/suppliers");
-        if (res.ok) {
-          const data = await res.json();
-          setSupplierSuggestions(data);
-        }
-      } catch (err) {
-        console.error("Failed to load suppliers", err);
-      }
-    }
-    fetchSuppliers();
-  }, []);
+  // 仕入先サジェストは入力に応じてインクリメンタル取得（page.tsx 内で fetch）
 
   // 自動フォーカス
   useEffect(() => {
@@ -527,6 +517,12 @@ export default function InboundPage() {
             >
               在庫一覧
             </Link>
+             <Link
+              href="/suppliers"
+              className="text-sm font-medium text-slate-500 hover:text-primary transition-colors"
+            >
+              仕入先管理
+            </Link>
              <button
               onClick={() => alert("ログアウト")}
               className="text-sm font-medium text-slate-500 hover:text-destructive transition-colors"
@@ -566,21 +562,59 @@ export default function InboundPage() {
                             className={inputClass}
                         />
                       </div>
-                      <div>
+                      <div className="relative">
                         <label className="text-xs font-semibold text-slate-500 mb-1.5 block uppercase tracking-wide">仕入先</label>
-                        <input 
+                        <input
                             type="text"
                             value={supplier}
-                            onChange={(e) => setSupplier(e.target.value)}
-                            placeholder="例: 株式会社◯◯、Amazonなど"
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              setSupplier(v);
+                              const kana = normalizeToFullWidthKatakana(v);
+                              if (supplierSuggestTimer.current) clearTimeout(supplierSuggestTimer.current);
+                              if (!kana.trim()) {
+                                setSupplierSuggestList([]);
+                                setSupplierSuggestOpen(false);
+                                return;
+                              }
+                              supplierSuggestTimer.current = setTimeout(async () => {
+                                try {
+                                  const res = await fetch(`/api/suppliers?q=${encodeURIComponent(kana.trim())}`);
+                                  if (res.ok) {
+                                    const data = await res.json();
+                                    if (Array.isArray(data)) {
+                                      setSupplierSuggestList(data);
+                                      setSupplierSuggestOpen(data.length > 0);
+                                    }
+                                  }
+                                } catch {
+                                  setSupplierSuggestList([]);
+                                }
+                              }, 150);
+                            }}
+                            onBlur={() => setTimeout(() => setSupplierSuggestOpen(false), 200)}
+                            onFocus={() => { if (supplierSuggestList.length) setSupplierSuggestOpen(true); }}
+                            placeholder="カナで検索（例: アド）または直接入力"
                             className={inputClass}
-                            list="supplier-list"
+                            autoComplete="off"
                         />
-                        <datalist id="supplier-list">
-                          {supplierSuggestions.map((s, i) => (
-                            <option key={i} value={s} />
-                          ))}
-                        </datalist>
+                        {supplierSuggestOpen && supplierSuggestList.length > 0 && (
+                          <ul className="absolute z-20 mt-1 max-h-48 w-full overflow-auto rounded-md border border-slate-200 bg-white py-1 shadow-lg">
+                            {supplierSuggestList.map((s) => (
+                              <li key={s.id}>
+                                <button
+                                  type="button"
+                                  className="w-full px-3 py-2 text-left text-sm hover:bg-slate-50"
+                                  onMouseDown={(e) => e.preventDefault()}
+                                  onClick={() => { setSupplier(s.name); setSupplierSuggestOpen(false); }}
+                                >
+                                  <span className="font-medium">{s.name}</span>
+                                  <span className="ml-2 text-xs text-slate-500">{s.kana}</span>
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
                       </div>
                       <div>
                         <label className="text-xs font-semibold text-slate-500 mb-1.5 block uppercase tracking-wide">ジャンル</label>

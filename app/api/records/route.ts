@@ -11,6 +11,8 @@ export type RecordRow = {
   base_price: number;
   effective_unit_price: number;
   created_at: string;
+  /** 入庫登録処理実行時刻（登録日） */
+  registered_at?: string;
   header: {
     id: number;
     purchase_date: string;
@@ -20,32 +22,60 @@ export type RecordRow = {
   } | null;
 };
 
+const SELECT_WITH_REGISTERED = `
+  id,
+  jan_code,
+  product_name,
+  brand,
+  model_number,
+  condition_type,
+  base_price,
+  effective_unit_price,
+  created_at,
+  registered_at,
+  inbound_headers (
+    id,
+    purchase_date,
+    supplier,
+    genre,
+    created_at
+  )
+`;
+
+const SELECT_WITHOUT_REGISTERED = `
+  id,
+  jan_code,
+  product_name,
+  brand,
+  model_number,
+  condition_type,
+  base_price,
+  effective_unit_price,
+  created_at,
+  inbound_headers (
+    id,
+    purchase_date,
+    supplier,
+    genre,
+    created_at
+  )
+`;
+
 export async function GET() {
   try {
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from("inbound_items")
-      .select(
-        `
-        id,
-        jan_code,
-        product_name,
-        brand,
-        model_number,
-        condition_type,
-        base_price,
-        effective_unit_price,
-        created_at,
-        inbound_headers (
-          id,
-          purchase_date,
-          supplier,
-          genre,
-          created_at
-        )
-      `
-      )
+      .select(SELECT_WITH_REGISTERED)
       .order("created_at", { ascending: false });
 
+    if (error?.message?.includes("registered_at") || error?.code === "42703") {
+      const retry = await supabase
+        .from("inbound_items")
+        .select(SELECT_WITHOUT_REGISTERED)
+        .order("created_at", { ascending: false });
+      data = retry.data;
+      error = retry.error;
+    }
     if (error) throw error;
 
     const rows = (data || []).map((row: any) => ({
@@ -58,6 +88,7 @@ export async function GET() {
       base_price: Number(row.base_price ?? 0),
       effective_unit_price: Number(row.effective_unit_price ?? 0),
       created_at: row.created_at ?? "",
+      registered_at: row.registered_at ?? row.created_at ?? "",
       header: Array.isArray(row.inbound_headers) ? row.inbound_headers[0] : row.inbound_headers ?? null,
     }));
 

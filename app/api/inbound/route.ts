@@ -53,7 +53,8 @@ export async function POST(req: Request) {
 
     // 2. 明細（商品リスト）の保存
     if (items.length > 0) {
-      const rows = items.map((item) => ({
+      const nowIso = new Date().toISOString();
+      const baseRow = (item: Item) => ({
         header_id: headerId,
         jan_code: item.jan,
         brand: item.brand,
@@ -63,9 +64,14 @@ export async function POST(req: Request) {
         base_price: item.basePrice,
         is_fixed_price: item.fixedUnitPrice,
         effective_unit_price: item.effectiveUnitPrice,
-      }));
-
-      const { error: itemsError } = await supabase.from('inbound_items').insert(rows);
+      });
+      let rows = items.map((item) => ({ ...baseRow(item), registered_at: nowIso }));
+      let { error: itemsError } = await supabase.from('inbound_items').insert(rows);
+      if (itemsError?.message?.includes('registered_at') || itemsError?.code === '42703') {
+        rows = items.map(baseRow);
+        const retry = await supabase.from('inbound_items').insert(rows);
+        itemsError = retry.error;
+      }
 
       if (itemsError) {
         console.error('Failed to save inbound items:', itemsError);

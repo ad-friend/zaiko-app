@@ -1,95 +1,89 @@
 import { NextRequest, NextResponse } from "next/server";
+import { supabase } from "@/lib/supabase";
 
-export type InferJanResponse = {
-  brand: string;
-  productName: string;
-  modelNumber: string;
-  inferred: boolean;
+export type SupplierRow = {
+  id: number;
+  name: string;
+  kana: string;
+  phone: string | null;
+  address: string | null;
+  created_at: string;
 };
 
-// 1. モデル名はご指摘のプレビュー版を使用
-const GEMINI_MODEL = "gemini-3.1-flash-lite-preview";
+/** GET: 一覧 or ?q=カナ前方一致 */
+export async function GET(request: NextRequest) {
+  try {
+    const q = request.nextUrl.searchParams.get("q")?.trim() ?? "";
+    const { data, error } = await supabase.from("suppliers").select("*").order("kana", { ascending: true });
+    if (error) throw error;
+    let list = data ?? [];
+    if (q) {
+      const upper = q.toUpperCase();
+      list = list.filter((r: { kana?: string }) => (r.kana ?? "").toUpperCase().startsWith(upper));
+    }
+    return NextResponse.json(list);
+  } catch (e: any) {
+    if (e.code === "42P01" || e.message?.includes("does not exist")) {
+      return NextResponse.json([]);
+    }
+    return NextResponse.json({ error: e.message }, { status: 500 });
+  }
+}
 
+/** POST: 新規登録 */
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const jan = String(body.jan ?? "").trim().replace(/\D/g, "");
-    
-    if (!jan) return NextResponse.json({ error: "JANが必要です" }, { status: 400 });
-
-    const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
-    
-    if (apiKey) {
-      try {
-        const result = await inferWithGemini(jan, apiKey);
-        return NextResponse.json(result);
-      } catch (geminiError: any) {
-        console.error("[infer-jan] Gemini Error:", geminiError);
-        // AIが失敗した際、エラー理由を表示しつつヒューリスティックを返す
-        return NextResponse.json({
-          ...inferHeuristic(jan),
-          brand: "❌ AIエラー",
-          productName: `理由: ${geminiError.message}`
-        });
-      }
-    }
-
-    return NextResponse.json(inferHeuristic(jan));
+    const name = String(body.name ?? "").trim();
+    const kana = String(body.kana ?? "").trim();
+    if (!name || !kana) return NextResponse.json({ error: "仕入先名とカナは必須です" }, { status: 400 });
+    const { data, error } = await supabase
+      .from("suppliers")
+      .insert({
+        name,
+        kana,
+        phone: body.phone ? String(body.phone).trim() : null,
+        address: body.address ? String(body.address).trim() : null,
+      })
+      .select()
+      .single();
+    if (error) throw error;
+    return NextResponse.json(data);
   } catch (e: any) {
     return NextResponse.json({ error: e.message }, { status: 500 });
   }
 }
 
-async function inferWithGemini(jan: string, apiKey: string): Promise<InferJanResponse> {
-  // 3.1系プレビューモデルのため v1beta を使用
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
-  
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{
-        parts: [{
-          text: `あなたはJANコードから商品情報を特定する専門家です。
-          JANコード「${jan}」のブランド名、正確な商品名、型番を特定してください。
-          必ず以下のJSON形式のみで回答し、余計な説明は含めないでください。
-          {"brand":"ブランド名","product_name":"商品名","model_number":"型番"}`
-        }]
-      }],
-      generationConfig: { max_output_tokens: 512, temperature: 0.1 }
-    }),
-  });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Google API (${res.status}): ${errText.slice(0, 100)}`);
+/** PATCH: 更新 */
+export async function PATCH(request: NextRequest) {
+  try {
+    const body = await request.json();
+    const id = Number(body.id);
+    if (!id) return NextResponse.json({ error: "idが必要です" }, { status: 400 });
+    const update: Record<string, unknown> = {};
+    if (body.name !== undefined) update.name = String(body.name).trim();
+    if (body.kana !== undefined) update.kana = String(body.kana).trim();
+    if (body.phone !== undefined) update.phone = body.phone ? String(body.phone).trim() : null;
+    if (body.address !== undefined) update.address = body.address ? String(body.address).trim() : null;
+    if (Object.keys(update).length === 0) return NextResponse.json({ error: "更新項目がありません" }, { status: 400 });
+    const { error } = await supabase.from("suppliers").update(update).eq("id", id);
+    if (error) throw error;
+    return NextResponse.json({ ok: true });
+  } catch (e: any) {
+    return NextResponse.json({ error: e.message }, { status: 500 });
   }
-
-  const data = await res.json();
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
-  
-  const match = text.match(/\{[\s\S]*\}/);
-  const parsed = match ? JSON.parse(match[0]) : {};
-
-  return {
-    brand: sanitizeProductText(parsed.brand ?? ""),
-    productName: sanitizeProductText(parsed.product_name ?? ""),
-    modelNumber: sanitizeProductText(parsed.model_number ?? ""),
-    inferred: true,
-  };
 }
 
-// ここから下の関数が不足していた、あるいは名前が日本語になっていたのがエラーの原因です
-function sanitizeProductText(s: string): string {
-  return String(s).replace(/\d{13,}/g, "").replace(/\s+/g, " ").trim();
-}
-
-function inferHeuristic(jan: string): InferJanResponse {
-  const digits = jan.replace(/\D/g, "");
-  return {
-    brand: digits.startsWith("4") ? "（推論）国産品" : "（推論）不明",
-    productName: `商品 ${digits.slice(-6)}`,
-    modelNumber: `JAN-${digits.slice(-6)}`,
-    inferred: true,
-  };
+/** DELETE: 一括削除 */
+export async function DELETE(request: NextRequest) {
+  try {
+    const body = await request.json();
+    const ids = Array.isArray(body.ids) ? body.ids.map(Number).filter(Boolean) : [];
+    if (ids.length === 0) return NextResponse.json({ error: "idsが必要です" }, { status: 400 });
+    const { error } = await supabase.from("suppliers").delete().in("id", ids);
+    if (error) throw error;
+    return NextResponse.json({ ok: true });
+  } catch (e: any) {
+    return NextResponse.json({ error: e.message }, { status: 500 });
+  }
 }

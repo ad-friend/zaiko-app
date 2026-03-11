@@ -44,3 +44,23 @@ CREATE POLICY "Allow anon all on inbound_headers"
 CREATE POLICY "Allow anon all on inbound_items"
   ON inbound_items FOR ALL
   USING (true) WITH CHECK (true);
+
+-- 仕入先マスタ（仕入先管理ページ用）
+CREATE TABLE IF NOT EXISTS suppliers (
+  id BIGSERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  kana TEXT NOT NULL,
+  phone TEXT,
+  address TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_suppliers_kana ON suppliers (kana);
+
+ALTER TABLE suppliers ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow anon all on suppliers"
+  ON suppliers FOR ALL
+  USING (true) WITH CHECK (true);
+
+-- 入庫登録実行時刻（登録日として一覧表示）
+ALTER TABLE inbound_items
+  ADD COLUMN IF NOT EXISTS registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW();

@@ -6,6 +6,7 @@ import { Pencil, Save, X, ChevronLeft, Download, Upload, Search, ArrowUp, ArrowD
 
 type RecordRow = {
   id: number;
+  registered_at?: string;
   jan_code: string | null;
   product_name: string | null;
   brand: string | null;
@@ -99,6 +100,8 @@ export default function HistoryPage() {
 
   const getSortValue = (row: RecordRow, key: string): string | number => {
     switch (key) {
+      case "registered_at":
+        return row.registered_at ?? row.created_at ?? "";
       case "created_at":
         return row.created_at ?? row.header?.created_at ?? "";
       case "supplier":
@@ -403,7 +406,7 @@ export default function HistoryPage() {
   };
 
   const handleCsvExport = useCallback(() => {
-    const header = "id,jan_code,brand,product_name,model_number,supplier,genre,base_price,effective_unit_price,created_at,status";
+    const header = "id,jan_code,brand,product_name,model_number,supplier,genre,base_price,effective_unit_price,created_at,registered_at,status";
     const lines = rows.map((r) =>
       [
         r.id,
@@ -416,6 +419,7 @@ export default function HistoryPage() {
         r.base_price ?? "",
         r.effective_unit_price ?? "",
         r.created_at ?? "",
+        r.registered_at ?? "",
         statusLabel(r.condition_type),
       ].map((x) => escapeCsv(x)).join(",")
     );
@@ -652,6 +656,7 @@ export default function HistoryPage() {
             </Link>
           </div>
           <div className="flex items-center gap-3">
+            <Link href="/suppliers" className="text-sm font-medium text-slate-500 hover:text-primary transition-colors mr-2">仕入先管理</Link>
             <Link
               href="/"
               className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 h-10 px-6 py-2 shadow-sm bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300"
@@ -804,6 +809,12 @@ export default function HistoryPage() {
                         </button>
                       </th>
                       <th className="px-6 py-4">
+                        <button type="button" onClick={() => requestSort("registered_at")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
+                          登録日
+                          {sortConfig.key === "registered_at" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
+                        </button>
+                      </th>
+                      <th className="px-6 py-4">
                         <button type="button" onClick={() => requestSort("supplier")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           仕入先
                           {sortConfig.key === "supplier" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
@@ -940,6 +951,11 @@ export default function HistoryPage() {
                             ) : (
                               displayDate
                             )}
+                          </td>
+                          <td className="px-6 py-4 text-slate-600 whitespace-nowrap text-xs">
+                            {row.registered_at
+                              ? new Date(row.registered_at).toLocaleString("ja-JP", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+                              : formatDate(row.created_at)}
                           </td>
                           <td className="px-6 py-4 text-slate-700">
                              {isEditMode ? (
