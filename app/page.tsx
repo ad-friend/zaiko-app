@@ -373,6 +373,9 @@ export default function InboundPage() {
         setTotalPurchase("");    // 仕入総額を空にする
         setShipping("");         // 送料を空にする
         setDiscount("");         // 割引を空にする
+        setPurchaseDate(new Date().toISOString().split('T')[0]); // 仕入日を「今日」に戻す
+        setSupplier("");         // 仕入先カナを空にする
+        setGenre("");            // ジャンルを空にする
         // window.location.reload(); 
 
     } catch (error) {
