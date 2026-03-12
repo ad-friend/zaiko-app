@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 export async function POST(request: NextRequest) {
   try {
     const { text } = await request.json();
+    console.log("📝 APIに届いた文字:", text);
     const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
 
     if (!text || !apiKey) return NextResponse.json({ kana: "" });
@@ -20,6 +21,7 @@ export async function POST(request: NextRequest) {
     });
 
     const data = await res.json();
+    console.log("🤖 Geminiからの返事:", JSON.stringify(data, null, 2));
     const kana = (data.candidates?.[0]?.content?.parts?.[0]?.text ?? "").trim().replace(/[\n\r\s　]/g, "");
 
     return NextResponse.json({ kana });
