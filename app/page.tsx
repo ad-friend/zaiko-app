@@ -493,6 +493,9 @@ export default function InboundPage() {
              <Link href="/suppliers" className="text-sm font-medium text-slate-500 hover:text-primary transition-colors">
               仕入先管理
             </Link>
+             <Link href="/products" className="text-sm font-medium text-slate-500 hover:text-primary transition-colors">
+              商品マスタ
+            </Link>
              <button onClick={() => alert("ログアウト")} className="text-sm font-medium text-slate-500 hover:text-destructive transition-colors">
               ログアウト
             </button>

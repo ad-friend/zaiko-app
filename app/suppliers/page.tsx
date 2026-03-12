@@ -198,6 +198,7 @@ export default function SuppliersPage() {
           </Link>
           <div className="flex items-center gap-3">
             <Link href="/history" className={`${buttonClass} bg-white text-slate-700 border border-slate-200`}>在庫一覧</Link>
+            <Link href="/products" className={`${buttonClass} bg-white text-slate-700 border border-slate-200`}>商品マスタ</Link>
             <Link href="/" className={`${buttonClass} bg-white text-slate-700 border border-slate-200`}><ChevronLeft className="mr-2 h-4 w-4" />入庫画面</Link>
           </div>
         </div>
