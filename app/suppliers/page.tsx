@@ -89,6 +89,10 @@ export default function SuppliersPage() {
       alert("仕入先名とカナは必須です");
       return;
     }
+    if (!/^[ア-ンヴー・\s]+$/.test(kana.trim())) {
+      alert("カナは全角カタカナで入力してください（英数字や漢字、ひらがなは使用できません）。");
+      return;
+    }
     setSaving(true);
     try {
       const res = await fetch("/api/suppliers", {
@@ -142,6 +146,10 @@ export default function SuppliersPage() {
 
   const saveEdit = async () => {
     if (!editDraft) return;
+    if (!/^[ア-ンヴー・\s]+$/.test(editDraft.kana.trim())) {
+      alert("カナは全角カタカナで入力してください（英数字や漢字、ひらがなは使用できません）。");
+      return;
+    }
     setSaving(true);
     try {
       const res = await fetch("/api/suppliers", {

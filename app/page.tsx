@@ -369,7 +369,10 @@ export default function InboundPage() {
         
         const result = await res.json();
         alert(`保存しました (ID: ${result.id}, 商品数: ${expandedItems.length})`);
-        
+        setRows([]);             // 商品リストを空にする
+        setTotalPurchase("");    // 仕入総額を空にする
+        setShipping("");         // 送料を空にする
+        setDiscount("");         // 割引を空にする
         // window.location.reload(); 
 
     } catch (error) {
