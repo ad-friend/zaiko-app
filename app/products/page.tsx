@@ -37,6 +37,7 @@ export default function ProductsPage() {
   const [sortConfig, setSortConfig] = useState<{ key: string | null; direction: "asc" | "desc" }>({ key: null, direction: "asc" });
   const [searchTerm, setSearchTerm] = useState("");
   const [saving, setSaving] = useState(false);
+  const [isInferring, setIsInferring] = useState(false); 
   const csvInputRef = useRef<HTMLInputElement>(null);
 
   const fetchRows = useCallback(async () => {
@@ -74,7 +75,30 @@ export default function ProductsPage() {
     }
     return list;
   })();
-
+// 🌟 追加：JANコードからAIで商品情報を引っ張ってくる関数
+const handleJanCodeCheck = async (jan: string) => {
+  const trimmed = jan.trim();
+  if (!trimmed) return;
+  
+  setIsInferring(true);
+  try {
+    const res = await fetch("/api/infer-jan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jan: trimmed }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.productName) setProductName(data.productName);
+      if (data.brand) setBrand(data.brand);
+      if (data.modelNumber) setModelNumber(data.modelNumber);
+    }
+  } catch (e) {
+    console.error("AI取得エラー:", e);
+  } finally {
+    setIsInferring(false);
+  }
+};
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!janCode.trim() || !productName.trim()) {
@@ -302,24 +326,43 @@ export default function ProductsPage() {
             <form onSubmit={handleSubmit} className="flex flex-col gap-4 lg:flex-row lg:flex-wrap lg:items-end">
               <div className="w-full lg:flex-1 lg:min-w-0">
                 <label className="text-xs font-semibold text-slate-500 block mb-1">JANコード（必須）</label>
-                <input value={janCode} onChange={(e) => setJanCode(e.target.value)} className={inputClass} required />
+                <input 
+                  value={janCode} 
+                  onChange={(e) => setJanCode(e.target.value)} 
+                  onBlur={() => handleJanCodeCheck(janCode)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault(); // 勝手に保存されるのを防ぐ
+                      handleJanCodeCheck(janCode);
+                    }
+                  }}
+                  className={inputClass} 
+                  required 
+                />
               </div>
               <div className="w-full lg:flex-1 lg:min-w-0">
                 <label className="text-xs font-semibold text-slate-500 block mb-1">ブランド（任意）</label>
-                <input value={brand} onChange={(e) => setBrand(e.target.value)} className={inputClass} />
+                <input value={brand} onChange={(e) => setBrand(e.target.value)} disabled={isInferring} className={inputClass} />
               </div>
               <div className="w-full lg:flex-1 lg:min-w-0">
                 <label className="text-xs font-semibold text-slate-500 block mb-1">商品名（必須）</label>
-                <input value={productName} onChange={(e) => setProductName(e.target.value)} className={inputClass} required />
+                <input 
+                  value={productName} 
+                  onChange={(e) => setProductName(e.target.value)} 
+                  disabled={isInferring} 
+                  placeholder={isInferring ? "AIで商品情報を検索中..." : ""}
+                  className={inputClass} 
+                  required 
+                />
               </div>
               <div className="w-full lg:flex-1 lg:min-w-0">
                 <label className="text-xs font-semibold text-slate-500 block mb-1">型番（任意）</label>
-                <input value={modelNumber} onChange={(e) => setModelNumber(e.target.value)} className={inputClass} />
+                <input value={modelNumber} onChange={(e) => setModelNumber(e.target.value)} disabled={isInferring} className={inputClass} />
               </div>
               <div className="w-full lg:w-auto lg:flex-shrink-0">
                 <label className="text-xs font-semibold text-slate-500 block mb-1 lg:invisible lg:pointer-events-none">登録</label>
-                <button type="submit" disabled={saving} className={`${buttonClass} w-full lg:w-auto bg-primary text-white hover:bg-primary/90`}>
-                  {saving ? "保存中..." : "登録"}
+                <button type="submit" disabled={saving || isInferring} className={`${buttonClass} w-full lg:w-auto bg-primary text-white hover:bg-primary/90`}>
+                  {saving ? "保存中..." : isInferring ? "検索中..." : "登録"}
                 </button>
               </div>
             </form>
