@@ -73,19 +73,13 @@ export default function SuppliersPage() {
   })();
 
   // 🌟 追加：仕入先名を入力したときの「オートカナ」機能
-  const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newVal = e.target.value;
-    const oldVal = name; // 1つ前の入力状態
-    setName(newVal);
+const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setName(val);
 
-    // 文字が増えていて、かつ普通に末尾に入力し続けている場合
-    if (newVal.length > oldVal.length && newVal.startsWith(oldVal)) {
-      const addedStr = newVal.slice(oldVal.length); // 今回新しくタイピングした文字だけを切り取る
-      
-      // 追加された文字が漢字でなければ（ひらがな・カタカナ・英数字なら）、カナ欄の末尾に合体させる
-      if (/^[\u3040-\u309F\u30A0-\u30FF\uFF65-\uFF9F\sA-Za-z0-9]+$/.test(addedStr)) {
-        setKana((prev) => prev + normalizeToFullWidthKatakana(addedStr));
-      }
+    // 漢字が含まれていない（入力中のひらがな・カタカナ・英数字のみ）場合、カナ欄に自動反映
+    if (/^[\u3040-\u309F\u30A0-\u30FF\uFF65-\uFF9F\sA-Za-z0-9]*$/.test(val)) {
+      setKana(normalizeToFullWidthKatakana(val));
     }
   };
 
