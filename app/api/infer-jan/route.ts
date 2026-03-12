@@ -182,15 +182,14 @@ export async function POST(request: NextRequest) {
 
     const dbOnly = body.dbOnly === true;
 
-    // Step 1: 自社DB (inbound_items) で JAN 検索
+    // Step 1: 自社DB (productsマスタ) で JAN 検索
     if (supabaseUrl && supabaseKey) {
       try {
-        console.log("📡 Step 1: Supabase (inbound_itemsテーブル) 検索中...");
+        console.log("📡 Step 1: Supabase (productsマスタ) 検索中...");
         const { data: rows, error } = await supabase
-          .from("inbound_items")
+          .from("products") // 🌟 inbound_items から products に変更
           .select("jan_code, brand, product_name, model_number")
           .eq("jan_code", jan)
-          .order("created_at", { ascending: false })
           .limit(1);
 
         if (error) {
@@ -198,17 +197,18 @@ export async function POST(request: NextRequest) {
         } else {
           const product = rows?.[0] ?? null;
           if (product) {
-          console.log("✅ DBヒット成功! 登録情報を引用します:", product.product_name);
-          if (dbOnly) console.log("✅ [dbOnly] DBで解決したため、AIは起動しません。");
-          return NextResponse.json({
-            brand: sanitizeProductText(product.brand ?? ""),
-            productName: sanitizeProductText(product.product_name ?? ""),
-            modelNumber: sanitizeProductText(product.model_number ?? ""),
-            inferred: false,
-            source: "db",
-          });
+            console.log("✅ マスタヒット成功! 登録情報を引用します:", product.product_name);
+            if (dbOnly) console.log("✅ [dbOnly] DBで解決したため、AIは起動しません。");
+            return NextResponse.json({
+              brand: sanitizeProductText(product.brand ?? ""),
+              productName: sanitizeProductText(product.product_name ?? ""),
+              modelNumber: sanitizeProductText(product.model_number ?? ""),
+              inferred: false,
+              source: "db",
+              isMaster: true, // 🌟 画面側でロックをかけるための目印を追加！
+            });
           }
-          console.log("⚠️ DBには登録されていませんでした。外部APIへ移行します。");
+          console.log("⚠️ マスタには登録されていませんでした。外部APIへ移行します。");
         }
       } catch (dbErr) {
         console.warn("❗ DB接続例外:", dbErr);

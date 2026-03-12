@@ -19,6 +19,7 @@ type ProductRow = {
   fixedUnitPrice: boolean;
   inferredByAi: boolean;
   condition: ProductCondition;
+  isMaster?: boolean;
 };
 
 type HeaderInfo = {
@@ -230,7 +231,7 @@ export default function InboundPage() {
             brand = cleanseProductName(dbData.brand ?? "");
             productName = cleanseProductName(dbData.productName ?? "");
             modelNumber = cleanseProductName(dbData.modelNumber ?? "");
-            applyJanResult(trimmed, brand, productName, modelNumber, rowId);
+            applyJanResult(trimmed, brand, productName, modelNumber, rowId,dbData.isMaster);
             return;
           }
         }
@@ -247,19 +248,21 @@ export default function InboundPage() {
           productName = cleanseProductName(data.productName ?? "");
           modelNumber = cleanseProductName(data.modelNumber ?? "");
         }
-        applyJanResult(trimmed, brand, productName, modelNumber, rowId);
+        applyJanResult(trimmed, brand, productName, modelNumber, rowId,false);
       } catch (e) {
-        applyJanResult(trimmed, brand, productName, modelNumber, rowId);
+        applyJanResult(trimmed, brand, productName, modelNumber, rowId,false);
       } finally {
         setInferringJan(null);
       }
 
-      function applyJanResult(trimmed: string, brand: string, productName: string, modelNumber: string, rowId?: string) {
+      // 🌟 isMaster 引数を追加
+      function applyJanResult(trimmed: string, brand: string, productName: string, modelNumber: string, rowId?: string, isMaster: boolean = false) { 
         if (rowId) {
           setRows((prev) =>
             prev.map((r) =>
               r.id === rowId
-                ? { ...r, jan: r.jan || trimmed, brand: r.brand || brand, productName: r.productName || productName, modelNumber: r.modelNumber || modelNumber, inferredByAi: !!productName }
+                // 🌟 isMaster を保存するように追加
+                ? { ...r, jan: r.jan || trimmed, brand: r.brand || brand, productName: r.productName || productName, modelNumber: r.modelNumber || modelNumber, inferredByAi: !!productName, isMaster } 
                 : r
             )
           );
@@ -269,7 +272,8 @@ export default function InboundPage() {
             if (last && !last.jan && !last.brand && !last.productName) {
               return prev.map((r, i) =>
                 i === prev.length - 1
-                  ? { ...r, jan: trimmed, brand, productName, modelNumber, inferredByAi: !!productName }
+                  // 🌟 isMaster を保存するように追加
+                  ? { ...r, jan: trimmed, brand, productName, modelNumber, inferredByAi: !!productName, isMaster } 
                   : r
               );
             }
@@ -284,6 +288,7 @@ export default function InboundPage() {
               fixedUnitPrice: false,
               inferredByAi: !!productName,
               condition: "new",
+              isMaster, // 🌟 追加
             };
             lastAddedIdRef.current = newRow.id;
             return [...prev, newRow];
@@ -854,32 +859,26 @@ export default function InboundPage() {
                                <input
                                  value={row.productName}
                                  onChange={(e) => updateRow(row.id, { productName: e.target.value })}
-                                 className={`${inputClass} font-medium h-10 shadow-sm w-full`}
+                                 className={`${inputClass} font-medium h-10 shadow-sm w-full ${row.isMaster ? "bg-slate-100 text-slate-500 cursor-not-allowed border-slate-200" : ""}`}
                                  placeholder="商品名"
+                                 disabled={row.isMaster}
                                />
                                <div className="flex gap-3">
                                  <input
                                    value={row.brand}
                                    onChange={(e) => updateRow(row.id, { brand: e.target.value })}
-                                   className={`${inputClass} text-xs h-9 bg-white/50 shadow-sm flex-1 min-w-0`}
+                                   className={`${inputClass} text-xs h-9 shadow-sm flex-1 min-w-0 ${row.isMaster ? "bg-slate-100 text-slate-500 cursor-not-allowed border-slate-200" : "bg-white/50"}`}
                                    placeholder="ブランド"
+                                   disabled={row.isMaster}
                                  />
                                  <input
                                    value={row.modelNumber}
                                    onChange={(e) => updateRow(row.id, { modelNumber: e.target.value })}
-                                   className={`${inputClass} text-xs h-9 bg-white/50 shadow-sm flex-[2] min-w-0`}
+                                   className={`${inputClass} text-xs h-9 shadow-sm flex-[2] min-w-0 ${row.isMaster ? "bg-slate-100 text-slate-500 cursor-not-allowed border-slate-200" : "bg-white/50"}`}
                                    placeholder="型番"
+                                   disabled={row.isMaster}
                                  />
                                </div>
-                            </td>
-                            <td className="px-6 py-4 align-top">
-                               <input
-                                 type="number"
-                                 min={1}
-                                 value={row.quantity}
-                                 onChange={(e) => updateRow(row.id, { quantity: Math.max(1, Number(e.target.value)) })}
-                                 className={`${inputClass} text-right h-10 font-medium shadow-sm`}
-                               />
                             </td>
                             <td className="px-6 py-4 align-top">
                               <div className="relative">
@@ -976,22 +975,25 @@ export default function InboundPage() {
                              <input
                                value={row.productName}
                                onChange={(e) => updateRow(row.id, { productName: e.target.value })}
-                               className={`${inputClass} font-medium bg-white/80`}
+                               className={`${inputClass} font-medium ${row.isMaster ? "bg-slate-100 text-slate-500 cursor-not-allowed" : "bg-white/80"}`}
                                placeholder="商品名"
+                               disabled={row.isMaster}
                              />
                            </div>
                            <div className="grid grid-cols-2 gap-3">
                              <input
                                value={row.brand}
                                onChange={(e) => updateRow(row.id, { brand: e.target.value })}
-                               className={`${inputClass} text-xs bg-white/80`}
+                               className={`${inputClass} text-xs ${row.isMaster ? "bg-slate-100 text-slate-500 cursor-not-allowed" : "bg-white/80"}`}
                                placeholder="ブランド"
+                               disabled={row.isMaster}
                              />
                              <input
                                value={row.modelNumber}
                                onChange={(e) => updateRow(row.id, { modelNumber: e.target.value })}
-                               className={`${inputClass} text-xs bg-white/80`}
+                               className={`${inputClass} text-xs ${row.isMaster ? "bg-slate-100 text-slate-500 cursor-not-allowed" : "bg-white/80"}`}
                                placeholder="型番"
+                               disabled={row.isMaster}
                              />
                            </div>
                         </div>
