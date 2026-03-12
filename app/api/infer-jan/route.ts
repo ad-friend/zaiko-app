@@ -129,6 +129,24 @@ export async function PATCH(request: NextRequest) {
         }));
         const { error: insertError } = await supabase.from("inbound_items").insert(rows);
         if (insertError) throw new Error(insertError.message);
+        const masterProducts = rows
+          .filter((row: any) => row.jan_code && row.product_name) 
+          .map((row: any) => ({
+            jan_code: String(row.jan_code).trim(),
+            brand: row.brand ? String(row.brand).trim() : null,
+            product_name: String(row.product_name).trim(),
+            model_number: row.model_number ? String(row.model_number).trim() : null
+          }));
+
+        if (masterProducts.length > 0) {
+          // upsert と ignoreDuplicates を使うことで「すでにマスタにあるJANは無視（上書きしない）」という安全な登録ができます
+          const { error: masterError } = await supabase
+            .from("products")
+            .upsert(masterProducts, { onConflict: "jan_code", ignoreDuplicates: true });
+          
+          if (masterError) console.log("⚠️ マスタ自動登録エラー:", masterError.message);
+          else console.log(`✅ 新商品をマスタに ${masterProducts.length} 件 自動登録しました！`);
+        }
       }
       return NextResponse.json({ ok: true });
     }

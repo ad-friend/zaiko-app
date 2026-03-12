@@ -80,6 +80,32 @@ export async function POST(req: Request) {
         console.error('Failed to save inbound items:', itemsError);
         return NextResponse.json({ success: false, error: 'Database Error' }, { status: 500 });
       }
+      const masterProductsMap = new Map();
+      items.forEach((item) => {
+        if (item.jan && item.productName) {
+          masterProductsMap.set(item.jan, {
+            jan_code: item.jan.trim(),
+            brand: item.brand ? item.brand.trim() : null,
+            product_name: item.productName.trim(),
+            model_number: item.modelNumber ? item.modelNumber.trim() : null
+          });
+        }
+      });
+
+      const masterProducts = Array.from(masterProductsMap.values());
+
+      if (masterProducts.length > 0) {
+        // ignoreDuplicates: true によって、すでにマスタにある商品は安全に無視されます
+        const { error: masterError } = await supabase
+          .from('products')
+          .upsert(masterProducts, { onConflict: 'jan_code', ignoreDuplicates: true });
+        
+        if (masterError) {
+          console.error("⚠️ マスタ自動登録エラー:", masterError.message);
+        } else {
+          console.log(`✅ 新商品をマスタに ${masterProducts.length} 種類 自動登録しました！`);
+        }
+      }
     }
 
     return NextResponse.json({ success: true, id: headerId });
