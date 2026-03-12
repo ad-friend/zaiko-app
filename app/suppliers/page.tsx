@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Pencil, Save, X, ChevronLeft, Download, Search, ArrowUp, ArrowDown, ArrowUpDown } from "lucide-react";
 import { normalizeToFullWidthKatakana } from "@/lib/kana";
