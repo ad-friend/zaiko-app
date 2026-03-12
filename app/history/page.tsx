@@ -1118,6 +1118,7 @@ export default function HistoryPage() {
                                     ? setEditDraft((d) => (d ? { ...d, product_name: e.target.value } : d))
                                     : updateRowField(row.id, "product_name", e.target.value)
                                 }
+                                disabled={isBulkEditing}
                                 className={`${inputClass} h-9 font-medium`}
                                 placeholder="商品名"
                               />
@@ -1134,6 +1135,7 @@ export default function HistoryPage() {
                                     ? setEditDraft((d) => (d ? { ...d, brand: e.target.value } : d))
                                     : updateRowField(row.id, "brand", e.target.value)
                                 }
+                                disabled={isBulkEditing}
                                 className={`${inputClass} h-9`}
                                 placeholder="ブランド"
                               />
@@ -1150,6 +1152,7 @@ export default function HistoryPage() {
                                     ? setEditDraft((d) => (d ? { ...d, model_number: e.target.value } : d))
                                     : updateRowField(row.id, "model_number", e.target.value)
                                 }
+                                disabled={isBulkEditing}
                                 className={`${inputClass} h-9`}
                                 placeholder="型番"
                               />

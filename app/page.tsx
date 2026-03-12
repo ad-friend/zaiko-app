@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { normalizeToFullWidthKatakana } from "@/lib/kana";
+import { normalizeSupplierForMatch } from "@/lib/normalizeSupplier";
 import Link from "next/link";
 import { Html5Qrcode } from "html5-qrcode";
 
@@ -153,8 +154,7 @@ export default function InboundPage() {
   type SupplierSuggest = { id: number; name: string; kana: string };
   const [supplierSuggestList, setSupplierSuggestList] = useState<SupplierSuggest[]>([]);
   const [supplierSuggestOpen, setSupplierSuggestOpen] = useState(false);
-  const supplierSuggestTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  
+
   // 🌟 追加: ページを開いた時に仕入先マスターを全件読み込んでおく（リアルタイム検証用）
   const [masterSuppliers, setMasterSuppliers] = useState<SupplierSuggest[]>([]);
   useEffect(() => {
@@ -538,26 +538,19 @@ export default function InboundPage() {
                               const v = e.target.value;
                               setSupplier(v);
                               const kana = normalizeToFullWidthKatakana(v);
-                              if (supplierSuggestTimer.current) clearTimeout(supplierSuggestTimer.current);
                               if (!kana.trim()) {
                                 setSupplierSuggestList([]);
                                 setSupplierSuggestOpen(false);
                                 return;
                               }
-                              supplierSuggestTimer.current = setTimeout(async () => {
-                                try {
-                                  const res = await fetch(`/api/suppliers?q=${encodeURIComponent(kana.trim())}`);
-                                  if (res.ok) {
-                                    const data = await res.json();
-                                    if (Array.isArray(data)) {
-                                      setSupplierSuggestList(data);
-                                      setSupplierSuggestOpen(data.length > 0);
-                                    }
-                                  }
-                                } catch {
-                                  setSupplierSuggestList([]);
-                                }
-                              }, 150);
+                              const normalizedInput = normalizeSupplierForMatch(kana);
+                              const filtered = masterSuppliers.filter(
+                                (s) =>
+                                  normalizeSupplierForMatch(s.name).includes(normalizedInput) ||
+                                  normalizeSupplierForMatch(s.kana).includes(normalizedInput)
+                              );
+                              setSupplierSuggestList(filtered);
+                              setSupplierSuggestOpen(filtered.length > 0);
                             }}
                             onBlur={(e) => {
                               setSupplier(normalizeToFullWidthKatakana(e.target.value));
