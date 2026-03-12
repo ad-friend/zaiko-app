@@ -38,6 +38,7 @@ export default function SuppliersPage() {
   const [sortConfig, setSortConfig] = useState<{ key: string | null; direction: "asc" | "desc" }>({ key: null, direction: "asc" });
   const [searchTerm, setSearchTerm] = useState("");
   const [saving, setSaving] = useState(false);
+  const [isInferring, setIsInferring] = useState(false);
 
   const fetchRows = useCallback(async () => {
     try {
@@ -72,16 +73,28 @@ export default function SuppliersPage() {
     return list;
   })();
 
-  // 🌟 追加：仕入先名を入力したときの「オートカナ」機能
-const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = e.target.value;
-    setName(val);
+ // 仕入先名からマウスが外れた時（フォーカスアウト）にAIを呼ぶ
+ const handleNameBlur = async () => {
+  // 名前が空、または既にカナが入っている場合は実行しない（手動入力を優先）
+  if (!name.trim() || kana.trim()) return;
 
-    // 漢字が含まれていない（入力中のひらがな・カタカナ・英数字のみ）場合、カナ欄に自動反映
-    if (/^[\u3040-\u309F\u30A0-\u30FF\uFF65-\uFF9F\sA-Za-z0-9]*$/.test(val)) {
-      setKana(normalizeToFullWidthKatakana(val));
+  setIsInferring(true);
+  try {
+    const res = await fetch("/api/infer-kana", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: name.trim() }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.kana) setKana(data.kana);
     }
-  };
+  } catch (e) {
+    console.error("AIフリガナ取得エラー", e);
+  } finally {
+    setIsInferring(false);
+  }
+};
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -203,20 +216,27 @@ const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
           <div className="p-6 border-b border-slate-100">
             <h3 className="text-sm font-semibold text-slate-700 mb-4">新規登録</h3>
             <form onSubmit={handleSubmit} className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              <div>
+            <div>
                 <label className="text-xs font-semibold text-slate-500 block mb-1">仕入先名（必須）</label>
-                {/* 🌟 変更：名前を入力した時に自動でカナ欄にも反映されるようにした */}
-                <input value={name} onChange={handleNameChange} className={inputClass} required />
+                {/* 🌟 変更：onChangeをシンプルにして、onBlur（入力から離れた時）にAI関数を呼ぶ */}
+                <input 
+                  value={name} 
+                  onChange={(e) => setName(e.target.value)} 
+                  onBlur={handleNameBlur}
+                  className={inputClass} 
+                  required 
+                />
               </div>
               <div>
                 <label className="text-xs font-semibold text-slate-500 block mb-1">カナ（必須）</label>
-                {/* 🌟 変更：入力中（onChange）はそのままにし、枠から外れた時（onBlur）に変換するようにした */}
+                {/* 🌟 変更：AIが考え中の時は「AI変換中...」と表示して操作できないようにする */}
                 <input
-                  value={kana}
+                  value={isInferring ? "AI変換中..." : kana}
                   onChange={(e) => setKana(e.target.value)}
                   onBlur={(e) => setKana(normalizeToFullWidthKatakana(e.target.value))}
                   className={inputClass}
                   required
+                  disabled={isInferring}
                 />
               </div>
               <div>
