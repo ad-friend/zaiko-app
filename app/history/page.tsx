@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Pencil, Save, X, ChevronLeft, Download, Upload, Search, ArrowUp, ArrowDown, ArrowUpDown, Calendar } from "lucide-react";
+import { Pencil, Save, X, ChevronLeft, Download, Upload, Search, ArrowUp, ArrowDown, ArrowUpDown, Calendar, Package } from "lucide-react";
 import { normalizeToFullWidthKatakana } from "@/lib/kana";
 import { normalizeSupplierForMatch } from "@/lib/normalizeSupplier";
 
@@ -810,6 +810,10 @@ export default function HistoryPage() {
           <div className="flex items-center gap-3">
             <Link href="/suppliers" className="text-sm font-medium text-slate-500 hover:text-primary transition-colors mr-2">仕入先管理</Link>
             <Link href="/products" className="text-sm font-medium text-slate-500 hover:text-primary transition-colors mr-2">商品マスタ</Link>
+            <Link href="/sku" className="text-sm font-medium text-slate-500 hover:text-primary transition-colors mr-2 flex items-center gap-1">
+              <Package className="h-4 w-4" />
+              SKUマスター
+            </Link>
             <Link
               href="/"
               className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 h-10 px-6 py-2 shadow-sm bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300"

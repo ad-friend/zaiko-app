@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Pencil, Save, X, ChevronLeft, Download, Search, ArrowUp, ArrowDown, ArrowUpDown } from "lucide-react";
+import { Pencil, Save, X, ChevronLeft, Download, Search, ArrowUp, ArrowDown, ArrowUpDown, Package } from "lucide-react";
 import { normalizeToFullWidthKatakana } from "@/lib/kana";
 
 type SupplierRow = { id: number; name: string; kana: string; phone: string | null; address: string | null; created_at: string };
@@ -199,6 +199,7 @@ export default function SuppliersPage() {
           <div className="flex items-center gap-3">
             <Link href="/history" className={`${buttonClass} bg-white text-slate-700 border border-slate-200`}>在庫一覧</Link>
             <Link href="/products" className={`${buttonClass} bg-white text-slate-700 border border-slate-200`}>商品マスタ</Link>
+            <Link href="/sku" className={`${buttonClass} bg-white text-slate-700 border border-slate-200 flex items-center gap-1`}><Package className="h-4 w-4" />SKUマスター</Link>
             <Link href="/" className={`${buttonClass} bg-white text-slate-700 border border-slate-200`}><ChevronLeft className="mr-2 h-4 w-4" />入庫画面</Link>
           </div>
         </div>

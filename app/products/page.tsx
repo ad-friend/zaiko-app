@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Pencil, Save, X, ChevronLeft, Download, Upload, Search, ArrowUp, ArrowDown, ArrowUpDown } from "lucide-react";
+import { Pencil, Save, X, ChevronLeft, Download, Upload, Search, ArrowUp, ArrowDown, ArrowUpDown, Package } from "lucide-react";
 
 type ProductRow = { jan_code: string; brand: string | null; product_name: string; model_number: string | null; created_at: string };
 
@@ -302,6 +302,10 @@ const handleJanCodeCheck = async (jan: string) => {
             </Link>
             <Link href="/products" className={`${buttonClass} bg-white text-slate-700 border border-slate-200`}>
               商品マスタ
+            </Link>
+            <Link href="/sku" className={`${buttonClass} bg-white text-slate-700 border border-slate-200 flex items-center gap-1`}>
+              <Package className="h-4 w-4" />
+              SKUマスター
             </Link>
             <Link href="/" className={`${buttonClass} bg-white text-slate-700 border border-slate-200`}>
               <ChevronLeft className="mr-2 h-4 w-4" />

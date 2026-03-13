@@ -2,11 +2,28 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 
-/** POST: 一括登録。body: { sku: string, platform: string, items: { jan_code: string, quantity: number }[] } */
+/** GET: 一覧（sku, title, platform でグループ化しやすいようフラットで返す） */
+export async function GET() {
+  try {
+    const { data, error } = await supabase
+      .from("sku_mappings")
+      .select("id, sku, title, platform, jan_code, quantity, created_at")
+      .order("sku", { ascending: true })
+      .order("created_at", { ascending: true });
+    if (error) throw error;
+    return NextResponse.json(data ?? []);
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "取得に失敗しました。";
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
+
+/** POST: 一括登録。body: { sku: string, title?: string, platform: string, items: { jan_code: string, quantity: number }[] } */
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const sku = String(body.sku ?? "").trim();
+    const title = body.title != null ? String(body.title).trim() : null;
     const platform = String(body.platform ?? "").trim();
     const items = Array.isArray(body.items) ? body.items : [];
 
@@ -21,12 +38,13 @@ export async function POST(request: NextRequest) {
         if (!jan_code) return null;
         return {
           sku,
+          title: title || null,
           platform,
           jan_code,
           quantity: Number.isFinite(quantity) && quantity >= 1 ? quantity : 1,
         };
       })
-      .filter(Boolean) as { sku: string; platform: string; jan_code: string; quantity: number }[];
+      .filter(Boolean) as { sku: string; title: string | null; platform: string; jan_code: string; quantity: number }[];
 
     if (rows.length === 0) return NextResponse.json({ error: "有効なJANがありません。" }, { status: 400 });
 

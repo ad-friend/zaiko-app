@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { normalizeToFullWidthKatakana } from "@/lib/kana";
 import { normalizeSupplierForMatch } from "@/lib/normalizeSupplier";
 import Link from "next/link";
+import { Package } from "lucide-react";
 import { Html5Qrcode } from "html5-qrcode";
 
 // ----- 型定義 -----
@@ -495,6 +496,10 @@ export default function InboundPage() {
             </Link>
              <Link href="/products" className="text-sm font-medium text-slate-500 hover:text-primary transition-colors">
               商品マスタ
+            </Link>
+             <Link href="/sku" className="text-sm font-medium text-slate-500 hover:text-primary transition-colors flex items-center gap-1">
+              <Package className="h-4 w-4" />
+              SKUマスター
             </Link>
              <button onClick={() => alert("ログアウト")} className="text-sm font-medium text-slate-500 hover:text-destructive transition-colors">
               ログアウト
