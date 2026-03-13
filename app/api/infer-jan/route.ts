@@ -99,47 +99,80 @@ export async function PATCH(request: NextRequest) {
       }
 
       if (inserts.length > 0) {
-        const today = new Date().toISOString().slice(0, 10);
-        const { data: headerRow, error: headerError } = await supabase
-          .from("inbound_headers")
-          .insert({
-            purchase_date: today,
-            supplier: inserts[0]?.supplier ?? null,
-            genre: inserts[0]?.genre ?? null,
-            total_purchase_amount: 0,
-            shipping_cost: 0,
-            discount_amount: 0,
-            total_cost: 0,
-          })
-          .select("id")
-          .single();
-        if (headerError || !headerRow) throw new Error(headerError?.message ?? "ヘッダー作成に失敗しました");
-        const headerId = headerRow.id as number;
-        const rows = inserts.map((item: Record<string, unknown>) => ({
-          header_id: headerId,
-          jan_code: item.jan_code ?? null,
-          brand: item.brand ?? null,
-          product_name: item.product_name ?? null,
-          model_number: item.model_number ?? null,
-          condition_type: item.condition_type ?? "new",
-          base_price: Number(item.base_price ?? 0),
-          is_fixed_price: false,
-          effective_unit_price: Number(item.effective_unit_price ?? 0),
-          created_at: item.created_at ? String(item.created_at) : new Date().toISOString(),
-        }));
-        const { error: insertError } = await supabase.from("inbound_items").insert(rows);
-        if (insertError) throw new Error(insertError.message);
-        const masterProducts = rows
-          .filter((row: any) => row.jan_code && row.product_name) 
-          .map((row: any) => ({
-            jan_code: String(row.jan_code).trim(),
-            brand: row.brand ? String(row.brand).trim() : null,
-            product_name: String(row.product_name).trim(),
-            model_number: row.model_number ? String(row.model_number).trim() : null
-          }));
+        // 1. アイテムを「仕入先」「ジャンル」「日付」でグループ化する
+        const groups = new Map<string, any[]>();
+        for (const item of inserts) {
+          const supplier = item.supplier ?? "";
+          const genre = item.genre ?? "";
+          // 登録日（created_at）があればそれを、無ければ今日をキーにする
+          const date = item.created_at ? String(item.created_at).slice(0, 10) : new Date().toISOString().slice(0, 10);
+          const key = `${supplier}|${genre}|${date}`;
+          
+          if (!groups.has(key)) groups.set(key, []);
+          groups.get(key)!.push(item);
+        }
 
+        const allItemsToInsert = [];
+        const masterProducts = [];
+
+        // 2. グループごとにヘッダーを作成し、アイテムを紐付ける
+        for (const [key, groupItems] of Array.from(groups.entries())) {
+          const firstItem = groupItems[0];
+          const purchaseDate = firstItem.created_at ? String(firstItem.created_at).slice(0, 10) : new Date().toISOString().slice(0, 10);
+          
+          const { data: headerRow, error: headerError } = await supabase
+            .from("inbound_headers")
+            .insert({
+              purchase_date: purchaseDate,
+              supplier: firstItem.supplier ?? null,
+              genre: firstItem.genre ?? null,
+              total_purchase_amount: 0,
+              shipping_cost: 0,
+              discount_amount: 0,
+              total_cost: 0,
+            })
+            .select("id")
+            .single();
+            
+          if (headerError || !headerRow) throw new Error(headerError?.message ?? "ヘッダー作成に失敗しました");
+          
+          const headerId = headerRow.id as number;
+          
+          // そのグループのアイテム全てに、作ったばかりのヘッダーIDをセットする
+          for (const item of groupItems) {
+            allItemsToInsert.push({
+              header_id: headerId,
+              jan_code: item.jan_code ?? null,
+              brand: item.brand ?? null,
+              product_name: item.product_name ?? null,
+              model_number: item.model_number ?? null,
+              condition_type: item.condition_type ?? "new",
+              base_price: Number(item.base_price ?? 0),
+              is_fixed_price: false,
+              effective_unit_price: Number(item.effective_unit_price ?? 0),
+              created_at: item.created_at ? String(item.created_at) : new Date().toISOString(),
+            });
+
+            // マスタ登録用の配列も同時に作る
+            if (item.jan_code && item.product_name) {
+              masterProducts.push({
+                jan_code: String(item.jan_code).trim(),
+                brand: item.brand ? String(item.brand).trim() : null,
+                product_name: String(item.product_name).trim(),
+                model_number: item.model_number ? String(item.model_number).trim() : null
+              });
+            }
+          }
+        }
+
+        // 3. 全アイテムを一気に保存（inbound_items）
+        if (allItemsToInsert.length > 0) {
+          const { error: insertError } = await supabase.from("inbound_items").insert(allItemsToInsert);
+          if (insertError) throw new Error(insertError.message);
+        }
+
+        // 4. 新商品を商品マスタ（products）へ自動登録
         if (masterProducts.length > 0) {
-          // upsert と ignoreDuplicates を使うことで「すでにマスタにあるJANは無視（上書きしない）」という安全な登録ができます
           const { error: masterError } = await supabase
             .from("products")
             .upsert(masterProducts, { onConflict: "jan_code", ignoreDuplicates: true });
