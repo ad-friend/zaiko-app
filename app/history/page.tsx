@@ -335,6 +335,22 @@ export default function HistoryPage() {
 
   const saveIndividualEdit = useCallback(async () => {
     if (editingId == null || !editDraft) return;
+    const inputSupplier = editDraft.supplier.trim();
+    if (inputSupplier) {
+      const isValidSupplier = suppliers.some((s) => {
+        return (
+          s.name === inputSupplier ||
+          s.kana === inputSupplier ||
+          normalizeSupplierForMatch(s.name) === normalizeSupplierForMatch(inputSupplier) ||
+          normalizeSupplierForMatch(s.kana) === normalizeSupplierForMatch(inputSupplier)
+        );
+      });
+
+      if (!isValidSupplier) {
+        alert("⚠️ 仕入先マスタに登録されていない名前です。\n正しい仕入先名を入力・選択してください。");
+        return; // 保存処理をストップ
+      }
+    }
     setSaving(true);
     try {
       // 🌟 追加：編集画面で仕入先が変更された場合も、必ずカナに変換して保存する
@@ -399,6 +415,23 @@ export default function HistoryPage() {
   };
 
   const saveBulkEdit = useCallback(async () => {
+    for (const r of rows) {
+      const inputSupplier = (r.header?.supplier ?? "").trim();
+      if (inputSupplier) {
+        const isValidSupplier = suppliers.some((s) => {
+          return (
+            s.name === inputSupplier ||
+            s.kana === inputSupplier ||
+            normalizeSupplierForMatch(s.name) === normalizeSupplierForMatch(inputSupplier) ||
+            normalizeSupplierForMatch(s.kana) === normalizeSupplierForMatch(inputSupplier)
+          );
+        });
+        if (!isValidSupplier) {
+          alert(`⚠️ 「${inputSupplier}」は仕入先マスタに登録されていません。\n正しい仕入先名に修正してから保存してください。`);
+          return; // エラーを見つけたら保存処理をストップ
+        }
+      }
+    }
     setSaving(true);
     try {
       const items = rows.map((r) => ({
