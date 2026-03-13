@@ -1,19 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import Link from "next/link";
-import { Pencil, Save, X, ChevronLeft, Download, Search, ArrowUp, ArrowDown, ArrowUpDown, Package } from "lucide-react";
+import { Pencil, Save, X, Download, Search, ArrowUp, ArrowDown, ArrowUpDown } from "lucide-react";
 import { normalizeToFullWidthKatakana } from "@/lib/kana";
 
 type SupplierRow = { id: number; name: string; kana: string; phone: string | null; address: string | null; created_at: string };
 
-function BarcodeIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m-4-8v8m8-8v8M4 4h2v16H4V4zm14 0h2v16h-2V4zM8 4h1v16H8V4zm6 0h1v16h-1V4z" />
-    </svg>
-  );
-}
 function DocumentIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -189,22 +181,7 @@ export default function SuppliersPage() {
   );
 
   return (
-    <div className="flex min-h-screen flex-col bg-slate-50 font-sans text-slate-900">
-      <header className="sticky top-0 z-30 w-full border-b bg-white/80 backdrop-blur-md shadow-sm">
-        <div className="container mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
-          <Link href="/" className="flex items-center gap-2">
-            <div className="rounded-lg bg-primary p-1.5 text-white shadow-md"><BarcodeIcon className="h-5 w-5" /></div>
-            <h1 className="text-xl font-bold">Zaiko Manager</h1>
-          </Link>
-          <div className="flex items-center gap-3">
-            <Link href="/history" className={`${buttonClass} bg-white text-slate-700 border border-slate-200`}>在庫一覧</Link>
-            <Link href="/products" className={`${buttonClass} bg-white text-slate-700 border border-slate-200`}>商品マスタ</Link>
-            <Link href="/sku" className={`${buttonClass} bg-white text-slate-700 border border-slate-200 flex items-center gap-1`}><Package className="h-4 w-4" />SKUマスター</Link>
-            <Link href="/" className={`${buttonClass} bg-white text-slate-700 border border-slate-200`}><ChevronLeft className="mr-2 h-4 w-4" />入庫画面</Link>
-          </div>
-        </div>
-      </header>
-
+    <div className="flex-1 flex flex-col">
       <main className="flex-1 py-8 w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
           <div className="bg-slate-50/80 px-6 py-4 border-b border-slate-100">

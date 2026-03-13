@@ -1,8 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import Link from "next/link";
-import { Pencil, Save, X, ChevronLeft, Download, Upload, Search, ArrowUp, ArrowDown, ArrowUpDown, Calendar, Package } from "lucide-react";
+import { Pencil, Save, X, ChevronLeft, Download, Upload, Search, ArrowUp, ArrowDown, ArrowUpDown, Calendar } from "lucide-react";
 import { normalizeToFullWidthKatakana } from "@/lib/kana";
 import { normalizeSupplierForMatch } from "@/lib/normalizeSupplier";
 
@@ -55,14 +54,6 @@ type CsvImportPreviewRow = {
   supplierKana: string;
   warnings: ("jan_not_in_master" | "supplier_mismatch")[];
 };
-
-function BarcodeIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m-4-8v8m8-8v8M4 4h2v16H4V4zm14 0h2v16h-2V4zM8 4h1v16H8V4zm6 0h1v16h-1V4z" />
-    </svg>
-  );
-}
 
 function DocumentIcon({ className }: { className?: string }) {
   return (
@@ -796,35 +787,7 @@ export default function HistoryPage() {
   }, []);
 
   return (
-    <div className="flex min-h-screen flex-col bg-slate-50 font-sans text-slate-900">
-      <header className="sticky top-0 z-30 w-full border-b bg-white/80 backdrop-blur-md shadow-sm">
-        <div className="container mx-auto flex h-16 max-w-[1600px] items-center justify-between px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center gap-2">
-            <Link href="/" className="flex items-center gap-2 text-slate-900 hover:opacity-80 transition-opacity">
-              <div className="rounded-lg bg-primary p-1.5 text-white shadow-md shadow-primary/30">
-                <BarcodeIcon className="h-5 w-5" />
-              </div>
-              <h1 className="text-xl font-bold tracking-tight text-slate-900">Zaiko Manager <span className="text-xs font-normal text-slate-500 ml-2 bg-slate-100 px-2 py-0.5 rounded-full">Professional</span></h1>
-            </Link>
-          </div>
-          <div className="flex items-center gap-3">
-            <Link href="/suppliers" className="text-sm font-medium text-slate-500 hover:text-primary transition-colors mr-2">仕入先管理</Link>
-            <Link href="/products" className="text-sm font-medium text-slate-500 hover:text-primary transition-colors mr-2">商品マスタ</Link>
-            <Link href="/sku" className="text-sm font-medium text-slate-500 hover:text-primary transition-colors mr-2 flex items-center gap-1">
-              <Package className="h-4 w-4" />
-              SKUマスター
-            </Link>
-            <Link
-              href="/"
-              className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 h-10 px-6 py-2 shadow-sm bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300"
-            >
-              <ChevronLeft className="mr-2 h-4 w-4" />
-              入庫画面へ戻る
-            </Link>
-          </div>
-        </div>
-      </header>
-
+    <div className="flex-1 flex flex-col">
       <main className="flex-1 py-8 w-full max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8">
         <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
           <div className="bg-slate-50/80 px-6 py-4 border-b border-slate-100 backdrop-blur">

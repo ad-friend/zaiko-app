@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
 import { Package, ChevronDown, ChevronRight } from "lucide-react";
 
 const PLATFORMS = [
@@ -40,14 +39,6 @@ const inputClass =
   "flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 transition-all duration-200 shadow-sm";
 const buttonClass =
   "inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 h-10 px-6 py-2 shadow-sm active:scale-[0.98] duration-100";
-
-function BarcodeIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m-4-8v8m8-8v8M4 4h2v16H4V4zm14 0h2v16h-2V4zM8 4h1v16H8V4zm6 0h1v16h-1V4z" />
-    </svg>
-  );
-}
 
 export default function SkuPage() {
   const [sku, setSku] = useState("");
@@ -233,40 +224,10 @@ export default function SkuPage() {
   })();
 
   return (
-    <div className="flex h-screen flex-col bg-slate-50 font-sans text-slate-900">
-      <header className="shrink-0 z-30 w-full border-b bg-white/80 backdrop-blur-md shadow-sm">
-        <div className="container mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center gap-2">
-            <Link href="/" className="flex items-center gap-2 text-slate-900 hover:opacity-80 transition-opacity">
-              <div className="rounded-lg bg-primary p-1.5 text-white shadow-md shadow-primary/30">
-                <BarcodeIcon className="h-5 w-5" />
-              </div>
-              <h1 className="text-xl font-bold tracking-tight text-slate-900">
-                Zaiko Manager <span className="text-xs font-normal text-slate-500 ml-2 bg-slate-100 px-2 py-0.5 rounded-full">Professional</span>
-              </h1>
-            </Link>
-          </div>
-          <div className="flex items-center gap-3">
-            <Link href="/history" className="text-sm font-medium text-slate-500 hover:text-primary transition-colors">
-              在庫一覧
-            </Link>
-            <Link href="/suppliers" className="text-sm font-medium text-slate-500 hover:text-primary transition-colors">
-              仕入先管理
-            </Link>
-            <Link href="/products" className="text-sm font-medium text-slate-500 hover:text-primary transition-colors">
-              商品マスタ
-            </Link>
-            <Link href="/sku" className="text-sm font-medium text-primary flex items-center gap-1">
-              <Package className="h-4 w-4" />
-              SKUマスター
-            </Link>
-          </div>
-        </div>
-      </header>
-
+    <div className="flex flex-1 flex-col min-h-0">
       {/* 上部エリア: 入力フォーム（固定） */}
       <div className="shrink-0 border-b border-slate-200 bg-white/95 px-4 py-4 sm:px-6 lg:px-8">
-        <div className="max-w-7xl mx-auto">
+        <div className="max-w-[1600px] mx-auto">
           <div className="flex gap-6 flex-wrap lg:flex-nowrap">
             {/* 左ペイン: 共通項目（幅狭め） */}
             <div className="w-full lg:w-64 shrink-0 space-y-4">
@@ -405,8 +366,8 @@ export default function SkuPage() {
       </div>
 
       {/* 下部エリア: 登録済みデータ一覧（独立スクロール） */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6 lg:px-8">
-        <div className="max-w-7xl mx-auto">
+      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 sm:px-6 lg:px-8">
+        <div className="max-w-[1600px] mx-auto">
           <h2 className="text-base font-bold text-slate-800 mb-3 flex items-center gap-2">
             <Package className="h-4 w-4 text-primary" />
             登録済みSKU一覧
