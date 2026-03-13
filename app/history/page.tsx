@@ -16,6 +16,8 @@ type RecordRow = {
   base_price: number;
   effective_unit_price: number;
   created_at: string;
+  order_id: string | null;    
+  settled_at: string | null;
   header: {
     id: number;
     purchase_date: string;
@@ -1269,16 +1271,30 @@ export default function HistoryPage() {
                              )}
                           </td>
                           <td className="px-6 py-4 text-slate-600 whitespace-nowrap">{row.condition_type === "new" ? "新品" : row.condition_type === "used" ? "中古" : row.condition_type ?? "—"}</td>
-                          /* ★ここから追加：進捗（消込状況） */}
-  <td className="px-6 py-4 whitespace-nowrap">
-    {!row.order_id ? (
-      <span className="bg-green-100 text-green-700 px-2.5 py-1 rounded-full text-[10px] font-bold">販売中</span>
-    ) : !row.settled_at ? (
-      <span className="bg-blue-100 text-blue-700 px-2.5 py-1 rounded-full text-[10px] font-bold">発送済</span>
-    ) : (
-      <span className="bg-slate-100 text-slate-500 px-2.5 py-1 rounded-full text-[10px] font-bold">確定済</span>
-    )}
-  </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-[10px] font-bold">
+  {!row.order_id ? (
+    <span className="bg-green-100 text-green-700 px-2.5 py-1 rounded-full">販売中</span>
+  ) : !row.settled_at ? (
+    <span className="bg-blue-100 text-blue-700 px-2.5 py-1 rounded-full">発送済</span>
+  ) : (
+    <span className="bg-slate-100 text-slate-500 px-2.5 py-1 rounded-full">確定済</span>
+  )}
+</td>
+
+{/* 注文番号の表示 */}
+<td className="px-6 py-4 font-mono text-xs whitespace-nowrap text-center text-slate-600">
+  {row.order_id ? (
+    <a 
+      href={`https://sellercentral.amazon.co.jp/orders-v3/order/${row.order_id}`}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-primary hover:underline"
+    >
+      {row.order_id}
+    </a>
+  ) : (
+    <span className="text-slate-300">—</span>
+  )}
                           <td className="px-6 py-4 text-center whitespace-nowrap">
                             {isIndividualEdit ? (
                               <div className="flex items-center justify-center gap-1">
