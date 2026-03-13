@@ -225,7 +225,7 @@ export default function SkuPage() {
 
   return (
     <div className="h-[calc(100vh-64px)] flex flex-col bg-slate-50">
-      <div className="w-full max-w-[1600px] mx-auto flex flex-col flex-1 overflow-hidden p-4 md:p-6 gap-6">
+      <div className="w-full max-w-6xl mx-auto flex flex-col flex-1 overflow-hidden p-4 md:p-6 gap-6">
         {/* 上部エリア: 入力フォーム（固定・スクロールさせない） */}
         <div className="flex flex-col lg:flex-row gap-6 shrink-0">
           {/* 左ペイン: 共通項目（幅固定） */}
