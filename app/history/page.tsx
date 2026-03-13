@@ -41,6 +41,7 @@ type ProductMaster = {
 
 /** CSV取込プレビュー用：マスタ照合・補完・警告フラグ付きの1行 */
 type CsvImportPreviewRow = {
+  id: string;
   jan_code: string;
   product_name: string;
   brand: string;
@@ -721,6 +722,7 @@ export default function HistoryPage() {
           if (supplierRaw && !supplierMatch) warnings.push("supplier_mismatch");
 
           return {
+            id: row.id,
             jan_code: jan,
             product_name,
             brand,
@@ -758,6 +760,7 @@ export default function HistoryPage() {
     setSaving(true);
     try {
       const items = csvImportPreview.map((row) => ({
+        id: row.id ? Number(row.id) : undefined,
         jan_code: row.jan_code || undefined,
         brand: row.brand || undefined,
         product_name: row.product_name || undefined,
