@@ -988,6 +988,15 @@ export default function HistoryPage() {
                           {sortConfig.key === "condition_type" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
+                      <th className="px-6 py-4 min-w-[100px] whitespace-nowrap">
+  <button type="button" onClick={() => requestSort("order_id")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded text-slate-500 font-semibold">
+    進捗
+    {sortConfig.key === "order_id" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
+  </button>
+</th>
+<th className="px-6 py-4 min-w-[150px] whitespace-nowrap text-center text-slate-500 font-semibold">
+  注文番号
+</th>
                       <th className="px-6 py-4 w-[100px] min-w-[80px] text-center whitespace-nowrap">操作</th>
                     </tr>
                   </thead>
@@ -1260,6 +1269,16 @@ export default function HistoryPage() {
                              )}
                           </td>
                           <td className="px-6 py-4 text-slate-600 whitespace-nowrap">{row.condition_type === "new" ? "新品" : row.condition_type === "used" ? "中古" : row.condition_type ?? "—"}</td>
+                          /* ★ここから追加：進捗（消込状況） */}
+  <td className="px-6 py-4 whitespace-nowrap">
+    {!row.order_id ? (
+      <span className="bg-green-100 text-green-700 px-2.5 py-1 rounded-full text-[10px] font-bold">販売中</span>
+    ) : !row.settled_at ? (
+      <span className="bg-blue-100 text-blue-700 px-2.5 py-1 rounded-full text-[10px] font-bold">発送済</span>
+    ) : (
+      <span className="bg-slate-100 text-slate-500 px-2.5 py-1 rounded-full text-[10px] font-bold">確定済</span>
+    )}
+  </td>
                           <td className="px-6 py-4 text-center whitespace-nowrap">
                             {isIndividualEdit ? (
                               <div className="flex items-center justify-center gap-1">
