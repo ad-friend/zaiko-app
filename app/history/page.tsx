@@ -511,7 +511,7 @@ export default function HistoryPage() {
 
   const handleCsvExport = useCallback(() => {
     const header = "id,jan_code,brand,product_name,model_number,supplier,genre,base_price,effective_unit_price,created_at,registered_at,status";
-    const lines = rows.map((r) =>
+    const lines = processedRows.map((r) =>
       [
         r.id,
         r.jan_code ?? "",
@@ -537,7 +537,7 @@ export default function HistoryPage() {
     a.download = `inventory_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.csv`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [rows, getSupplierName]); // 🌟 依存配列に追加
+  },[processedRows, getSupplierName]); // 🌟 依存配列に追加
 
   const parseCsvLine = (line: string): string[] => {
     const result: string[] = [];
