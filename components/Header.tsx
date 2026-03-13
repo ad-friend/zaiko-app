@@ -3,14 +3,14 @@
 import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Package, Menu, X } from "lucide-react";
+import { Package, History, Users, Database, Layers, Menu, X } from "lucide-react";
 
 const navItems = [
-  { href: "/", label: "入庫管理" },
-  { href: "/history", label: "在庫一覧" },
-  { href: "/suppliers", label: "仕入先管理" },
-  { href: "/products", label: "商品マスタ" },
-  { href: "/sku", label: "SKUマスタ", icon: Package },
+  { href: "/", label: "入庫管理", icon: Package },
+  { href: "/history", label: "在庫一覧", icon: History },
+  { href: "/suppliers", label: "仕入先管理", icon: Users },
+  { href: "/products", label: "商品マスタ", icon: Database },
+  { href: "/sku", label: "SKUマスタ", icon: Layers },
 ] as const;
 
 const buttonBase =
@@ -51,7 +51,7 @@ export default function Header() {
               <Link
                 key={item.href}
                 href={item.href}
-                className={`${buttonBase} ${isActive ? buttonActive : buttonInactive} ${Icon ? "gap-1" : ""}`}
+                className={`${buttonBase} ${isActive ? buttonActive : buttonInactive} gap-1`}
               >
                 {Icon && <Icon className="h-4 w-4" />}
                 {item.label}
@@ -93,7 +93,7 @@ export default function Header() {
                   key={item.href}
                   href={item.href}
                   onClick={() => setMobileOpen(false)}
-                  className={`${buttonBase} justify-start px-4 ${isActive ? buttonActive : buttonInactive} ${Icon ? "gap-2" : ""}`}
+                  className={`${buttonBase} justify-start px-4 ${isActive ? buttonActive : buttonInactive}gap-2`}
                 >
                   {Icon && <Icon className="h-4 w-4 shrink-0" />}
                   {item.label}
