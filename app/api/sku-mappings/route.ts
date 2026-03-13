@@ -66,3 +66,34 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
+// 🌟🌟🌟 ここから追加 🌟🌟🌟
+export async function PUT(request: Request) {
+  try {
+    // 1. 画面から送られてきたデータ（skuとtitle）を受け取る
+    const body = await request.json();
+    const { sku, title } = body;
+
+    if (!sku) {
+      return NextResponse.json({ error: "SKUが指定されていません" }, { status: 400 });
+    }
+
+    // 2. Supabaseの該当SKUのタイトルを一括更新する
+    // ※もし上のコードで supabase の変数名が違う場合（例：supabaseClientなど）はそれに合わせてください
+    const { error } = await supabase
+      .from("sku_mappings")
+      .update({ title: title })
+      .eq("sku", sku);
+
+    if (error) {
+      console.error("Supabase更新エラー:", error);
+      return NextResponse.json({ error: "データベースの更新に失敗しました" }, { status: 500 });
+    }
+
+    // 3. 成功したよ！と画面に返す
+    return NextResponse.json({ success: true, message: "タイトルを更新しました" });
+    
+  } catch (error) {
+    console.error("APIエラー:", error);
+    return NextResponse.json({ error: "サーバーエラーが発生しました" }, { status: 500 });
+  }
+}
