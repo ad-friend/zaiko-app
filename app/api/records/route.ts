@@ -34,8 +34,6 @@ const SELECT_WITH_REGISTERED = `
   effective_unit_price,
   created_at,
   registered_at,
-  order_id,
-  settled_at,
   inbound_headers (
     id,
     purchase_date,
@@ -55,8 +53,6 @@ const SELECT_WITHOUT_REGISTERED = `
   base_price,
   effective_unit_price,
   created_at,
-  order_id,
-  settled_at,
   inbound_headers (
     id,
     purchase_date,
@@ -90,8 +86,6 @@ export async function GET() {
       registered_at: (row.registered_at || row.created_at)
         ? new Date(row.registered_at || row.created_at).toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo", year: "numeric", month: "2-digit", day: "2-digit" }).replace(/\//g, "-")
         : "",
-      order_id: row.order_id ?? null, 
-      settled_at: row.settled_at ?? null, 
       header: Array.isArray(row.inbound_headers) ? row.inbound_headers[0] : row.inbound_headers ?? null,
     }));
 
