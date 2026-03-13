@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Package, ChevronDown, ChevronRight } from "lucide-react";
+import { Package, ChevronDown, ChevronRight, Pencil, Check, X } from "lucide-react";
 
 const PLATFORMS = [
   { value: "Amazon", label: "Amazon" },
@@ -57,6 +57,27 @@ export default function SkuPage() {
   const [productsByJan, setProductsByJan] = useState<Record<string, { product_name: string; brand: string | null; model_number: string | null }>>({});
   const [loadingMappings, setLoadingMappings] = useState(true);
   const [openAccordionSku, setOpenAccordionSku] = useState<string | null>(null);
+
+  const [editingSku, setEditingSku] = useState<string | null>(null);
+  const [editTitleDraft, setEditTitleDraft] = useState("");
+
+  const handleSaveTitle = async (skuToUpdate: string) => {
+    try {
+      const res = await fetch("/api/sku-mappings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sku: skuToUpdate, title: editTitleDraft }),
+      });
+
+      if (!res.ok) throw new Error("更新失敗");
+
+      setEditingSku(null);
+      fetchMappingsAndProducts();
+    } catch (error) {
+      console.error("更新エラー:", error);
+      alert("更新に失敗しました。API側にPUTメソッドが用意されているか確認してください。");
+    }
+  };
 
   const fetchMappingsAndProducts = useCallback(async () => {
     setLoadingMappings(true);
@@ -226,7 +247,7 @@ export default function SkuPage() {
   return (
     <div className="h-[calc(100vh-64px)] flex flex-col bg-slate-50">
       <div 
-        className="w-full max-w-[1500px] flex flex-col flex-1 overflow-hidden p-4 md:p-6 gap-6"
+        className="w-full max-w-[1500px] flex flex-col flex-1 overflow-hidden p-4 md:p-6 gap-6 mx-auto"
         style={{ margin: "0 auto" }}
       >
         {/* 上部エリア: 入力フォーム（固定・スクロールさせない） */}
@@ -382,16 +403,57 @@ export default function SkuPage() {
                 const displayTitle = group.title && group.title.trim() ? group.title.trim() : "（タイトル未設定）";
                 return (
                   <div key={group.groupKey} className="rounded-lg border border-slate-200 bg-slate-50/30 overflow-hidden">
-                    <button
-                      type="button"
+                    <div
                       onClick={() => setOpenAccordionSku(isOpen ? null : group.groupKey)}
-                      className="w-full flex items-center gap-3 px-4 py-3 text-left bg-slate-50/80 hover:bg-slate-100/80 border-b border-slate-100"
+                      className="w-full flex items-center gap-3 px-4 py-3 text-left bg-slate-50/80 hover:bg-slate-100/80 border-b border-slate-100 cursor-pointer"
                     >
                       {isOpen ? <ChevronDown className="h-4 w-4 text-slate-500 shrink-0" /> : <ChevronRight className="h-4 w-4 text-slate-500 shrink-0" />}
-                      <span className="font-medium text-slate-800 truncate">{displayTitle}</span>
-                      <span className="text-xs text-slate-500 font-mono shrink-0">SKU: {group.sku}</span>
+                      
+                      {editingSku === group.sku ? (
+                        <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="text"
+                            value={editTitleDraft}
+                            onChange={(e) => setEditTitleDraft(e.target.value)}
+                            className="border border-slate-300 rounded px-2 py-1 text-sm w-48 focus:outline-none focus:ring-2 focus:ring-primary text-slate-800"
+                            autoFocus
+                          />
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); handleSaveTitle(group.sku); }}
+                            className="p-1.5 bg-green-500 text-white rounded hover:bg-green-600 transition-colors"
+                          >
+                            <Check size={14} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); setEditingSku(null); }}
+                            className="p-1.5 bg-slate-400 text-white rounded hover:bg-slate-500 transition-colors"
+                          >
+                            <X size={14} />
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2 flex-1 min-w-0">
+                          <span className="font-medium text-slate-800 truncate">{displayTitle}</span>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setEditingSku(group.sku);
+                              setEditTitleDraft(group.title || "");
+                            }}
+                            className="text-slate-400 hover:text-primary transition-colors p-1 shrink-0"
+                            title="タイトルを編集"
+                          >
+                            <Pencil size={14} />
+                          </button>
+                        </div>
+                      )}
+
+                      <span className="text-xs text-slate-500 font-mono shrink-0 ml-auto">SKU: {group.sku}</span>
                       <span className="text-xs text-slate-500 shrink-0">{group.platform}</span>
-                    </button>
+                    </div>
                     {isOpen && (
                       <div className="p-4 bg-white">
                         <table className="w-full text-sm text-left">
