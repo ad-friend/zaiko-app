@@ -224,13 +224,12 @@ export default function SkuPage() {
   })();
 
   return (
-    <div className="flex flex-1 flex-col min-h-0">
-      {/* 上部エリア: 入力フォーム（固定） */}
-      <div className="shrink-0 border-b border-slate-200 bg-white/95 px-4 py-4 sm:px-6 lg:px-8">
-        <div className="max-w-[1600px] mx-auto">
-          <div className="flex gap-6 flex-wrap lg:flex-nowrap">
-            {/* 左ペイン: 共通項目（幅狭め） */}
-            <div className="w-full lg:w-64 shrink-0 space-y-4">
+    <div className="h-[calc(100vh-64px)] flex flex-col bg-slate-50">
+      <div className="w-full max-w-[1600px] mx-auto flex flex-col flex-1 overflow-hidden p-4 md:p-6 gap-6">
+        {/* 上部エリア: 入力フォーム（固定・スクロールさせない） */}
+        <div className="flex flex-col lg:flex-row gap-6 shrink-0">
+          {/* 左ペイン: 共通項目（幅固定） */}
+          <div className="w-full lg:w-[320px] shrink-0 space-y-4">
               <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4 space-y-4">
                 <h2 className="text-sm font-bold text-slate-800 flex items-center gap-2">
                   <Package className="h-4 w-4 text-primary" />
@@ -269,8 +268,8 @@ export default function SkuPage() {
               </div>
             </div>
 
-            {/* 右ペイン: JANリスト作成（広め） */}
-            <div className="flex-1 min-w-0 space-y-4">
+          {/* 右ペイン: 個別項目（残り幅をすべて使用） */}
+          <div className="flex-1 min-w-0 space-y-4">
               <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4 space-y-4">
                 <h2 className="text-sm font-bold text-slate-800">紐付けるJANの登録</h2>
                 <div className="flex flex-wrap gap-4 items-end">
@@ -360,15 +359,12 @@ export default function SkuPage() {
               {successMessage && (
                 <div className="rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-800">{successMessage}</div>
               )}
-            </div>
           </div>
         </div>
-      </div>
 
-      {/* 下部エリア: 登録済みデータ一覧（独立スクロール） */}
-      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 sm:px-6 lg:px-8">
-        <div className="max-w-[1600px] mx-auto">
-          <h2 className="text-base font-bold text-slate-800 mb-3 flex items-center gap-2">
+        {/* 下部エリア: 登録済みデータ一覧（ここだけ独立してスクロール） */}
+        <div className="flex-1 overflow-y-auto pr-2 bg-white rounded-lg shadow-sm border border-slate-200 p-4 min-h-0">
+          <h2 className="text-base font-bold text-slate-800 mb-3 flex items-center gap-2 sticky top-0 bg-white pb-2 z-10">
             <Package className="h-4 w-4 text-primary" />
             登録済みSKU一覧
           </h2>
@@ -382,7 +378,7 @@ export default function SkuPage() {
                 const isOpen = openAccordionSku === group.groupKey;
                 const displayTitle = group.title && group.title.trim() ? group.title.trim() : "（タイトル未設定）";
                 return (
-                  <div key={group.groupKey} className="rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+                  <div key={group.groupKey} className="rounded-lg border border-slate-200 bg-slate-50/30 overflow-hidden">
                     <button
                       type="button"
                       onClick={() => setOpenAccordionSku(isOpen ? null : group.groupKey)}
@@ -394,7 +390,7 @@ export default function SkuPage() {
                       <span className="text-xs text-slate-500 shrink-0">{group.platform}</span>
                     </button>
                     {isOpen && (
-                      <div className="p-4">
+                      <div className="p-4 bg-white">
                         <table className="w-full text-sm text-left">
                           <thead className="bg-slate-50 border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold">
                             <tr>
