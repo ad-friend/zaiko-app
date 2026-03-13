@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Pencil, Save, X, ChevronLeft, Download, Upload, Search, ArrowUp, ArrowDown, ArrowUpDown, Calendar } from "lucide-react";
-import { normalizeToFullWidthKatakana } from "@/lib/kana"; // 🌟 追加
+import { normalizeToFullWidthKatakana } from "@/lib/kana";
+import { normalizeSupplierForMatch } from "@/lib/normalizeSupplier";
 
 type RecordRow = {
   id: number;
@@ -25,11 +26,33 @@ type RecordRow = {
   } | null;
 };
 
-// 🌟 追加：仕入先マスターの型定義
 type SupplierMaster = {
   id: number;
   name: string;
   kana: string;
+};
+
+type ProductMaster = {
+  jan_code: string;
+  product_name: string | null;
+  brand: string | null;
+  model_number: string | null;
+};
+
+/** CSV取込プレビュー用：マスタ照合・補完・警告フラグ付きの1行 */
+type CsvImportPreviewRow = {
+  jan_code: string;
+  product_name: string;
+  brand: string;
+  model_number: string;
+  created_at: string;
+  effective_unit_price: string;
+  status: string;
+  genre: string;
+  base_price: string;
+  supplierRaw: string;
+  supplierKana: string;
+  warnings: ("jan_not_in_master" | "supplier_mismatch")[];
 };
 
 function BarcodeIcon({ className }: { className?: string }) {
@@ -81,6 +104,7 @@ export default function HistoryPage() {
   const [bulkAction, setBulkAction] = useState<string>("bulk_delete");
   const [saving, setSaving] = useState(false);
   const csvInputRef = useRef<HTMLInputElement>(null);
+  const [csvImportPreview, setCsvImportPreview] = useState<CsvImportPreviewRow[] | null>(null);
 
   const [searchTerm, setSearchTerm] = useState("");
   const [sortConfig, setSortConfig] = useState<{ key: string | null; direction: "asc" | "desc" }>({ key: null, direction: "asc" });
@@ -568,6 +592,7 @@ export default function HistoryPage() {
         const rawLines = text.split(/\r?\n/).filter((line) => line.trim());
         if (rawLines.length < 2) {
           alert("CSVにデータ行がありません");
+          setSaving(false);
           return;
         }
         const headerCells = parseCsvLine(rawLines[0]);
@@ -632,73 +657,112 @@ export default function HistoryPage() {
           return;
         }
 
-        const statusToCondition = (s: string): string => {
-          const t = (s ?? "").trim();
-          if (t === "新品" || t === "new") return "new";
-          if (t === "中古" || t === "used") return "used";
-          return t || "new";
-        };
+        const [productsRes, suppliersRes] = await Promise.all([
+          fetch("/api/products"),
+          fetch("/api/suppliers"),
+        ]);
+        const productsList: ProductMaster[] = productsRes.ok ? await productsRes.json() : [];
+        const suppliersList: SupplierMaster[] = suppliersRes.ok ? await suppliersRes.json() : [];
+        const productsByJan = new Map<string, ProductMaster>(productsList.map((p) => [p.jan_code, p]));
 
-        const items = normalRows.map((row) => {
-          const idNum = row.id.trim() ? Number(row.id) : NaN;
-          const bp = row.base_price.trim();
-          const ep = row.effective_unit_price.trim();
-          
-          // 🌟 変更点: CSV取込時も、仕入先が入力されていればカナに変換する
-          const kanaSupplier = row.supplier.trim() ? normalizeToFullWidthKatakana(row.supplier.trim()) : undefined;
+        const previewRows: CsvImportPreviewRow[] = normalRows.map((row) => {
+          const jan = (row.jan_code ?? "").trim();
+          const master = jan ? productsByJan.get(jan) : null;
+          const product_name = (row.product_name ?? "").trim() || (master?.product_name ?? "") || "";
+          const brand = (row.brand ?? "").trim() || (master?.brand ?? "") || "";
+          const model_number = (row.model_number ?? "").trim() || (master?.model_number ?? "") || "";
 
-          const item: {
-            id?: number;
-            jan_code?: string;
-            brand?: string;
-            product_name?: string;
-            model_number?: string;
-            supplier?: string;
-            genre?: string;
-            base_price?: number;
-            effective_unit_price?: number;
-            created_at?: string;
-            condition_type?: string;
-          } = {
-            jan_code: row.jan_code.trim() || undefined,
-            brand: row.brand.trim() || undefined,
-            product_name: row.product_name.trim() || undefined,
-            model_number: row.model_number.trim() || undefined,
-            supplier: kanaSupplier, // カナで保存
-            genre: row.genre.trim() || undefined,
-            base_price: bp === "" ? undefined : Number(bp),
-            effective_unit_price: ep === "" ? undefined : Number(ep),
-            created_at: row.created_at.trim() || undefined,
-            condition_type: statusToCondition(row.status),
+          const supplierRaw = (row.supplier ?? "").trim();
+          const supplierKana = supplierRaw ? normalizeToFullWidthKatakana(supplierRaw) : "";
+          const supplierMatch = supplierKana
+            ? suppliersList.some(
+                (s) =>
+                  s.kana === supplierKana ||
+                  normalizeSupplierForMatch(s.name).includes(normalizeSupplierForMatch(supplierRaw)) ||
+                  normalizeSupplierForMatch(s.kana).includes(normalizeSupplierForMatch(supplierKana))
+              )
+            : true;
+
+          const warnings: ("jan_not_in_master" | "supplier_mismatch")[] = [];
+          if (jan && !master) warnings.push("jan_not_in_master");
+          if (supplierRaw && !supplierMatch) warnings.push("supplier_mismatch");
+
+          return {
+            jan_code: jan,
+            product_name,
+            brand,
+            model_number,
+            created_at: (row.created_at ?? "").trim(),
+            effective_unit_price: (row.effective_unit_price ?? "").trim(),
+            status: (row.status ?? "").trim(),
+            genre: (row.genre ?? "").trim(),
+            base_price: (row.base_price ?? "").trim(),
+            supplierRaw,
+            supplierKana,
+            warnings,
           };
-          if (Number.isFinite(idNum)) item.id = idNum;
-          return item;
         });
 
-        const res = await fetch("/api/infer-jan", {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ items }),
-        });
-        if (!res.ok) {
-          const errData = await res.json().catch(() => ({}));
-          throw new Error(errData.error || "CSV取込に失敗しました");
-        }
-        await fetchRecords();
-        alert(`${normalRows.length} 件を取込ました`);
+        setCsvImportPreview(previewRows);
       } catch (err) {
         alert(err instanceof Error ? err.message : "CSV取込に失敗しました");
       } finally {
         setSaving(false);
       }
     },
-    [fetchRecords]
+    []
   );
+
+  const statusToCondition = (s: string): string => {
+    const t = (s ?? "").trim();
+    if (t === "新品" || t === "new") return "new";
+    if (t === "中古" || t === "used") return "used";
+    return t || "new";
+  };
+
+  const executeCsvImportFromPreview = useCallback(async () => {
+    if (!csvImportPreview || csvImportPreview.length === 0) return;
+    setSaving(true);
+    try {
+      const items = csvImportPreview.map((row) => ({
+        jan_code: row.jan_code || undefined,
+        brand: row.brand || undefined,
+        product_name: row.product_name || undefined,
+        model_number: row.model_number || undefined,
+        supplier: row.supplierKana || undefined,
+        genre: row.genre || undefined,
+        base_price: row.base_price === "" ? undefined : Number(row.base_price),
+        effective_unit_price: row.effective_unit_price === "" ? undefined : Number(row.effective_unit_price),
+        created_at: row.created_at || undefined,
+        condition_type: statusToCondition(row.status),
+      }));
+      const res = await fetch("/api/infer-jan", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items }),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || "CSV取込に失敗しました");
+      }
+      setCsvImportPreview(null);
+      await fetchRecords();
+      alert(`${csvImportPreview.length} 件を取込ました`);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "CSV取込に失敗しました");
+    } finally {
+      setSaving(false);
+    }
+  }, [csvImportPreview, fetchRecords]);
+
+  const closeCsvImportPreview = useCallback(() => {
+    setCsvImportPreview(null);
+  }, []);
 
   return (
     <div className="flex min-h-screen flex-col bg-slate-50 font-sans text-slate-900">
       <header className="sticky top-0 z-30 w-full border-b bg-white/80 backdrop-blur-md shadow-sm">
-        <div className="container mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
+        <div className="container mx-auto flex h-16 max-w-[1600px] items-center justify-between px-4 sm:px-6 lg:px-8">
           <div className="flex items-center gap-2">
             <Link href="/" className="flex items-center gap-2 text-slate-900 hover:opacity-80 transition-opacity">
               <div className="rounded-lg bg-primary p-1.5 text-white shadow-md shadow-primary/30">
@@ -721,7 +785,7 @@ export default function HistoryPage() {
         </div>
       </header>
 
-      <main className="flex-1 py-8 w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <main className="flex-1 py-8 w-full max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8">
         <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
           <div className="bg-slate-50/80 px-6 py-4 border-b border-slate-100 backdrop-blur">
             <h2 className="text-base font-bold text-slate-800 flex items-center gap-2">
@@ -851,77 +915,77 @@ export default function HistoryPage() {
             )}
             {!loading && !error && rows.length > 0 && (
               <div className="overflow-x-auto">
-                <table className="w-full text-sm text-left min-w-[800px]">
+                <table className="w-full text-sm text-left min-w-[1000px]">
                   <thead className="bg-slate-50/80 border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold tracking-wider">
                     <tr>
-                      <th className="px-6 py-4 w-[44px] text-center"></th>
-                      <th className="px-6 py-4">
+                      <th className="px-6 py-4 w-[44px] text-center whitespace-nowrap"></th>
+                      <th className="px-6 py-4 min-w-[100px] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("created_at")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
-                          仕入日
+                              仕入日
                           {sortConfig.key === "created_at" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-6 py-4">
+                      <th className="px-6 py-4 min-w-[100px] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("registered_at")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           登録日
                           {sortConfig.key === "registered_at" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-6 py-4">
+                      <th className="px-6 py-4 min-w-[90px] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("supplier")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           仕入先
                           {sortConfig.key === "supplier" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-6 py-4">
+                      <th className="px-6 py-4 min-w-[80px] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("genre")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           ジャンル
                           {sortConfig.key === "genre" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-6 py-4 w-[140px]">
+                      <th className="px-6 py-4 w-[140px] min-w-[120px] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("jan_code")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           JAN
                           {sortConfig.key === "jan_code" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-6 py-4 min-w-[180px]">
+                      <th className="px-6 py-4 min-w-[180px] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("product_name")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           商品名
                           {sortConfig.key === "product_name" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-6 py-4">
+                      <th className="px-6 py-4 min-w-[90px] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("brand")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           ブランド
                           {sortConfig.key === "brand" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-6 py-4">
+                      <th className="px-6 py-4 min-w-[100px] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("model_number")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           型番
                           {sortConfig.key === "model_number" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-6 py-4 text-right">
+                      <th className="px-6 py-4 text-right min-w-[90px] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("base_price")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded ml-auto">
                           基準価格
                           {sortConfig.key === "base_price" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-6 py-4 text-right">
+                      <th className="px-6 py-4 text-right min-w-[90px] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("effective_unit_price")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded ml-auto">
                           実質単価
                           {sortConfig.key === "effective_unit_price" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-6 py-4">
+                      <th className="px-6 py-4 min-w-[60px] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("condition_type")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           状態
                           {sortConfig.key === "condition_type" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-6 py-4 w-[100px] text-center">操作</th>
+                      <th className="px-6 py-4 w-[100px] min-w-[80px] text-center whitespace-nowrap">操作</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 bg-white">
@@ -1066,7 +1130,7 @@ export default function HistoryPage() {
     formatDate(row.registered_at ?? row.created_at)
   )}
 </td>
-                          <td className="px-6 py-4 text-slate-700">
+                          <td className="px-6 py-4 text-slate-700 whitespace-nowrap">
                              {isEditMode ? (
                                 <input
                                     value={isIndividualEdit && editDraft ? editDraft.supplier : row.header?.supplier ?? ""}
@@ -1092,7 +1156,7 @@ export default function HistoryPage() {
                                 getSupplierName(row.header?.supplier)
                              )}
                           </td>
-                          <td className="px-6 py-4 text-slate-600">
+                          <td className="px-6 py-4 text-slate-600 whitespace-nowrap">
                              {isEditMode ? (
                                 <input
                                     value={isIndividualEdit && editDraft ? editDraft.genre : row.header?.genre ?? ""}
@@ -1108,8 +1172,8 @@ export default function HistoryPage() {
                                 row.header?.genre ?? "—"
                              )}
                           </td>
-                          <td className="px-6 py-4 font-mono text-xs">{row.jan_code ?? "—"}</td>
-                          <td className="px-6 py-4 font-medium text-slate-900">
+                          <td className="px-6 py-4 font-mono text-xs whitespace-nowrap">{row.jan_code ?? "—"}</td>
+                          <td className="px-6 py-4 font-medium text-slate-900 min-w-[140px]">
                             {isEditMode ? (
                               <input
                                 value={isIndividualEdit && editDraft ? editDraft.product_name : row.product_name ?? ""}
@@ -1126,7 +1190,7 @@ export default function HistoryPage() {
                               row.product_name ?? "—"
                             )}
                           </td>
-                          <td className="px-6 py-4 text-slate-600">
+                          <td className="px-6 py-4 text-slate-600 whitespace-nowrap min-w-[80px]">
                             {isEditMode ? (
                               <input
                                 value={isIndividualEdit && editDraft ? editDraft.brand : row.brand ?? ""}
@@ -1143,7 +1207,7 @@ export default function HistoryPage() {
                               row.brand ?? "—"
                             )}
                           </td>
-                          <td className="px-6 py-4 text-slate-600">
+                          <td className="px-6 py-4 text-slate-600 whitespace-nowrap min-w-[80px]">
                             {isEditMode ? (
                               <input
                                 value={isIndividualEdit && editDraft ? editDraft.model_number : row.model_number ?? ""}
@@ -1160,7 +1224,7 @@ export default function HistoryPage() {
                               row.model_number ?? "—"
                             )}
                           </td>
-                          <td className="px-6 py-4 text-right tabular-nums">
+                          <td className="px-6 py-4 text-right tabular-nums whitespace-nowrap">
                             {isEditMode ? (
                                 <input
                                 type="number"
@@ -1176,7 +1240,7 @@ export default function HistoryPage() {
                                 row.base_price > 0 ? row.base_price.toLocaleString() + " 円" : "—"
                             )}
                           </td>
-                          <td className="px-6 py-4 text-right font-medium tabular-nums">
+                          <td className="px-6 py-4 text-right font-medium tabular-nums whitespace-nowrap">
                              {isEditMode ? (
                                 <input
                                 type="number"
@@ -1192,8 +1256,8 @@ export default function HistoryPage() {
                                 row.effective_unit_price > 0 ? Math.round(row.effective_unit_price).toLocaleString() + " 円" : "—"
                              )}
                           </td>
-                          <td className="px-6 py-4 text-slate-600">{row.condition_type === "new" ? "新品" : row.condition_type === "used" ? "中古" : row.condition_type ?? "—"}</td>
-                          <td className="px-6 py-4 text-center">
+                          <td className="px-6 py-4 text-slate-600 whitespace-nowrap">{row.condition_type === "new" ? "新品" : row.condition_type === "used" ? "中古" : row.condition_type ?? "—"}</td>
+                          <td className="px-6 py-4 text-center whitespace-nowrap">
                             {isIndividualEdit ? (
                               <div className="flex items-center justify-center gap-1">
                                 <button
@@ -1257,6 +1321,96 @@ export default function HistoryPage() {
           </div>
         </div>
       </main>
+
+      {csvImportPreview !== null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+          <div className="relative w-full max-w-[1400px] max-h-[90vh] rounded-2xl border border-slate-200 bg-white shadow-2xl flex flex-col">
+            <div className="flex items-center justify-between p-4 border-b border-slate-100">
+              <h3 className="text-lg font-bold text-slate-900">CSV取込プレビュー（マスタ照合結果）</h3>
+              <button
+                type="button"
+                onClick={closeCsvImportPreview}
+                className="rounded-full p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-colors"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="px-4 py-2 border-b border-slate-100 bg-slate-50/80 text-sm text-slate-600">
+              {csvImportPreview.filter((r) => r.warnings.length > 0).length > 0 ? (
+                <span>
+                  警告あり: {csvImportPreview.filter((r) => r.warnings.length > 0).length} 行
+                  （取込を実行しても保存できます）
+                </span>
+              ) : (
+                <span>全行マスタ照合済み。問題がなければ「取込を実行」を押してください。</span>
+              )}
+            </div>
+            <div className="overflow-auto flex-1 p-4">
+              <table className="w-full text-sm text-left min-w-[900px]">
+                <thead className="bg-slate-50 border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold tracking-wider">
+                  <tr>
+                    <th className="px-3 py-2 whitespace-nowrap">警告</th>
+                    <th className="px-3 py-2 whitespace-nowrap">仕入日</th>
+                    <th className="px-3 py-2 whitespace-nowrap">仕入先</th>
+                    <th className="px-3 py-2 whitespace-nowrap">JAN</th>
+                    <th className="px-3 py-2 whitespace-nowrap min-w-[160px]">商品名</th>
+                    <th className="px-3 py-2 whitespace-nowrap">ブランド</th>
+                    <th className="px-3 py-2 whitespace-nowrap">型番</th>
+                    <th className="px-3 py-2 whitespace-nowrap text-right">実質単価</th>
+                    <th className="px-3 py-2 whitespace-nowrap">状態</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {csvImportPreview.map((row, idx) => (
+                    <tr key={idx} className={row.warnings.length > 0 ? "bg-amber-50/50" : ""}>
+                      <td className="px-3 py-2">
+                        <div className="flex flex-wrap gap-1">
+                          {row.warnings.includes("jan_not_in_master") && (
+                            <span className="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium bg-red-100 text-red-800 border border-red-200">
+                              JAN未登録
+                            </span>
+                          )}
+                          {row.warnings.includes("supplier_mismatch") && (
+                            <span className="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium bg-amber-100 text-amber-800 border border-amber-200">
+                              仕入先不一致
+                            </span>
+                          )}
+                          {row.warnings.length === 0 && <span className="text-slate-400 text-xs">—</span>}
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{row.created_at || "—"}</td>
+                      <td className="px-3 py-2 text-slate-700 whitespace-nowrap">{row.supplierRaw || row.supplierKana || "—"}</td>
+                      <td className="px-3 py-2 font-mono text-xs whitespace-nowrap">{row.jan_code || "—"}</td>
+                      <td className="px-3 py-2 font-medium text-slate-900 min-w-[140px]">{row.product_name || "—"}</td>
+                      <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{row.brand || "—"}</td>
+                      <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{row.model_number || "—"}</td>
+                      <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap">{row.effective_unit_price || "—"}</td>
+                      <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{row.status === "new" || row.status === "新品" ? "新品" : row.status === "used" || row.status === "中古" ? "中古" : row.status || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex items-center justify-end gap-3 p-4 border-t border-slate-100 bg-slate-50/50">
+              <button
+                type="button"
+                onClick={closeCsvImportPreview}
+                className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300`}
+              >
+                キャンセル
+              </button>
+              <button
+                type="button"
+                onClick={executeCsvImportFromPreview}
+                disabled={saving}
+                className={`${buttonClass} bg-primary text-white hover:bg-primary/90 disabled:opacity-50`}
+              >
+                {saving ? "取込中..." : "取込を実行"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
