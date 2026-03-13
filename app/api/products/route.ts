@@ -10,9 +10,15 @@ export type ProductRow = {
   created_at: string;
 };
 
-/** GET: 一覧 */
-export async function GET() {
+/** GET: 一覧 または ?jan= でJANコード検索（1件） */
+export async function GET(request: NextRequest) {
   try {
+    const jan = request.nextUrl.searchParams.get("jan")?.trim();
+    if (jan) {
+      const { data, error } = await supabase.from("products").select("*").eq("jan_code", jan).maybeSingle();
+      if (error) throw error;
+      return NextResponse.json(data ?? null);
+    }
     const { data, error } = await supabase.from("products").select("*").order("product_name", { ascending: true });
     if (error) throw error;
     return NextResponse.json(data ?? []);
