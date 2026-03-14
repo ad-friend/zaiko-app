@@ -920,7 +920,7 @@ export default function HistoryPage() {
             )}
             {!loading && !error && rows.length > 0 && (
               <div className="overflow-x-auto">
-                <table className="w-full text-sm text-left min-w-[1000px]">
+                <table className="w-full text-sm text-left min-w-[1500px]">
                   <thead className="bg-slate-50/80 border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold tracking-wider">
                     <tr>
                       <th className="px-6 py-4 w-[44px] text-center whitespace-nowrap"></th>
