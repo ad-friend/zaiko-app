@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import ManualFinanceProcessModal, { type PendingFinanceGroupData } from "@/components/ManualFinanceProcessModal";
 
 type AmazonOrder = {
   id: number;
@@ -42,6 +43,27 @@ export default function AmazonReconcileManager() {
   const [isFetching, setIsFetching] = useState(false);
   const [fetchResult, setFetchResult] = useState<string | null>(null);
 
+  // STEP 4: 売上データ（ペイメント）取得用のState
+  const [financeStartDate, setFinanceStartDate] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 14);
+    return d.toISOString().slice(0, 10);
+  });
+  const [financeEndDate, setFinanceEndDate] = useState(() => {
+    return new Date().toISOString().slice(0, 10);
+  });
+  const [isFetchingFinances, setIsFetchingFinances] = useState(false);
+  const [financeResult, setFinanceResult] = useState<{
+    message: string;
+    type: "success" | "error";
+  } | null>(null);
+
+  // STEP 5: 未処理イレギュラー（pending finances）用のState
+  const [pendingFinances, setPendingFinances] = useState<PendingFinanceGroupData[]>([]);
+  const [isLoadingPendingFinances, setIsLoadingPendingFinances] = useState(false);
+  const [selectedPendingFinance, setSelectedPendingFinance] = useState<PendingFinanceGroupData | null>(null);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+
   const [error, setError] = useState<string | null>(null);
 
   const fetchManualOrders = useCallback(async () => {
@@ -64,6 +86,24 @@ export default function AmazonReconcileManager() {
     fetchManualOrders();
   }, [fetchManualOrders]);
 
+  const fetchPendingFinances = useCallback(async () => {
+    setIsLoadingPendingFinances(true);
+    try {
+      const res = await fetch("/api/amazon/pending-finances");
+      if (!res.ok) throw new Error("未処理財務データの取得に失敗しました");
+      const data = await res.json();
+      setPendingFinances(Array.isArray(data) ? data : []);
+    } catch {
+      setPendingFinances([]);
+    } finally {
+      setIsLoadingPendingFinances(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchPendingFinances();
+  }, [fetchPendingFinances]);
+
   // ★追加：Amazonから注文データを引っ張ってくる関数
   const runFetchOrders = async () => {
     setIsFetching(true);
@@ -79,6 +119,47 @@ export default function AmazonReconcileManager() {
       setError(e instanceof Error ? e.message : "データ取得に失敗しました");
     } finally {
       setIsFetching(false);
+    }
+  };
+
+  const handleFetchFinances = async () => {
+    setIsFetchingFinances(true);
+    setFinanceResult(null);
+    try {
+      const res = await fetch("/api/amazon/fetch-finances", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          startDate: financeStartDate,
+          endDate: financeEndDate,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "売上データの取得に失敗しました");
+      const total = data.totalFetched ?? 0;
+      const inserted = data.rowsInserted ?? 0;
+      const skipped = data.rowsSkipped ?? 0;
+      let message = `取得成功: ${total}件 (新規: ${inserted}件, スキップ: ${skipped}件)`;
+
+      const reconcileRes = await fetch("/api/amazon/reconcile-sales", { method: "POST" });
+      const reconcileData = await reconcileRes.json();
+      if (reconcileRes.ok) {
+        const reconciled = reconcileData.reconciledCount ?? 0;
+        const skippedReconcile = reconcileData.skippedCount ?? 0;
+        message += ` / 自動消込: ${reconciled}件成功 (保留: ${skippedReconcile}件)`;
+        await fetchPendingFinances();
+      } else {
+        message += ` / 自動消込: 失敗 (${reconcileData.error ?? "エラー"})`;
+      }
+
+      setFinanceResult({ message, type: "success" });
+    } catch (e) {
+      setFinanceResult({
+        message: e instanceof Error ? e.message : "売上データの取得に失敗しました",
+        type: "error",
+      });
+    } finally {
+      setIsFetchingFinances(false);
     }
   };
 
@@ -105,112 +186,258 @@ export default function AmazonReconcileManager() {
   };
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       {error && (
         <div className="rounded-lg bg-red-50 border border-red-200 p-4 text-sm text-red-800">
           {error}
         </div>
       )}
 
-      {/* ★追加：STEP1 注文データの取り込みパネル */}
-      <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm relative overflow-hidden">
-        <div className="absolute top-0 left-0 w-1 h-full bg-blue-500"></div>
-        <h2 className="text-lg font-bold text-slate-800 mb-2">STEP 1: Amazonから注文データを取得</h2>
-        <p className="text-sm text-slate-500 mb-4">
-          指定した日付以降の注文データをAmazonから取得し、システムに取り込みます。（日付を空欄にした場合は直近3日分を取得します）
-        </p>
-        <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
-          <div className="flex items-center gap-2">
-            <label htmlFor="fetchDate" className="text-sm font-medium text-slate-700">取得開始日:</label>
-            <input
-              type="date"
-              id="fetchDate"
-              value={fetchDate}
-              onChange={(e) => setFetchDate(e.target.value)}
-              className="rounded-md border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-10">
+        {/* 左カラム（7）: 在庫の仮消込 */}
+        <div className="flex flex-col gap-6 lg:col-span-7">
+          <h2 className="text-base font-bold text-slate-700 border-b border-slate-200 pb-2">
+            在庫の仮消込
+          </h2>
+
+          {/* STEP 1: 注文データの取り込み */}
+          <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm relative overflow-hidden">
+            <div className="absolute top-0 left-0 w-1 h-full bg-blue-500" />
+            <h3 className="text-lg font-bold text-slate-800 mb-2">STEP 1: Amazonから注文データを取得</h3>
+            <p className="text-sm text-slate-500 mb-4">
+              指定した日付以降の注文データをAmazonから取得し、システムに取り込みます。（日付を空欄にした場合は直近3日分を取得します）
+            </p>
+            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+              <div className="flex items-center gap-2">
+                <label htmlFor="fetchDate" className="text-sm font-medium text-slate-700">取得開始日:</label>
+                <input
+                  type="date"
+                  id="fetchDate"
+                  value={fetchDate}
+                  onChange={(e) => setFetchDate(e.target.value)}
+                  className="rounded-md border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={runFetchOrders}
+                disabled={isFetching}
+                className={`${buttonClass} bg-blue-600 text-white hover:bg-blue-700 disabled:bg-slate-300`}
+              >
+                {isFetching ? (
+                  <span className="flex items-center gap-2">
+                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                    Amazonと通信中...
+                  </span>
+                ) : (
+                  "注文データを取得する"
+                )}
+              </button>
+            </div>
+            {fetchResult && (
+              <div className="mt-4 rounded-lg bg-blue-50 border border-blue-200 p-4 text-sm text-blue-800 font-medium">
+                ✅ {fetchResult}
+              </div>
+            )}
           </div>
-          <button
-            type="button"
-            onClick={runFetchOrders}
-            disabled={isFetching}
-            className={`${buttonClass} bg-blue-600 text-white hover:bg-blue-700 disabled:bg-slate-300`}
-          >
-            {isFetching ? (
-              <span className="flex items-center gap-2">
-                <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                Amazonと通信中...
-              </span>
+
+          {/* STEP 2: 自動消込の実行 */}
+          <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm relative overflow-hidden">
+            <div className="absolute top-0 left-0 w-1 h-full bg-primary" />
+            <h3 className="text-lg font-bold text-slate-800 mb-2">STEP 2: 自動消込の実行</h3>
+            <p className="text-sm text-slate-500 mb-4">
+              取り込んだ未処理注文に対して、新品・セット・中古（1件のみ候補）の自動消込を行います。
+            </p>
+            <button
+              type="button"
+              onClick={runReconcile}
+              disabled={reconciling}
+              className={`${buttonClass} bg-primary text-white hover:bg-primary/90 disabled:bg-slate-300`}
+            >
+              {reconciling ? (
+                <span className="flex items-center gap-2">
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                  消込処理を実行中...
+                </span>
+              ) : (
+                "消込処理を開始する"
+              )}
+            </button>
+            {reconcileResult && (
+              <div className="mt-4 rounded-lg bg-emerald-50 border border-emerald-200 p-4 text-sm text-emerald-800">
+                <p className="font-medium">{reconcileResult.message}</p>
+                {reconcileResult.completed != null && (
+                  <p className="mt-1">自動消込完了: {reconcileResult.completed} 件</p>
+                )}
+                {reconcileResult.manual_required != null && reconcileResult.manual_required > 0 && (
+                  <p className="mt-1">手動確認に回した注文: {reconcileResult.manual_required} 件</p>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* STEP 3: 未処理注文（手動確認） */}
+          <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm relative overflow-hidden">
+            <div className="absolute top-0 left-0 w-1 h-full bg-amber-500" />
+            <h3 className="text-lg font-bold text-slate-800 mb-2">STEP 3: 未処理注文（手動確認）</h3>
+            <p className="text-sm text-slate-500 mb-4">
+              中古在庫候補が複数あるなど、手動で確認が必要な注文です。正しい在庫候補を選んで確定してください。
+            </p>
+            {loading ? (
+              <p className="text-slate-500">読み込み中...</p>
+            ) : manualOrders.length === 0 ? (
+              <p className="text-slate-500">手動確認対象の注文はありません。</p>
             ) : (
-              "注文データを取得する"
+              <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3">
+                {manualOrders.map((order) => (
+                  <ManualOrderCard
+                    key={order.id}
+                    order={order}
+                    onConfirmed={fetchManualOrders}
+                  />
+                ))}
+              </div>
             )}
-          </button>
+          </div>
         </div>
-        {fetchResult && (
-          <div className="mt-4 rounded-lg bg-blue-50 border border-blue-200 p-4 text-sm text-blue-800 font-medium">
-            ✅ {fetchResult}
+
+        {/* 右カラム（3）: 売上とお金の確定（本消込） */}
+        <div className="flex flex-col gap-6 lg:col-span-3 lg:min-h-0">
+          <div className="rounded-xl border border-slate-200 bg-slate-100/60 p-4 lg:sticky lg:top-24">
+            <h2 className="text-base font-bold text-slate-700 border-b border-slate-300 pb-2 mb-4">
+              売上とお金の確定（本消込）
+            </h2>
+            <div className="space-y-6">
+              {/* STEP 4: 売上データ（ペイメント）の取得 ＆ 自動処理 */}
+              <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+                <h3 className="text-sm font-bold text-slate-800 mb-2">STEP 4: 売上データ（ペイメント）の取得 ＆ 自動処理</h3>
+                <p className="text-xs text-slate-500 mb-4">対象期間の売上・手数料・返品・補填データを取得し、sales_transactions に保存します。</p>
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label htmlFor="financeStartDate" className="block text-xs font-medium text-slate-600 mb-1">開始日</label>
+                      <input
+                        type="date"
+                        id="financeStartDate"
+                        value={financeStartDate}
+                        onChange={(e) => setFinanceStartDate(e.target.value)}
+                        className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="financeEndDate" className="block text-xs font-medium text-slate-600 mb-1">終了日</label>
+                      <input
+                        type="date"
+                        id="financeEndDate"
+                        value={financeEndDate}
+                        onChange={(e) => setFinanceEndDate(e.target.value)}
+                        className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleFetchFinances}
+                    disabled={isFetchingFinances}
+                    className={`${buttonClass} w-full bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed text-sm`}
+                  >
+                    {isFetchingFinances ? (
+                      <span className="flex items-center justify-center gap-2">
+                        <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                        取得中...
+                      </span>
+                    ) : (
+                      "売上データを取得・処理する"
+                    )}
+                  </button>
+                  {financeResult && (
+                    <div
+                      className={`rounded-lg border px-3 py-2 text-sm ${
+                        financeResult.type === "success"
+                          ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+                          : "bg-red-50 border-red-200 text-red-800"
+                      }`}
+                    >
+                      {financeResult.type === "success" ? "✅ " : "❌ "}
+                      {financeResult.message}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* STEP 5: イレギュラー処理（返品・補填など） */}
+              <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+                <h3 className="text-sm font-bold text-slate-800 mb-2">STEP 5: イレギュラー処理（返品・補填など）</h3>
+                <p className="text-xs text-slate-500 mb-3">返品・補填など未処理のイレギュラーを確認します。</p>
+                {isLoadingPendingFinances ? (
+                  <p className="text-xs text-slate-500 py-4 text-center">読み込み中...</p>
+                ) : pendingFinances.length === 0 ? (
+                  <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/80 py-6 px-3 text-center">
+                    <p className="text-xs text-slate-500">現在、未処理のイレギュラーデータはありません。</p>
+                  </div>
+                ) : (
+                  <ul className="space-y-2 max-h-[280px] overflow-y-auto pr-0.5">
+                    {pendingFinances.map((g) => (
+                      <li
+                        key={g.groupId}
+                        className="flex items-center gap-2 rounded-lg border border-slate-100 bg-slate-50/50 px-2.5 py-2 text-xs"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate font-medium text-slate-800" title={g.amazon_order_id ?? g.sku ?? g.groupId}>
+                            {g.amazon_order_id ?? g.sku ?? g.groupId}
+                          </p>
+                          <div className="mt-0.5 flex items-center gap-1.5 flex-wrap">
+                            <span
+                              className={`inline-flex shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                                g.transaction_type === "Order"
+                                  ? "bg-blue-100 text-blue-700"
+                                  : g.transaction_type === "Refund"
+                                    ? "bg-amber-100 text-amber-700"
+                                    : "bg-slate-200 text-slate-700"
+                              }`}
+                            >
+                              {g.transaction_type}
+                            </span>
+                            <span className="text-slate-500">
+                              {g.posted_date ? new Date(g.posted_date).toLocaleDateString("ja-JP", { month: "numeric", day: "numeric" }) : "—"}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="shrink-0 text-right">
+                          <p className={`font-semibold tabular-nums ${g.net_amount >= 0 ? "text-slate-800" : "text-red-600"}`}>
+                            {g.net_amount >= 0 ? "" : "−"}
+                            {Math.abs(g.net_amount).toLocaleString()}円
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedPendingFinance(g);
+                              setIsModalOpen(true);
+                            }}
+                            className="mt-1 inline-flex items-center justify-center rounded bg-slate-200 px-2 py-1 text-[10px] font-medium text-slate-700 hover:bg-slate-300 transition-colors"
+                          >
+                            手動処理
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
           </div>
-        )}
+        </div>
       </div>
 
-      {/* STEP2 自動消込の実行パネル */}
-      <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm relative overflow-hidden">
-        <div className="absolute top-0 left-0 w-1 h-full bg-primary"></div>
-        <h2 className="text-lg font-bold text-slate-800 mb-2">STEP 2: 自動消込の実行</h2>
-        <p className="text-sm text-slate-500 mb-4">
-          取り込んだ未処理注文に対して、新品・セット・中古（1件のみ候補）の自動消込を行います。
-        </p>
-        <button
-          type="button"
-          onClick={runReconcile}
-          disabled={reconciling}
-          className={`${buttonClass} bg-primary text-white hover:bg-primary/90 disabled:bg-slate-300`}
-        >
-          {reconciling ? (
-            <span className="flex items-center gap-2">
-              <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
-              消込処理を実行中...
-            </span>
-          ) : (
-            "消込処理を開始する"
-          )}
-        </button>
-        {reconcileResult && (
-          <div className="mt-4 rounded-lg bg-emerald-50 border border-emerald-200 p-4 text-sm text-emerald-800">
-            <p className="font-medium">{reconcileResult.message}</p>
-            {reconcileResult.completed != null && (
-              <p className="mt-1">自動消込完了: {reconcileResult.completed} 件</p>
-            )}
-            {reconcileResult.manual_required != null && reconcileResult.manual_required > 0 && (
-              <p className="mt-1">手動確認に回した注文: {reconcileResult.manual_required} 件</p>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* STEP3 未処理注文（手動確認）パネル */}
-      <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm relative overflow-hidden">
-        <div className="absolute top-0 left-0 w-1 h-full bg-amber-500"></div>
-        <h2 className="text-lg font-bold text-slate-800 mb-2">STEP 3: 未処理注文（手動確認）</h2>
-        <p className="text-sm text-slate-500 mb-4">
-          中古在庫候補が複数あるなど、手動で確認が必要な注文です。正しい在庫候補を選んで確定してください。
-        </p>
-        {loading ? (
-          <p className="text-slate-500">読み込み中...</p>
-        ) : manualOrders.length === 0 ? (
-          <p className="text-slate-500">手動確認対象の注文はありません。</p>
-        ) : (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {manualOrders.map((order) => (
-              <ManualOrderCard
-                key={order.id}
-                order={order}
-                onConfirmed={fetchManualOrders}
-              />
-            ))}
-          </div>
-        )}
-      </div>
+      <ManualFinanceProcessModal
+        isOpen={isModalOpen}
+        onClose={() => {
+          setIsModalOpen(false);
+          setSelectedPendingFinance(null);
+        }}
+        data={selectedPendingFinance}
+        onSuccess={fetchPendingFinances}
+      />
     </div>
   );
 }
