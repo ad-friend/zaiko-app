@@ -18,16 +18,27 @@ function normalizeConditionId(conditionId: string | null | undefined): "New" | "
   return "Used";
 }
 
-function parseStartDate(startDate: string | null): { createdAfter: string } {
+function parseDateRange(startDate: string | null, endDate: string | null): { createdAfter: string; createdBefore: string } {
+  let createdAfter: string;
   if (startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate.trim())) {
-    return { createdAfter: `${startDate.trim()}T00:00:00Z` };
+    createdAfter = `${startDate.trim()}T00:00:00Z`;
+  } else {
+    const d = new Date();
+    d.setDate(d.getDate() - 3);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    createdAfter = `${y}-${m}-${day}T00:00:00Z`;
   }
-  const d = new Date();
-  d.setDate(d.getDate() - 3);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return { createdAfter: `${y}-${m}-${day}T00:00:00Z` };
+  let createdBefore: string;
+  if (endDate && /^\d{4}-\d{2}-\d{2}$/.test(endDate.trim())) {
+    const endDay = new Date(endDate.trim() + "T00:00:00Z");
+    endDay.setUTCDate(endDay.getUTCDate() + 1);
+    createdBefore = endDay.toISOString().slice(0, 19) + "Z";
+  } else {
+    createdBefore = new Date().toISOString().slice(0, 19) + "Z";
+  }
+  return { createdAfter, createdBefore };
 }
 
 function createSpClient() {
@@ -91,7 +102,8 @@ export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const startDate = searchParams.get("startDate");
-    const { createdAfter } = parseStartDate(startDate);
+    const endDate = searchParams.get("endDate");
+    const { createdAfter, createdBefore } = parseDateRange(startDate, endDate);
 
     const spClient = createSpClient();
 
@@ -101,6 +113,7 @@ export async function GET(request: NextRequest) {
     do {
       const query: Record<string, unknown> = {
         CreatedAfter: createdAfter,
+        CreatedBefore: createdBefore,
         MarketplaceIds: [MARKETPLACE_ID_JP],
         OrderStatuses: ["Unshipped", "PartiallyShipped", "Shipped"],
       };

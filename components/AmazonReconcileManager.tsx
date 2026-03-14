@@ -38,8 +38,13 @@ export default function AmazonReconcileManager() {
     manual_required?: number;
   } | null>(null);
   
-  // ★追加：データ取得用のState
-  const [fetchDate, setFetchDate] = useState("");
+  // STEP 1: 注文データ取得用のState
+  const [orderStartDate, setOrderStartDate] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 3);
+    return d.toISOString().slice(0, 10);
+  });
+  const [orderEndDate, setOrderEndDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [isFetching, setIsFetching] = useState(false);
   const [fetchResult, setFetchResult] = useState<string | null>(null);
 
@@ -104,13 +109,15 @@ export default function AmazonReconcileManager() {
     fetchPendingFinances();
   }, [fetchPendingFinances]);
 
-  // ★追加：Amazonから注文データを引っ張ってくる関数
   const runFetchOrders = async () => {
     setIsFetching(true);
     setFetchResult(null);
     setError(null);
     try {
-      const url = fetchDate ? `/api/amazon/fetch-orders?startDate=${fetchDate}` : "/api/amazon/fetch-orders";
+      const params = new URLSearchParams();
+      if (orderStartDate) params.set("startDate", orderStartDate);
+      if (orderEndDate) params.set("endDate", orderEndDate);
+      const url = `/api/amazon/fetch-orders?${params}`;
       const res = await fetch(url);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "データ取得に失敗しました");
@@ -205,18 +212,30 @@ export default function AmazonReconcileManager() {
             <div className="absolute top-0 left-0 w-1 h-full bg-blue-500" />
             <h3 className="text-lg font-bold text-slate-800 mb-2">STEP 1: Amazonから注文データを取得</h3>
             <p className="text-sm text-slate-500 mb-4">
-              指定した日付以降の注文データをAmazonから取得し、システムに取り込みます。（日付を空欄にした場合は直近3日分を取得します）
+              指定した期間の注文データをAmazonから取得し、システムに取り込みます。（未指定の場合は直近3日～現在）
             </p>
             <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
-              <div className="flex items-center gap-2">
-                <label htmlFor="fetchDate" className="text-sm font-medium text-slate-700">取得開始日:</label>
-                <input
-                  type="date"
-                  id="fetchDate"
-                  value={fetchDate}
-                  onChange={(e) => setFetchDate(e.target.value)}
-                  className="rounded-md border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label htmlFor="orderStartDate" className="block text-sm font-medium text-slate-700 mb-1">開始日</label>
+                  <input
+                    type="date"
+                    id="orderStartDate"
+                    value={orderStartDate}
+                    onChange={(e) => setOrderStartDate(e.target.value)}
+                    className="rounded-md border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-full"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="orderEndDate" className="block text-sm font-medium text-slate-700 mb-1">終了日</label>
+                  <input
+                    type="date"
+                    id="orderEndDate"
+                    value={orderEndDate}
+                    onChange={(e) => setOrderEndDate(e.target.value)}
+                    className="rounded-md border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-full"
+                  />
+                </div>
               </div>
               <button
                 type="button"

@@ -47,30 +47,30 @@ export async function GET(request: NextRequest) {
     }
 
     // 条件B: 未紐付け（order_id が NULL または空）、かつ sku（jan_code）一致があればそれで絞る
-    const { data: unlinked, error: errB } = await supabase
-      .from("inbound_items")
-      .select("id, jan_code, condition_type, effective_unit_price, order_id, product_name, created_at")
-      .is("settled_at", null)
-      .order("created_at", { ascending: true });
+    if (sku) {
+      const { data: unlinked, error: errB } = await supabase
+        .from("inbound_items")
+        .select("id, jan_code, condition_type, effective_unit_price, order_id, product_name, created_at")
+        .is("settled_at", null)
+        .or('order_id.is.null,order_id.eq.""') // order_idが空のものだけ
+        .eq("jan_code", sku) // 👈 【超重要】データベース側で直接 jan_code = sku のものだけを検索！
+        .order("created_at", { ascending: true });
 
-    if (!errB && unlinked?.length) {
-      const seen = new Set(results.map((r) => r.id));
-      for (const row of unlinked) {
-        if (seen.has(row.id)) continue;
-        const orderId = row.order_id?.trim() ?? null;
-        if (orderId) continue;
-        const jan = row.jan_code?.trim() ?? null;
-        if (sku && jan !== sku) continue;
-        seen.add(row.id);
-        results.push({
-          id: row.id,
-          sku: jan,
-          condition: row.condition_type ?? null,
-          unit_cost: Number(row.effective_unit_price ?? 0),
-          amazon_order_id: row.order_id ?? null,
-          product_name: row.product_name ?? null,
-          created_at: row.created_at ?? null,
-        });
+      if (!errB && unlinked?.length) {
+        const seen = new Set(results.map((r) => r.id));
+        for (const row of unlinked) {
+          if (seen.has(row.id)) continue;
+          seen.add(row.id);
+          results.push({
+            id: row.id,
+            sku: row.jan_code?.trim() ?? null,
+            condition: row.condition_type ?? null,
+            unit_cost: Number(row.effective_unit_price ?? 0),
+            amazon_order_id: row.order_id ?? null,
+            product_name: row.product_name ?? null,
+            created_at: row.created_at ?? null,
+          });
+        }
       }
     }
 
