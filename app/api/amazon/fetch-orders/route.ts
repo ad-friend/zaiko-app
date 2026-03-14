@@ -1,0 +1,233 @@
+/**
+ * Amazon注文取得API (GET)
+ * SP-API で注文一覧・Order Items を取得し、必要に応じて Catalog API で JAN を逆引きして amazon_orders に upsert する。
+ */
+import { NextRequest, NextResponse } from "next/server";
+import { supabase } from "@/lib/supabase";
+
+const MARKETPLACE_ID_JP = "A1VC38T7YXB528";
+const JAN_LENGTH = 13;
+
+function is13DigitJan(s: string): boolean {
+  return /^\d{13}$/.test(String(s).trim());
+}
+
+function normalizeConditionId(conditionId: string | null | undefined): "New" | "Used" {
+  const c = String(conditionId ?? "").trim().toLowerCase();
+  if (c === "new" || c === "newitem" || c === "new_item") return "New";
+  return "Used";
+}
+
+function parseStartDate(startDate: string | null): { createdAfter: string } {
+  if (startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate.trim())) {
+    return { createdAfter: `${startDate.trim()}T00:00:00Z` };
+  }
+  const d = new Date();
+  d.setDate(d.getDate() - 3);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return { createdAfter: `${y}-${m}-${day}T00:00:00Z` };
+}
+
+function createSpClient() {
+  const clientId = process.env.SP_API_CLIENT_ID;
+  const clientSecret = process.env.SP_API_CLIENT_SECRET;
+  const refreshToken = process.env.SP_API_REFRESH_TOKEN;
+  const accessKey = process.env.SP_API_AWS_ACCESS_KEY;
+  const secretKey = process.env.SP_API_AWS_SECRET_KEY;
+  if (!clientId || !clientSecret || !refreshToken || !accessKey || !secretKey) {
+    throw new Error("SP-APIの認証情報が不足しています（.env.local の SP_API_* を確認してください）");
+  }
+  const SellingPartnerAPI = require("amazon-sp-api");
+  return new SellingPartnerAPI({
+    region: "fe",
+    refresh_token: refreshToken,
+    credentials: {
+      SELLING_PARTNER_APP_CLIENT_ID: clientId,
+      SELLING_PARTNER_APP_CLIENT_SECRET: clientSecret,
+      AWS_ACCESS_KEY_ID: accessKey,
+      AWS_SECRET_ACCESS_KEY: secretKey,
+      AWS_SELLING_PARTNER_ROLE: "",
+    },
+  });
+}
+
+/** Catalog Items API (ASIN → EAN/JAN) */
+async function fetchJanByAsin(
+  spClient: { callAPI: (params: unknown) => Promise<unknown> },
+  asin: string
+): Promise<string | null> {
+  if (!asin || asin.length < 10) return null;
+  try {
+    const res = (await spClient.callAPI({
+      operation: "getCatalogItem",
+      endpoint: "catalogItems",
+      path: { asin },
+      query: {
+        marketplaceIds: [MARKETPLACE_ID_JP],
+        includedData: ["summaries", "attributes"],
+      },
+      options: { version: "2022-04-01" },
+    })) as {
+      summaries?: Array<{ ean?: string; itemName?: string; [k: string]: unknown }>;
+      attributes?: Record<string, unknown>;
+    };
+    const ean =
+      res?.summaries?.[0]?.ean ??
+      (res as { attributes?: { item_identifier?: { ean?: string } } })?.attributes?.item_identifier?.ean;
+    if (ean && is13DigitJan(String(ean))) return String(ean).trim();
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+export async function GET(request: NextRequest) {
+  try {
+    const { searchParams } = new URL(request.url);
+    const startDate = searchParams.get("startDate");
+    const { createdAfter } = parseStartDate(startDate);
+
+    const spClient = createSpClient();
+
+    const allOrders: Array<{ AmazonOrderId: string }> = [];
+    let nextToken: string | null = null;
+
+    do {
+      const query: Record<string, unknown> = {
+        CreatedAfter: createdAfter,
+        MarketplaceIds: [MARKETPLACE_ID_JP],
+        OrderStatuses: ["Unshipped", "PartiallyShipped", "Shipped"],
+      };
+      if (nextToken) query.NextToken = nextToken;
+
+      const ordersRes = (await spClient.callAPI({
+        operation: "getOrders",
+        endpoint: "orders",
+        query,
+      })) as { Orders?: Array<{ AmazonOrderId: string }>; NextToken?: string };
+
+      const orders = ordersRes?.Orders ?? [];
+      allOrders.push(...orders);
+      nextToken = ordersRes?.NextToken ?? null;
+      if (nextToken) await sleep(1000);
+    } while (nextToken);
+
+    const rows: Array<{
+      amazon_order_id: string;
+      sku: string;
+      quantity: number;
+      condition_id: string;
+      reconciliation_status: string;
+      jan_code: string | null;
+    }> = [];
+    const seenOrderIds = new Set<string>();
+
+    for (const order of allOrders) {
+      const amazonOrderId = order.AmazonOrderId;
+      if (!amazonOrderId) continue;
+      if (seenOrderIds.has(amazonOrderId)) continue;
+      seenOrderIds.add(amazonOrderId);
+
+      let orderItems: Array<{
+        SellerSKU?: string;
+        ASIN?: string;
+        QuantityOrdered?: number;
+        ConditionId?: string;
+      }> = [];
+      try {
+        const itemsRes = (await spClient.callAPI({
+          operation: "getOrderItems",
+          endpoint: "orders",
+          path: { orderId: amazonOrderId },
+        })) as { OrderItems?: typeof orderItems };
+        orderItems = itemsRes?.OrderItems ?? [];
+      } catch (e) {
+        console.warn("[fetch-orders] getOrderItems failed:", amazonOrderId, e);
+        await sleep(500);
+        continue;
+      }
+
+      for (const item of orderItems) {
+        const sku = String(item.SellerSKU ?? "").trim();
+        const qty = Math.max(1, Number(item.QuantityOrdered) || 1);
+        const conditionId = normalizeConditionId(item.ConditionId);
+
+        let jan_code: string | null = null;
+        if (is13DigitJan(sku)) {
+          jan_code = sku;
+        } else if (item.ASIN) {
+          jan_code = await fetchJanByAsin(spClient, String(item.ASIN));
+          await sleep(400);
+        }
+
+        rows.push({
+          amazon_order_id: amazonOrderId,
+          sku: sku || "UNKNOWN",
+          quantity: qty,
+          condition_id: conditionId,
+          reconciliation_status: "pending",
+          jan_code,
+        });
+      }
+
+      await sleep(300);
+    }
+
+    if (rows.length === 0) {
+      return NextResponse.json({
+        ok: true,
+        message: "取得した注文は0件でした。",
+        ordersFetched: allOrders.length,
+        orderItemsProcessed: 0,
+        rowsUpserted: 0,
+      });
+    }
+
+    const { data: upserted, error } = await supabase
+      .from("amazon_orders")
+      .upsert(
+        rows.map((r) => ({
+          ...r,
+          updated_at: new Date().toISOString(),
+        })),
+        {
+          onConflict: "amazon_order_id,sku",
+          ignoreDuplicates: false,
+        }
+      )
+      .select("id");
+
+    if (error) {
+      if (error.code === "42P01") {
+        return NextResponse.json(
+          {
+            error:
+              "amazon_orders テーブルが存在しません。docs/amazon_orders_table.sql を実行し、かつ (amazon_order_id, sku) の UNIQUE 制約を追加してください。",
+          },
+          { status: 500 }
+        );
+      }
+      throw error;
+    }
+
+    const rowsUpserted = Array.isArray(upserted) ? upserted.length : 0;
+
+    return NextResponse.json({
+      ok: true,
+      message: "注文データを取得し、amazon_orders に保存しました。",
+      ordersFetched: allOrders.length,
+      orderItemsProcessed: rows.length,
+      rowsUpserted,
+    });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "注文の取得・保存に失敗しました。";
+    console.error("[fetch-orders]", e);
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}

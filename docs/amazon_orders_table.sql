@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS amazon_orders (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_amazon_orders_order_id ON amazon_orders (amazon_order_id);
+-- 注文+SKU 単位で一意（fetch-orders の upsert で使用）
+CREATE UNIQUE INDEX IF NOT EXISTS idx_amazon_orders_order_id_sku ON amazon_orders (amazon_order_id, sku);
 CREATE INDEX IF NOT EXISTS idx_amazon_orders_status ON amazon_orders (reconciliation_status);
 CREATE INDEX IF NOT EXISTS idx_amazon_orders_sku ON amazon_orders (sku);
 
