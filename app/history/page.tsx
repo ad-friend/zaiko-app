@@ -790,7 +790,7 @@ export default function HistoryPage() {
 
   return (
     <div className="flex-1 flex flex-col">
-      <main className="flex-1 w-full max-w-8xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+      <main className="flex-1 w-full max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8 py-6">
         <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
           <div className="bg-slate-50/80 px-6 py-4 border-b border-slate-100 backdrop-blur">
             <h2 className="text-base font-bold text-slate-800 flex items-center gap-2">
