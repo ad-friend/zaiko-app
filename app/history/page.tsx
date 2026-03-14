@@ -923,80 +923,80 @@ export default function HistoryPage() {
                 <table className="w-full text-sm text-left min-w-[1000px]">
                   <thead className="bg-slate-50/80 border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold tracking-wider">
                     <tr>
-                      <th className="px-6 py-4 w-[44px] text-center whitespace-nowrap"></th>
-                      <th className="px-6 py-4 min-w-[100px] whitespace-nowrap">
+                      <th className="px-3 py-4 w-[35px] text-center whitespace-nowrap"></th>
+                      <th className="px-3 py-4 min-w-[80px] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("created_at")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                               仕入日
                           {sortConfig.key === "created_at" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-6 py-4 min-w-[100px] whitespace-nowrap">
+                      <th className="px-3 py-4 min-w-[80px] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("registered_at")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           登録日
                           {sortConfig.key === "registered_at" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-6 py-4 min-w-[70px] whitespace-nowrap">
+                      <th className="px-3 py-4 min-w-[70px] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("supplier")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           仕入先
                           {sortConfig.key === "supplier" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-6 py-4 min-w-[80px] whitespace-nowrap">
+                      <th className="px-3 py-4 min-w-[80px] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("genre")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           ジャンル
                           {sortConfig.key === "genre" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-6 py-4 w-[140px] min-w-[120px] whitespace-nowrap">
+                      <th className="px-3 py-4 w-[140px] min-w-[120px] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("jan_code")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           JAN
                           {sortConfig.key === "jan_code" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-6 py-4 min-w-[180px] whitespace-nowrap">
+                      <th className="px-3 py-4 min-w-[180px] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("product_name")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           商品名
                           {sortConfig.key === "product_name" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-6 py-4 min-w-[90px] whitespace-nowrap">
+                      <th className="px-3 py-4 min-w-[90px] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("brand")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           ブランド
                           {sortConfig.key === "brand" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-6 py-4 min-w-[100px] whitespace-nowrap">
+                      <th className="px-3 py-4 min-w-[100px] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("model_number")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           型番
                           {sortConfig.key === "model_number" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-6 py-4 text-right min-w-[90px] whitespace-nowrap">
+                      <th className="px-3 py-4 text-right min-w-[90px] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("base_price")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded ml-auto">
                           基準価格
                           {sortConfig.key === "base_price" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-6 py-4 text-right min-w-[90px] whitespace-nowrap">
+                      <th className="px-3 py-4 text-right min-w-[90px] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("effective_unit_price")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded ml-auto">
                           実質単価
                           {sortConfig.key === "effective_unit_price" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-6 py-4 min-w-[60px] whitespace-nowrap">
+                      <th className="px-3 py-4 min-w-[60px] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("condition_type")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           状態
                           {sortConfig.key === "condition_type" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-6 py-4 min-w-[100px] whitespace-nowrap text-left text-slate-500 font-semibold">
+                      <th className="px-3 py-4 min-w-[100px] whitespace-nowrap text-left text-slate-500 font-semibold">
                         進捗
                       </th>
-                      <th className="px-6 py-4 min-w-[150px] whitespace-nowrap text-center text-slate-500 font-semibold">
+                      <th className="px-3 py-4 min-w-[150px] whitespace-nowrap text-center text-slate-500 font-semibold">
                         注文番号
                       </th>
-                      <th className="px-6 py-4 w-[100px] min-w-[80px] text-center whitespace-nowrap">操作</th>
+                      <th className="px-3 py-4 w-[100px] min-w-[80px] text-center whitespace-nowrap">操作</th>
                     </tr>
 
                   </thead>
