@@ -92,12 +92,13 @@ export async function POST() {
       const orderAsin = (order as { asin?: string | null }).asin?.trim() ?? null;
 
       if (orderAsin) {
-        const { data: productRow } = await supabase
+        const { data: productRows } = await supabase
           .from("products")
           .select("jan_code")
           .eq("asin", orderAsin)
-          .maybeSingle();
-        if (productRow?.jan_code) targetJan = String(productRow.jan_code).trim();
+          .limit(1);
+        const janFromMaster = productRows?.[0]?.jan_code;
+        if (janFromMaster) targetJan = String(janFromMaster).trim();
       }
       console.log(`🎯 判定されたJAN: ${targetJan}, 注文ASIN: ${orderAsin}`);
 
@@ -144,8 +145,19 @@ export async function POST() {
           for (const c of candidates) {
             await supabase.from("inbound_items").update({ order_id: orderId }).eq("id", c.id);
           }
-          await supabase.from("amazon_orders").update({ reconciliation_status: "completed", updated_at: new Date().toISOString() }).eq("id", order.id);
+          await supabase.from("amazon_orders").update({
+            reconciliation_status: "completed",
+            jan_code: targetJan ?? undefined,
+            updated_at: new Date().toISOString(),
+          }).eq("id", order.id);
           completed++;
+        } else {
+          await supabase.from("amazon_orders").update({
+            reconciliation_status: "manual_required",
+            jan_code: targetJan ?? null,
+            updated_at: new Date().toISOString(),
+          }).eq("id", order.id);
+          manualRequired++;
         }
         continue;
       }
@@ -164,12 +176,16 @@ export async function POST() {
         const count = usedCandidates?.length ?? 0;
         if (count === 1 && usedCandidates) {
           await supabase.from("inbound_items").update({ order_id: orderId }).eq("id", usedCandidates[0].id);
-          await supabase.from("amazon_orders").update({ reconciliation_status: "completed", updated_at: new Date().toISOString() }).eq("id", order.id);
+          await supabase.from("amazon_orders").update({
+            reconciliation_status: "completed",
+            jan_code: targetJan ?? undefined,
+            updated_at: new Date().toISOString(),
+          }).eq("id", order.id);
           completed++;
-        } else if (count >= 2) {
+        } else {
           await supabase.from("amazon_orders").update({
             reconciliation_status: "manual_required",
-            jan_code: targetJan ?? undefined,
+            jan_code: targetJan ?? null,
             updated_at: new Date().toISOString(),
           }).eq("id", order.id);
           manualRequired++;

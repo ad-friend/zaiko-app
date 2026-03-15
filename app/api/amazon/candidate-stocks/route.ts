@@ -75,15 +75,26 @@ export async function GET(request: NextRequest) {
     }
 
     if (orderAsin) {
+      console.log(`\n================================`);
+      console.log(`[LOG] ① 注文データのASIN: ${orderAsin}`);
       const countBeforeConditionB = results.length;
       let janFromMaster: string | null = null;
-      const { data: productRow } = await supabase
+      // ⚠️ エラーも変数(productError)として受け取るように書き足しています
+      const { data: productRow, error: productError } = await supabase
         .from("products")
         .select("jan_code")
         .eq("asin", orderAsin)
         .maybeSingle();
+
+      // ▼ ログ②と③
+      console.log(`[LOG] ② Supabase検索エラー?:`, productError);
+      console.log(`[LOG] ③ マスタからの取得データ:`, JSON.stringify(productRow));
+
       if (productRow?.jan_code) janFromMaster = String(productRow.jan_code).trim();
 
+      // ▼ ログ④
+      console.log(`[LOG] ④ 最終的にセットされたJAN: ${janFromMaster}`);
+      console.log(`================================\n`);
       if (janFromMaster) {
         const { data: unlinked, error: errB } = await supabase
           .from("inbound_items")
