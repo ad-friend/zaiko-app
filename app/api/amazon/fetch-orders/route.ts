@@ -1,12 +1,12 @@
 /**
  * Amazon注文取得API (GET)
- * SP-API で注文一覧・Order Items を取得し、必要に応じて Catalog API で JAN を逆引きして amazon_orders に upsert する。
+ * SP-API で注文一覧・Order Items を取得し、amazon_orders に upsert する。
+ * 明細の ASIN はそのまま asin カラムに保存（JAN変換は行わない。消込は注文asinと在庫asinの一致で行う）。
  */
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 
 const MARKETPLACE_ID_JP = "A1VC38T7YXB528";
-const JAN_LENGTH = 13;
 
 function is13DigitJan(s: string): boolean {
   return /^\d{13}$/.test(String(s).trim());
@@ -64,36 +64,6 @@ function createSpClient() {
   });
 }
 
-/** Catalog Items API (ASIN → EAN/JAN) */
-async function fetchJanByAsin(
-  spClient: { callAPI: (params: unknown) => Promise<unknown> },
-  asin: string
-): Promise<string | null> {
-  if (!asin || asin.length < 10) return null;
-  try {
-    const res = (await spClient.callAPI({
-      operation: "getCatalogItem",
-      endpoint: "catalogItems",
-      path: { asin },
-      query: {
-        marketplaceIds: [MARKETPLACE_ID_JP],
-        includedData: ["summaries", "attributes"],
-      },
-      options: { version: "2022-04-01" },
-    })) as {
-      summaries?: Array<{ ean?: string; itemName?: string; [k: string]: unknown }>;
-      attributes?: Record<string, unknown>;
-    };
-    const ean =
-      res?.summaries?.[0]?.ean ??
-      (res as { attributes?: { item_identifier?: { ean?: string } } })?.attributes?.item_identifier?.ean;
-    if (ean && is13DigitJan(String(ean))) return String(ean).trim();
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -138,6 +108,7 @@ export async function GET(request: NextRequest) {
       condition_id: string;
       reconciliation_status: string;
       jan_code: string | null;
+      asin: string | null;
     }> = [];
     const seenOrderIds = new Set<string>();
 
@@ -170,14 +141,8 @@ export async function GET(request: NextRequest) {
         const sku = String(item.SellerSKU ?? "").trim();
         const qty = Math.max(1, Number(item.QuantityOrdered) || 1);
         const conditionId = normalizeConditionId(item.ConditionId);
-
-        let jan_code: string | null = null;
-        if (is13DigitJan(sku)) {
-          jan_code = sku;
-        } else if (item.ASIN) {
-          jan_code = await fetchJanByAsin(spClient, String(item.ASIN));
-          await sleep(400);
-        }
+        const asin = item.ASIN ? String(item.ASIN).trim() : null;
+        const jan_code = is13DigitJan(sku) ? sku : null;
 
         rows.push({
           amazon_order_id: amazonOrderId,
@@ -186,6 +151,7 @@ export async function GET(request: NextRequest) {
           condition_id: conditionId,
           reconciliation_status: "pending",
           jan_code,
+          asin,
         });
       }
 

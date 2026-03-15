@@ -5,6 +5,7 @@ import { supabase } from "@/lib/supabase";
 export type RecordRow = {
   id: number;
   jan_code: string | null;
+  asin?: string | null;
   product_name: string | null;
   brand: string | null;
   model_number: string | null;
@@ -26,6 +27,7 @@ export type RecordRow = {
 const SELECT_WITH_REGISTERED = `
   id,
   jan_code,
+  asin,
   product_name,
   brand,
   model_number,
@@ -48,6 +50,7 @@ const SELECT_WITH_REGISTERED = `
 const SELECT_WITHOUT_REGISTERED = `
   id,
   jan_code,
+  asin,
   product_name,
   brand,
   model_number,
@@ -80,6 +83,7 @@ export async function GET() {
     const rows = (data || []).map((row: any) => ({
       id: row.id,
       jan_code: row.jan_code ?? null,
+      asin: row.asin ?? null,
       product_name: row.product_name ?? null,
       brand: row.brand ?? null,
       model_number: row.model_number ?? null,

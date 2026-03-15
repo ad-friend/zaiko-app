@@ -20,6 +20,8 @@ type ProductRow = {
   inferredByAi: boolean;
   condition: ProductCondition;
   isMaster?: boolean;
+  /** 商品情報取得API（infer-jan）の同一レスポンスから取得したASIN。保存時に inbound_items.asin へ送る */
+  asin?: string | null;
 };
 
 type HeaderInfo = {
@@ -230,7 +232,8 @@ export default function InboundPage() {
             brand = cleanseProductName(dbData.brand ?? "");
             productName = cleanseProductName(dbData.productName ?? "");
             modelNumber = cleanseProductName(dbData.modelNumber ?? "");
-            applyJanResult(trimmed, brand, productName, modelNumber, rowId,dbData.isMaster);
+            const asin = dbData.asin ?? null;
+            applyJanResult(trimmed, brand, productName, modelNumber, rowId, dbData.isMaster, asin);
             return;
           }
         }
@@ -241,27 +244,27 @@ export default function InboundPage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ jan: trimmed }),
         });
+        let asin: string | null = null;
         if (res.ok) {
           const data = await res.json();
           brand = cleanseProductName(data.brand ?? "");
           productName = cleanseProductName(data.productName ?? "");
           modelNumber = cleanseProductName(data.modelNumber ?? "");
+          asin = data.asin ?? null;
         }
-        applyJanResult(trimmed, brand, productName, modelNumber, rowId,false);
+        applyJanResult(trimmed, brand, productName, modelNumber, rowId, false, asin);
       } catch (e) {
-        applyJanResult(trimmed, brand, productName, modelNumber, rowId,false);
+        applyJanResult(trimmed, brand, productName, modelNumber, rowId, false, null);
       } finally {
         setInferringJan(null);
       }
 
-      // 🌟 isMaster 引数を追加
-      function applyJanResult(trimmed: string, brand: string, productName: string, modelNumber: string, rowId?: string, isMaster: boolean = false) { 
+      function applyJanResult(trimmed: string, brand: string, productName: string, modelNumber: string, rowId?: string, isMaster: boolean = false, asin: string | null = null) {
         if (rowId) {
           setRows((prev) =>
             prev.map((r) =>
               r.id === rowId
-                // 🌟 isMaster を保存するように追加
-                ? { ...r, jan: r.jan || trimmed, brand: r.brand || brand, productName: r.productName || productName, modelNumber: r.modelNumber || modelNumber, inferredByAi: !!productName, isMaster } 
+                ? { ...r, jan: r.jan || trimmed, brand: r.brand || brand, productName: r.productName || productName, modelNumber: r.modelNumber || modelNumber, inferredByAi: !!productName, isMaster, ...(asin != null && { asin }) }
                 : r
             )
           );
@@ -271,8 +274,7 @@ export default function InboundPage() {
             if (last && !last.jan && !last.brand && !last.productName) {
               return prev.map((r, i) =>
                 i === prev.length - 1
-                  // 🌟 isMaster を保存するように追加
-                  ? { ...r, jan: trimmed, brand, productName, modelNumber, inferredByAi: !!productName, isMaster } 
+                  ? { ...r, jan: trimmed, brand, productName, modelNumber, inferredByAi: !!productName, isMaster, ...(asin != null && { asin }) }
                   : r
               );
             }
@@ -287,7 +289,8 @@ export default function InboundPage() {
               fixedUnitPrice: false,
               inferredByAi: !!productName,
               condition: "new",
-              isMaster, // 🌟 追加
+              isMaster,
+              ...(asin != null && { asin }),
             };
             lastAddedIdRef.current = newRow.id;
             return [...prev, newRow];

@@ -12,7 +12,7 @@ export async function GET(request: NextRequest) {
 
     let q = supabase
       .from("amazon_orders")
-      .select("id, amazon_order_id, sku, condition_id, reconciliation_status, quantity, jan_code, created_at")
+      .select("id, amazon_order_id, sku, condition_id, reconciliation_status, quantity, jan_code, asin, created_at")
       .order("created_at", { ascending: false });
 
     if (status) {

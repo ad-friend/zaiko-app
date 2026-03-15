@@ -11,6 +11,7 @@ type AmazonOrder = {
   reconciliation_status: string;
   quantity: number;
   jan_code: string | null;
+  asin?: string | null;
   created_at: string;
 };
 
@@ -70,6 +71,8 @@ export default function AmazonReconcileManager() {
   const [isModalOpen, setIsModalOpen] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
+  const [showOnlyNoStock, setShowOnlyNoStock] = useState(false);
+  const [candidateCountByOrderId, setCandidateCountByOrderId] = useState<Record<number, number>>({});
 
   const fetchManualOrders = useCallback(async () => {
     setLoading(true);
@@ -90,6 +93,15 @@ export default function AmazonReconcileManager() {
   useEffect(() => {
     fetchManualOrders();
   }, [fetchManualOrders]);
+
+  const handleCandidatesLoaded = useCallback((orderId: number, count: number) => {
+    setCandidateCountByOrderId((prev) => ({ ...prev, [orderId]: count }));
+  }, []);
+
+  const filteredManualOrders = showOnlyNoStock
+    ? manualOrders.filter((o) => (candidateCountByOrderId[o.id] ?? -1) === 0)
+    : manualOrders;
+  const noStockCount = manualOrders.filter((o) => (candidateCountByOrderId[o.id] ?? -1) === 0).length;
 
   const fetchPendingFinances = useCallback(async () => {
     setIsLoadingPendingFinances(true);
@@ -300,19 +312,40 @@ export default function AmazonReconcileManager() {
             <div className="absolute top-0 left-0 w-1 h-full bg-amber-500" />
             <h3 className="text-lg font-bold text-slate-800 mb-2">STEP 3: 未処理注文（手動確認）</h3>
             <p className="text-sm text-slate-500 mb-4">
-              中古在庫候補が複数あるなど、手動で確認が必要な注文です。正しい在庫候補を選んで確定してください。
+              中古在庫候補が複数あるなど、手動で確認が必要な注文です。正しい在庫候補を選んで確定してください。在庫なしの注文も表示されます。
             </p>
+            <div className="flex flex-wrap items-center gap-3 mb-4">
+              <label className="inline-flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={showOnlyNoStock}
+                  onChange={(e) => setShowOnlyNoStock(e.target.checked)}
+                  className="rounded border-slate-300 text-red-600 focus:ring-red-500"
+                />
+                <span className="text-sm font-medium text-slate-700">在庫なしのみ表示</span>
+              </label>
+              {noStockCount > 0 && (
+                <span className="inline-flex items-center rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-800">
+                  在庫なし: {noStockCount}件
+                </span>
+              )}
+            </div>
             {loading ? (
               <p className="text-slate-500">読み込み中...</p>
             ) : manualOrders.length === 0 ? (
               <p className="text-slate-500">手動確認対象の注文はありません。</p>
+            ) : filteredManualOrders.length === 0 ? (
+              <p className="text-slate-500">
+                {showOnlyNoStock ? "在庫なしの注文はありません（候補の読み込みが完了すると反映されます）。" : "表示する注文がありません。"}
+              </p>
             ) : (
               <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3">
-                {manualOrders.map((order) => (
+                {filteredManualOrders.map((order) => (
                   <ManualOrderCard
                     key={order.id}
                     order={order}
                     onConfirmed={fetchManualOrders}
+                    onCandidatesLoaded={handleCandidatesLoaded}
                   />
                 ))}
               </div>
@@ -464,9 +497,11 @@ export default function AmazonReconcileManager() {
 function ManualOrderCard({
   order,
   onConfirmed,
+  onCandidatesLoaded,
 }: {
   order: AmazonOrder;
   onConfirmed: () => void;
+  onCandidatesLoaded?: (orderId: number, candidateCount: number) => void;
 }) {
   const [candidates, setCandidates] = useState<InboundCandidate[]>([]);
   const [loadingCandidates, setLoadingCandidates] = useState(false);
@@ -478,19 +513,28 @@ function ManualOrderCard({
     let cancelled = false;
     setLoadingCandidates(true);
     setError(null);
-    fetch(`/api/amazon/orders/candidates?amazon_order_id=${encodeURIComponent(order.amazon_order_id)}`)
+    const params = new URLSearchParams({ amazon_order_id: order.amazon_order_id });
+    if (order.sku) params.set("sku", order.sku);
+    fetch(`/api/amazon/orders/candidates?${params}`)
       .then((res) => res.ok ? res.json() : [])
       .then((data) => {
-        if (!cancelled) setCandidates(Array.isArray(data) ? data : []);
+        const list = Array.isArray(data) ? data : [];
+        if (!cancelled) {
+          setCandidates(list);
+          onCandidatesLoaded?.(order.id, list.length);
+        }
       })
       .catch(() => {
-        if (!cancelled) setError("候補の取得に失敗しました");
+        if (!cancelled) {
+          setError("候補の取得に失敗しました");
+          onCandidatesLoaded?.(order.id, 0);
+        }
       })
       .finally(() => {
         if (!cancelled) setLoadingCandidates(false);
       });
     return () => { cancelled = true; };
-  }, [order.amazon_order_id]);
+  }, [order.amazon_order_id, order.sku, order.id, onCandidatesLoaded]);
 
   const confirmSelection = async () => {
     if (selectedId == null) return;
@@ -515,8 +559,16 @@ function ManualOrderCard({
     }
   };
 
+  const noCandidates = !loadingCandidates && candidates.length === 0;
+
   return (
-    <div className="rounded-lg border border-slate-200 bg-slate-50/50 p-4 shadow-sm hover:shadow-md transition-shadow">
+    <div
+      className={`rounded-lg border p-4 shadow-sm transition-shadow ${
+        noCandidates
+          ? "border-red-200 bg-red-50/80 hover:shadow-md"
+          : "border-slate-200 bg-slate-50/50 hover:shadow-md"
+      }`}
+    >
       <div className="mb-3">
         <a
           href={`https://sellercentral.amazon.co.jp/orders-v3/order/${order.amazon_order_id}`}
@@ -528,11 +580,24 @@ function ManualOrderCard({
         </a>
         <p className="text-xs text-slate-500 mt-1">SKU: {order.sku} / 状態: {order.condition_id} / 数量: {order.quantity}</p>
         {order.jan_code && <p className="text-xs text-slate-500 font-medium">JAN: {order.jan_code}</p>}
+        {order.asin && <p className="text-xs text-slate-500 font-medium">ASIN: {order.asin}</p>}
       </div>
       {loadingCandidates ? (
         <p className="text-xs text-slate-500">在庫候補を取得中...</p>
-      ) : candidates.length === 0 ? (
-        <p className="text-xs text-red-500">該当する中古在庫候補がありません。</p>
+      ) : noCandidates ? (
+        <div className="space-y-2">
+          <p className="text-xs font-medium text-red-700 flex items-center gap-1">
+            <span className="shrink-0" aria-hidden>⚠</span>
+            紐付け可能な在庫が登録されていません。JAN/ASINを確認して在庫を登録してください。
+          </p>
+          <button
+            type="button"
+            disabled
+            className={`${buttonClass} w-full bg-slate-300 text-slate-500 cursor-not-allowed text-sm`}
+          >
+            手動で紐付け（在庫なしのため選択不可）
+          </button>
+        </div>
       ) : (
         <>
           <label className="block text-xs font-semibold text-slate-600 mb-1">在庫候補を選択</label>

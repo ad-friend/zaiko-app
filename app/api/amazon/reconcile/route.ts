@@ -16,7 +16,7 @@ export async function POST() {
   try {
     const { data: pendingOrders, error: fetchError } = await supabase
       .from("amazon_orders")
-      .select("id, amazon_order_id, sku, condition_id, quantity, jan_code")
+      .select("id, amazon_order_id, sku, condition_id, quantity, jan_code, asin")
       .eq("reconciliation_status", "pending")
       .order("created_at", { ascending: true });
 
@@ -88,25 +88,48 @@ export async function POST() {
         }
       }
 
-      // --- JANコードの決定 ---
       const targetJan = masterJan || order.jan_code?.trim() || (is13DigitJan(sku) ? sku : null);
-      console.log(`🎯 判定されたJAN: ${targetJan}`);
-      if (!targetJan) console.log("⚠️ JANが特定できないためスキップします");
+      const orderAsin = (order as { asin?: string | null }).asin?.trim() ?? null;
+      console.log(`🎯 判定されたJAN: ${targetJan}, 注文ASIN: ${orderAsin}`);
 
-      if (!targetJan) continue; 
+      const unlinkedFilter = "order_id.is.null,order_id.eq.";
+      const newConditionFilter = "condition_type.eq.新品,condition_type.ilike.%new%";
+      const usedConditionFilter = "condition_type.eq.中古,condition_type.ilike.%used%";
 
-      // --- 新品（単一）の消込 ---
-      if (conditionId === CONDITION_NEW) {
-        const { data: candidates } = await supabase
+      const findCandidatesByAsin = (conditionFilter: string, limit?: number) =>
+        supabase
           .from("inbound_items")
           .select("id")
-          .eq("jan_code", targetJan)
-          // ★修正：「新品」または「new」を含む在庫を探す
-          .or("condition_type.eq.新品,condition_type.ilike.%new%") 
-          .or("order_id.is.null,order_id.eq.")
+          .eq("asin", orderAsin!)
+          .or(conditionFilter)
+          .or(unlinkedFilter)
           .order("created_at", { ascending: true })
-          .limit(orderQty); 
-          console.log(`📦 新品の在庫検索結果:`, candidates);
+          .limit(limit ?? 999);
+
+      const findCandidatesByJan = (conditionFilter: string, limit?: number) =>
+        targetJan
+          ? supabase
+              .from("inbound_items")
+              .select("id")
+              .eq("jan_code", targetJan)
+              .or(conditionFilter)
+              .or(unlinkedFilter)
+              .order("created_at", { ascending: true })
+              .limit(limit ?? 999)
+          : { data: null as { id: number }[] | null };
+
+      // --- 新品（単一）の消込（ASIN一致を優先、なければJAN） ---
+      if (conditionId === CONDITION_NEW) {
+        let candidates: { id: number }[] | null = null;
+        if (orderAsin) {
+          const res = await findCandidatesByAsin(newConditionFilter, orderQty);
+          candidates = res.data;
+        }
+        if (!candidates?.length) {
+          const res = await findCandidatesByJan(newConditionFilter, orderQty);
+          candidates = res.data;
+        }
+        console.log(`📦 新品の在庫検索結果:`, candidates);
 
         if (candidates && candidates.length === orderQty) {
           for (const c of candidates) {
@@ -118,30 +141,30 @@ export async function POST() {
         continue;
       }
 
-      // --- 中古品（個体管理）の消込 ---
+      // --- 中古品（個体管理）の消込（ASIN一致を優先、なければJAN） ---
       if (conditionId === CONDITION_USED) {
-        const { data: usedCandidates } = await supabase
-          .from("inbound_items")
-          .select("id")
-          .eq("jan_code", targetJan)
-          // ★修正：「中古」または「used」を含む在庫を探す
-          .or("condition_type.eq.中古,condition_type.ilike.%used%") 
-          .or("order_id.is.null,order_id.eq.")
-          .order("created_at", { ascending: true });
-          console.log(`📦 中古の在庫検索結果:`, usedCandidates);
+        let usedCandidates: { id: number }[] | null = null;
+        if (orderAsin) {
+          const res = await findCandidatesByAsin(usedConditionFilter);
+          usedCandidates = res.data;
+        }
+        if (!usedCandidates?.length) {
+          const res = await findCandidatesByJan(usedConditionFilter);
+          usedCandidates = res.data;
+        }
+        console.log(`📦 中古の在庫検索結果:`, usedCandidates);
 
         const count = usedCandidates?.length ?? 0;
-        
         if (count === 1 && usedCandidates) {
           await supabase.from("inbound_items").update({ order_id: orderId }).eq("id", usedCandidates[0].id);
           await supabase.from("amazon_orders").update({ reconciliation_status: "completed", updated_at: new Date().toISOString() }).eq("id", order.id);
           completed++;
         } else if (count >= 2) {
           await supabase.from("amazon_orders").update({
-              reconciliation_status: "manual_required",
-              jan_code: targetJan,
-              updated_at: new Date().toISOString(),
-            }).eq("id", order.id);
+            reconciliation_status: "manual_required",
+            jan_code: targetJan ?? undefined,
+            updated_at: new Date().toISOString(),
+          }).eq("id", order.id);
           manualRequired++;
         }
         continue;

@@ -13,6 +13,8 @@ export type InferJanResponse = {
   modelNumber: string;
   inferred: boolean;
   source?: "db" | "api" | "ai";
+  /** 既存の商品情報取得API（Amazon SP-API等）の同一レスポンスから抽出したASIN。保存時に inbound_items.asin へ渡す */
+  asin?: string | null;
 };
 
 const GEMINI_MODEL = "gemini-3.1-flash-lite-preview";
@@ -79,6 +81,7 @@ export async function PATCH(request: NextRequest) {
         if (item.created_at !== undefined) update.created_at = item.created_at;
         if (item.condition_type !== undefined) update.condition_type = item.condition_type;
         if (item.registered_at !== undefined) update.registered_at = item.registered_at;
+        if (item.asin !== undefined) update.asin = item.asin;
 
         if (Object.keys(update).length > 0) {
           const { error } = await supabase.from("inbound_items").update(update).eq("id", id);
@@ -143,6 +146,7 @@ export async function PATCH(request: NextRequest) {
             allItemsToInsert.push({
               header_id: headerId,
               jan_code: item.jan_code ?? null,
+              asin: item.asin != null ? String(item.asin).trim() || null : null,
               brand: item.brand ?? null,
               product_name: item.product_name ?? null,
               model_number: item.model_number ?? null,
@@ -195,6 +199,7 @@ export async function PATCH(request: NextRequest) {
     if (body.effective_unit_price !== undefined) update.effective_unit_price = body.effective_unit_price;
     if (body.created_at !== undefined) update.created_at = body.created_at;
     if (body.registered_at !== undefined) update.registered_at = body.registered_at;
+    if (body.asin !== undefined) update.asin = body.asin;
 
     if (Object.keys(update).length > 0) {
         const { error } = await supabase.from("inbound_items").update(update).eq("id", id);
@@ -271,21 +276,22 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ found: false, brand: "", productName: "", modelNumber: "", inferred: false });
     }
 
-    // Step 2: 外部3社APIを順次実行
+    // Step 2: 外部3社APIを順次実行（1回の通信でテキストとASINを同時取得）
     const apiBuffer: string[] = [];
+    let amazonAsin: string | null = null;
     console.log("📡 Step 2: 外部APIへの問い合わせを開始...");
 
     try {
-      // 💡 ここが新しい Amazon SP-API の呼び出し
-      const amazon = await fetchAmazonSpApi(jan);
-      if (amazon) {
+      const amazonResult = await fetchAmazonSpApi(jan);
+      if (amazonResult.text) {
         console.log("📦 Amazon SP-API: 取得成功");
-        apiBuffer.push(`【Amazon】\n${amazon}`);
+        apiBuffer.push(`【Amazon】\n${amazonResult.text}`);
       } else {
         console.log("📦 Amazon SP-API: データなし");
       }
-    } catch (e: any) { 
-        console.log("📦 Amazon SP-API: エラーによりスキップ", e.message); 
+      if (amazonResult.asin) amazonAsin = amazonResult.asin;
+    } catch (e: any) {
+      console.log("📦 Amazon SP-API: エラーによりスキップ", e.message);
     }
 
     try {
@@ -311,18 +317,18 @@ export async function POST(request: NextRequest) {
     const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
     const combinedBuffer = apiBuffer.length > 0 ? apiBuffer.join("\n\n") : "";
 
-    // Step 3: AIで精査
+    // Step 3: AIで精査（レスポンスにASINを含める）
     if (apiKey) {
       try {
         if (combinedBuffer) {
           console.log("🤖 Step 3: API情報を元にAIが情報を統合・抽出中...");
           const result = await inferWithGeminiFromApiBuffer(jan, combinedBuffer, apiKey);
           console.log("✅ AI統合完了:", result.productName);
-          return NextResponse.json(result);
+          return NextResponse.json({ ...result, asin: amazonAsin ?? undefined });
         }
-        
+
         console.log("🤖 Step 3: API情報がないため、空欄を返します。");
-        return NextResponse.json({ brand: "", productName: "", modelNumber: "", inferred: true, source: "ai" });
+        return NextResponse.json({ brand: "", productName: "", modelNumber: "", inferred: true, source: "ai", asin: amazonAsin ?? undefined });
       } catch (geminiError: any) {
         console.error("❌ Gemini Error:", geminiError);
         return NextResponse.json({
@@ -330,6 +336,7 @@ export async function POST(request: NextRequest) {
           brand: "❌ AIエラー",
           productName: `理由: ${geminiError.message}`,
           source: "ai",
+          asin: amazonAsin ?? undefined,
         });
       }
     }
@@ -337,9 +344,9 @@ export async function POST(request: NextRequest) {
     console.log("⚠️ APIキー未設定のため、ヒューリスティックで回答します。");
     if (combinedBuffer) {
       const parsed = tryParseFirstLineFromBuffer(combinedBuffer);
-      if (parsed) return NextResponse.json({ ...parsed, inferred: true, source: "api" as const });
+      if (parsed) return NextResponse.json({ ...parsed, inferred: true, source: "api" as const, asin: amazonAsin ?? undefined });
     }
-    return NextResponse.json({ ...inferHeuristic(jan), source: "ai" });
+    return NextResponse.json({ ...inferHeuristic(jan), source: "ai", asin: amazonAsin ?? undefined });
   } catch (e: any) {
     console.error("🚨 致命的な例外が発生しました:", e.message);
     return NextResponse.json({ error: e.message }, { status: 500 });
@@ -348,24 +355,21 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// 💡 【新規追加】Amazon SP-API を使ってJAN検索を行う関数
-async function fetchAmazonSpApi(jan: string): Promise<string | null> {
-  // .env.localから今日取得した鍵を読み込む
+/** 既存の1回のSP-API呼び出しの戻り値からテキストとASINを同時に返す（追加のAPI通信なし） */
+async function fetchAmazonSpApi(jan: string): Promise<{ text: string | null; asin: string | null }> {
   const clientId = process.env.SP_API_CLIENT_ID;
   const clientSecret = process.env.SP_API_CLIENT_SECRET;
   const refreshToken = process.env.SP_API_REFRESH_TOKEN;
   const accessKey = process.env.SP_API_AWS_ACCESS_KEY;
   const secretKey = process.env.SP_API_AWS_SECRET_KEY;
-  const region = process.env.SP_API_REGION || "fe-prime";
 
   if (!clientId || !clientSecret || !refreshToken || !accessKey || !secretKey) {
     console.log("⚠️ SP-APIの認証情報が.env.localに不足しています。");
-    return null;
+    return { text: null, asin: null };
   }
 
   try {
-    // 認証情報を使ってAmazon SP-APIのクライアントを作成
-    const SellingPartnerAPI = require("amazon-sp-api"); // ←ここに追加！
+    const SellingPartnerAPI = require("amazon-sp-api");
     const spClient = new SellingPartnerAPI({
       region: "fe",
       refresh_token: refreshToken,
@@ -374,43 +378,39 @@ async function fetchAmazonSpApi(jan: string): Promise<string | null> {
         SELLING_PARTNER_APP_CLIENT_SECRET: clientSecret,
         AWS_ACCESS_KEY_ID: accessKey,
         AWS_SECRET_ACCESS_KEY: secretKey,
-        AWS_SELLING_PARTNER_ROLE: "" 
-      }
+        AWS_SELLING_PARTNER_ROLE: "",
+      },
     });
 
-    // カタログAPIを叩いて、JAN(EAN)コードで検索
     const res = await spClient.callAPI({
-      operation: 'searchCatalogItems',
-      endpoint: 'catalogItems',
+      operation: "searchCatalogItems",
+      endpoint: "catalogItems",
       query: {
         keywords: [jan],
-        marketplaceIds: ['A1VC38T7YXB528'], // 日本のマーケットプレイスID
-        includedData: ['summaries'] // 商品名やブランド情報を取得
-      }
+        marketplaceIds: ["A1VC38T7YXB528"],
+        includedData: ["summaries"],
+      },
     });
 
-    // 検索結果のチェック
     const items = res.items;
-    if (!items || items.length === 0) return null;
+    if (!items || items.length === 0) return { text: null, asin: null };
 
-    // 一番最初の検索結果を取得
-    const topItem = items[0];
+    const topItem = items[0] as { asin?: string; summaries?: Array<{ asin?: string; itemName?: string; brand?: string; partNumber?: string }> };
+    const asin =
+      topItem?.asin ?? topItem?.summaries?.[0]?.asin
+        ? String(topItem.asin ?? topItem.summaries?.[0]?.asin ?? "").trim()
+        : null;
+    const validAsin = asin && asin.length >= 10 ? asin : null;
+
     const parts: string[] = [];
-
-    // 商品名を抽出
     const title = topItem.summaries?.[0]?.itemName;
     if (title) parts.push(`商品名: ${title}`);
-
-    // ブランドを抽出
     const brand = topItem.summaries?.[0]?.brand;
     if (brand) parts.push(`ブランド: ${brand}`);
-
-    // もし型番（partNumber）があれば抽出
     const partNumber = topItem.summaries?.[0]?.partNumber;
     if (partNumber) parts.push(`型番: ${partNumber}`);
 
-    return parts.length ? parts.join("\n") : null;
-
+    return { text: parts.length ? parts.join("\n") : null, asin: validAsin };
   } catch (error: any) {
     console.error("❌ SP-API 呼び出しエラー詳細:", error.response?.data || error.message);
     throw new Error(`Amazon SP-API エラー: ${error.message}`);
