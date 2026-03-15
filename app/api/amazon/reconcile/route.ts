@@ -88,23 +88,22 @@ export async function POST() {
         }
       }
 
-      const targetJan = masterJan || order.jan_code?.trim() || (is13DigitJan(sku) ? sku : null);
+      let targetJan = masterJan || order.jan_code?.trim() || (is13DigitJan(sku) ? sku : null);
       const orderAsin = (order as { asin?: string | null }).asin?.trim() ?? null;
+
+      if (orderAsin) {
+        const { data: productRow } = await supabase
+          .from("products")
+          .select("jan_code")
+          .eq("asin", orderAsin)
+          .maybeSingle();
+        if (productRow?.jan_code) targetJan = String(productRow.jan_code).trim();
+      }
       console.log(`🎯 判定されたJAN: ${targetJan}, 注文ASIN: ${orderAsin}`);
 
       const unlinkedFilter = "order_id.is.null,order_id.eq.";
       const newConditionFilter = "condition_type.eq.新品,condition_type.ilike.%new%";
       const usedConditionFilter = "condition_type.eq.中古,condition_type.ilike.%used%";
-
-      const findCandidatesByAsin = (conditionFilter: string, limit?: number) =>
-        supabase
-          .from("inbound_items")
-          .select("id")
-          .eq("asin", orderAsin!)
-          .or(conditionFilter)
-          .or(unlinkedFilter)
-          .order("created_at", { ascending: true })
-          .limit(limit ?? 999);
 
       const findCandidatesByJan = (conditionFilter: string, limit?: number) =>
         targetJan
@@ -118,16 +117,26 @@ export async function POST() {
               .limit(limit ?? 999)
           : { data: null as { id: number }[] | null };
 
-      // --- 新品（単一）の消込（ASIN一致を優先、なければJAN） ---
+      const findCandidatesByAsin = (conditionFilter: string, limit?: number) =>
+        orderAsin
+          ? supabase
+              .from("inbound_items")
+              .select("id")
+              .eq("asin", orderAsin)
+              .or(conditionFilter)
+              .or(unlinkedFilter)
+              .order("created_at", { ascending: true })
+              .limit(limit ?? 999)
+          : { data: null as { id: number }[] | null };
+
+      // --- 新品（単一）の消込（マスタ経由JANを優先、なければASINでフォールバック） ---
       if (conditionId === CONDITION_NEW) {
         let candidates: { id: number }[] | null = null;
-        if (orderAsin) {
-          const res = await findCandidatesByAsin(newConditionFilter, orderQty);
-          candidates = res.data;
-        }
+        const resJan = await findCandidatesByJan(newConditionFilter, orderQty);
+        candidates = resJan.data ?? null;
         if (!candidates?.length) {
-          const res = await findCandidatesByJan(newConditionFilter, orderQty);
-          candidates = res.data;
+          const resAsin = await findCandidatesByAsin(newConditionFilter, orderQty);
+          candidates = resAsin.data ?? null;
         }
         console.log(`📦 新品の在庫検索結果:`, candidates);
 
@@ -141,16 +150,14 @@ export async function POST() {
         continue;
       }
 
-      // --- 中古品（個体管理）の消込（ASIN一致を優先、なければJAN） ---
+      // --- 中古品（個体管理）の消込（マスタ経由JANを優先、なければASINでフォールバック） ---
       if (conditionId === CONDITION_USED) {
         let usedCandidates: { id: number }[] | null = null;
-        if (orderAsin) {
-          const res = await findCandidatesByAsin(usedConditionFilter);
-          usedCandidates = res.data;
-        }
+        const resJan = await findCandidatesByJan(usedConditionFilter);
+        usedCandidates = resJan.data ?? null;
         if (!usedCandidates?.length) {
-          const res = await findCandidatesByJan(usedConditionFilter);
-          usedCandidates = res.data;
+          const resAsin = await findCandidatesByAsin(usedConditionFilter);
+          usedCandidates = resAsin.data ?? null;
         }
         console.log(`📦 中古の在庫検索結果:`, usedCandidates);
 

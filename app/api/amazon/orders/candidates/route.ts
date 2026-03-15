@@ -38,13 +38,33 @@ export async function GET(request: NextRequest) {
     let data: Row[] = [];
 
     if (asin) {
-      const { data: byAsin, error: errAsin } = await supabase
-        .from("inbound_items")
-        .select("id, jan_code, product_name, condition_type, created_at, order_id")
-        .or("order_id.is.null,order_id.eq.")
+      let janFromMaster: string | null = null;
+      const { data: productRow } = await supabase
+        .from("products")
+        .select("jan_code")
         .eq("asin", asin)
-        .order("created_at", { ascending: true });
-      if (!errAsin && byAsin?.length) data = byAsin;
+        .maybeSingle();
+      if (productRow?.jan_code) janFromMaster = String(productRow.jan_code).trim();
+
+      if (janFromMaster) {
+        const { data: byJan, error: errJan } = await supabase
+          .from("inbound_items")
+          .select("id, jan_code, product_name, condition_type, created_at, order_id")
+          .or("order_id.is.null,order_id.eq.")
+          .eq("jan_code", janFromMaster)
+          .order("created_at", { ascending: true });
+        if (!errJan && byJan?.length) data = byJan;
+      }
+
+      if (data.length === 0) {
+        const { data: byAsin, error: errAsin } = await supabase
+          .from("inbound_items")
+          .select("id, jan_code, product_name, condition_type, created_at, order_id")
+          .or("order_id.is.null,order_id.eq.")
+          .eq("asin", asin)
+          .order("created_at", { ascending: true });
+        if (!errAsin && byAsin?.length) data = byAsin;
+      }
     }
     if (data.length === 0 && jan) {
       const { data: byJan, error: errJan } = await supabase

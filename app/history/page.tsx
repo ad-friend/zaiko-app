@@ -5,6 +5,7 @@ import { Pencil, Save, X, ChevronLeft, Download, Upload, Search, ArrowUp, ArrowD
 import { normalizeToFullWidthKatakana } from "@/lib/kana";
 import { normalizeSupplierForMatch } from "@/lib/normalizeSupplier";
 
+/** 在庫一覧1行。主軸はJANのためテーブルにはASIN列を表示しない（保存時ペイロード用に asin は取得のみ） */
 type RecordRow = {
   id: number;
   registered_at?: string;

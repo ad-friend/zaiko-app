@@ -149,14 +149,18 @@ export async function POST(req: Request) {
         console.error('Failed to save inbound items:', itemsError);
         return NextResponse.json({ success: false, error: 'Database Error' }, { status: 500 });
       }
-      const masterProductsMap = new Map();
+      const masterProductsMap = new Map<string, { jan_code: string; brand: string | null; product_name: string; model_number: string | null; asin: string | null }>();
       items.forEach((item) => {
         if (item.jan && item.productName) {
-          masterProductsMap.set(item.jan, {
-            jan_code: item.jan.trim(),
+          const jan = item.jan.trim();
+          const itemAsin = (item as { asin?: string }).asin;
+          const asin = uniqueJans.get(jan) ?? (typeof itemAsin === "string" ? itemAsin.trim() || null : null);
+          masterProductsMap.set(jan, {
+            jan_code: jan,
             brand: item.brand ? item.brand.trim() : null,
             product_name: item.productName.trim(),
-            model_number: item.modelNumber ? item.modelNumber.trim() : null
+            model_number: item.modelNumber ? item.modelNumber.trim() : null,
+            asin: asin && asin.length >= 10 ? asin : null,
           });
         }
       });
@@ -164,10 +168,9 @@ export async function POST(req: Request) {
       const masterProducts = Array.from(masterProductsMap.values());
 
       if (masterProducts.length > 0) {
-        // ignoreDuplicates: true によって、すでにマスタにある商品は安全に無視されます
         const { error: masterError } = await supabase
-          .from('products')
-          .upsert(masterProducts, { onConflict: 'jan_code', ignoreDuplicates: true });
+          .from("products")
+          .upsert(masterProducts, { onConflict: "jan_code", ignoreDuplicates: false });
         
         if (masterError) {
           console.error("⚠️ マスタ自動登録エラー:", masterError.message);

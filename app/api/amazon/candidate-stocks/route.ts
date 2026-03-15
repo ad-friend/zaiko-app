@@ -55,7 +55,7 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // 条件B: 注文の ASIN と在庫の ASIN が一致する未紐付け在庫を検索（表示用SKU/JANは jan_code）
+    // 条件B: 注文ASIN → 商品マスタ(products)でJAN取得 → inbound_itemsをJANで検索（パフォーマンス最適化）。マスタに無い場合はASINで直接検索（フォールバック）
     let orderAsin: string | null = null;
     if (amazonOrderId && sku) {
       const { data: orderRow } = await supabase
@@ -75,20 +75,49 @@ export async function GET(request: NextRequest) {
     }
 
     if (orderAsin) {
-      const { data: unlinked, error: errB } = await supabase
-        .from("inbound_items")
-        .select("id, jan_code, condition_type, effective_unit_price, order_id, product_name, created_at")
-        .is("settled_at", null)
-        .or('order_id.is.null,order_id.eq.""')
+      const countBeforeConditionB = results.length;
+      let janFromMaster: string | null = null;
+      const { data: productRow } = await supabase
+        .from("products")
+        .select("jan_code")
         .eq("asin", orderAsin)
-        .order("created_at", { ascending: true });
+        .maybeSingle();
+      if (productRow?.jan_code) janFromMaster = String(productRow.jan_code).trim();
 
-      if (!errB && unlinked?.length) {
-        const seen = new Set(results.map((r) => r.id));
-        for (const row of unlinked) {
-          if (seen.has(row.id)) continue;
-          seen.add(row.id);
-          results.push(toRow(row));
+      if (janFromMaster) {
+        const { data: unlinked, error: errB } = await supabase
+          .from("inbound_items")
+          .select("id, jan_code, condition_type, effective_unit_price, order_id, product_name, created_at")
+          .is("settled_at", null)
+          .or('order_id.is.null,order_id.eq.""')
+          .eq("jan_code", janFromMaster)
+          .order("created_at", { ascending: true });
+
+        if (!errB && unlinked?.length) {
+          const seen = new Set(results.map((r) => r.id));
+          for (const row of unlinked) {
+            if (seen.has(row.id)) continue;
+            seen.add(row.id);
+            results.push(toRow(row));
+          }
+        }
+      }
+
+      if (results.length === countBeforeConditionB) {
+        const { data: unlinked, error: errFallback } = await supabase
+          .from("inbound_items")
+          .select("id, jan_code, condition_type, effective_unit_price, order_id, product_name, created_at")
+          .is("settled_at", null)
+          .or('order_id.is.null,order_id.eq.""')
+          .eq("asin", orderAsin)
+          .order("created_at", { ascending: true });
+
+        if (!errFallback && unlinked?.length) {
+          const seen = new Set(results.map((r) => r.id));
+          for (const row of unlinked) {
+            if (seen.has(row.id)) continue;
+            results.push(toRow(row));
+          }
         }
       }
     }
