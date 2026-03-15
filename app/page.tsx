@@ -114,7 +114,7 @@ function validate(
   const kanaSupplier = headerInfo.supplier.trim();
   if (!kanaSupplier) {
     missing.push("伝票情報の「仕入先カナ」");
-  } else if (!/^[ア-ンヴー・\s]+$/.test(kanaSupplier)) {
+  } else if (!/^[ァ-ンヴー・\s]+$/.test(kanaSupplier)) {
     err.supplierKanaError = "仕入先はカタカナで入力してください（英数字・漢字は不可）。";
   } else if (suppliers.length > 0) {
     const exists = suppliers.some(s => s.kana === kanaSupplier);
