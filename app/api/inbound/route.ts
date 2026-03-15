@@ -116,12 +116,13 @@ export async function POST(req: Request) {
         if (hasValidPayloadAsin) {
           asin = payloadAsin.trim();
         } else {
-          asin = uniqueJans.get(jan);
-          if (asin === undefined) {
-            asin = is13DigitJan(jan) ? await fetchAsinByJan(jan) : null;
-            uniqueJans.set(jan, asin);
+          let cachedAsin = uniqueJans.get(jan);
+          if (cachedAsin === undefined) {
+            cachedAsin = is13DigitJan(jan) ? await fetchAsinByJan(jan) : null;
+            uniqueJans.set(jan, cachedAsin);
             if (jan && is13DigitJan(jan)) await sleep(400);
           }
+          asin = cachedAsin;
         }
         rows.push({
           header_id: headerId,

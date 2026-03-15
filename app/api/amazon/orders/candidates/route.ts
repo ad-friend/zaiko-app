@@ -30,7 +30,7 @@ export async function GET(request: NextRequest) {
       const { data: orderRow } = await q.maybeSingle();
       if (orderRow) {
         asin = orderRow.asin?.trim() ?? null;
-        if (!jan) jan = orderRow.jan_code?.trim() || (orderRow.sku?.trim().match(/^\d{13}$/) ? orderRow.sku.trim() : null) ?? null;
+        if (!jan) jan = orderRow.jan_code?.trim() || (orderRow.sku?.trim().match(/^\d{13}$/) ? orderRow.sku.trim() : null) ;
       }
     }
 
