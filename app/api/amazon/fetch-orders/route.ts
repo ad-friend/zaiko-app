@@ -124,17 +124,33 @@ export async function GET(request: NextRequest) {
         QuantityOrdered?: number;
         ConditionId?: string;
       }> = [];
-      try {
-        const itemsRes = (await spClient.callAPI({
-          operation: "getOrderItems",
-          endpoint: "orders",
-          path: { orderId: amazonOrderId },
-        })) as { OrderItems?: typeof orderItems };
-        orderItems = itemsRes?.OrderItems ?? [];
-      } catch (e) {
-        console.warn("[fetch-orders] getOrderItems failed:", amazonOrderId, e);
-        await sleep(500);
-        continue;
+      let fetchSuccess = false;
+
+      // API制限対策：最大3回までリトライする
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const itemsRes = (await spClient.callAPI({
+            operation: "getOrderItems",
+            endpoint: "orders",
+            path: { orderId: amazonOrderId },
+          })) as { OrderItems?: typeof orderItems };
+          
+          orderItems = itemsRes?.OrderItems ?? [];
+          fetchSuccess = true;
+          await sleep(500); // 成功時も少し待機してAPI制限を予防
+          break; // 成功したらリトライループを抜ける
+        } catch (e) {
+          console.warn(`[fetch-orders] getOrderItems failed: ${amazonOrderId} (試行 ${attempt}/3)`, e);
+          if (attempt < 3) {
+            await sleep(2000); // エラー時は2秒待機して再挑戦
+          }
+        }
+      }
+
+      // 3回やってもダメだった場合
+      if (!fetchSuccess) {
+        console.warn(`[fetch-orders] ${amazonOrderId} の明細取得を断念。ASINなしで保存を続行します。`);
+        // ここにあった continue; を削除したため、スキップされずに空のまま保存されます
       }
 
       for (const item of orderItems) {
