@@ -763,19 +763,19 @@ export default function InboundPage() {
                   <table className="w-full text-sm text-left">
                     <thead className="bg-slate-50/80 border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold tracking-wider">
                       <tr>
-                        <th className="px-6 py-4 w-[140px]">JAN / 状態</th>
-                        <th className="px-6 py-4 min-w-[300px]">商品情報</th>
-                        <th className="px-6 py-4 w-[100px] text-right">数量</th>
-                        <th className="px-6 py-4 w-[130px] text-right">基準価格</th>
-                        <th className="px-6 py-4 w-[70px] text-center">按分</th>
-                        <th className="px-6 py-4 w-[130px] text-right">実質単価</th>
-                        <th className="px-6 py-4 w-[50px]"></th>
+                        <th className="px-3 py-3 w-[11%]">JAN / 状態</th>
+                        <th className="px-3 py-3 min-w-0 w-[28%]">商品情報</th>
+                        <th className="px-3 py-3 w-[8%] text-right">数量</th>
+                        <th className="px-3 py-3 w-[12%] text-right">基準価格</th>
+                        <th className="px-3 py-3 w-[7%] text-center">按分</th>
+                        <th className="px-3 py-3 w-[12%] text-right">実質単価</th>
+                        <th className="px-3 py-3 w-[6%]"></th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 bg-white">
                       {rows.length === 0 && (
                          <tr>
-                           <td colSpan={7} className="py-24 text-center text-slate-400">
+                           <td colSpan={7} className="px-3 py-24 text-center text-slate-400">
                              <div className="flex flex-col items-center justify-center gap-4">
                                <div className="h-16 w-16 rounded-full bg-slate-50 flex items-center justify-center border border-slate-100">
                                  <PlusIcon className="h-8 w-8 text-slate-300" />
@@ -797,7 +797,7 @@ export default function InboundPage() {
 
                         return (
                           <tr key={row.id} className={`group hover:bg-slate-50 transition-colors border-b border-slate-100 last:border-0 ${rowBg}`}>
-                            <td className="px-6 py-4 align-top">
+                            <td className="px-3 py-3 align-top">
                               <div className="space-y-2">
                                 <div className="relative">
                                     <input
@@ -807,7 +807,7 @@ export default function InboundPage() {
                                         const v = e.target.value.trim().replace(/\D/g, "");
                                         if (v.length === 13 && !row.brand && !row.productName) handleJanBlurOrEnter(v, row.id);
                                     }}
-                                    className={`${inputClass} font-mono text-xs h-9 shadow-sm ${isJanMissing ? "border-red-400 focus-visible:ring-red-200" : ""}`}
+                                    className={`${inputClass} w-full font-mono text-xs h-9 shadow-sm ${isJanMissing ? "border-red-400 focus-visible:ring-red-200" : ""}`}
                                     placeholder="JAN"
                                     />
                                     {row.inferredByAi && (
@@ -817,52 +817,65 @@ export default function InboundPage() {
                                 <select 
                                     value={row.condition}
                                     onChange={(e) => updateRow(row.id, { condition: e.target.value as ProductCondition })}
-                                    className={`${inputClass} h-8 text-xs py-0`}
+                                    className={`${inputClass} w-full h-8 text-xs py-0`}
                                 >
                                     <option value="new">新品</option>
                                     <option value="used">中古</option>
                                 </select>
                               </div>
                             </td>
-                            <td className="px-6 py-4 align-top space-y-3 min-w-[300px]">
+                            <td className="px-3 py-3 align-top space-y-3 min-w-0">
                                <input
                                  value={row.productName}
                                  onChange={(e) => updateRow(row.id, { productName: e.target.value })}
-                                 className={`${inputClass} font-medium h-10 shadow-sm w-full ${row.isMaster ? "bg-slate-100 text-slate-500 cursor-not-allowed border-slate-200" : ""}`}
+                                 className={`${inputClass} w-full font-medium h-10 shadow-sm ${row.isMaster ? "bg-slate-100 text-slate-500 cursor-not-allowed border-slate-200" : ""}`}
                                  placeholder="商品名"
                                  disabled={row.isMaster}
                                />
-                               <div className="flex gap-3">
+                               <div className="flex gap-2">
                                  <input
                                    value={row.brand}
                                    onChange={(e) => updateRow(row.id, { brand: e.target.value })}
-                                   className={`${inputClass} text-xs h-9 shadow-sm flex-1 min-w-0 ${row.isMaster ? "bg-slate-100 text-slate-500 cursor-not-allowed border-slate-200" : "bg-white/50"}`}
+                                   className={`${inputClass} w-full text-xs h-9 shadow-sm flex-1 min-w-0 ${row.isMaster ? "bg-slate-100 text-slate-500 cursor-not-allowed border-slate-200" : "bg-white/50"}`}
                                    placeholder="ブランド"
                                    disabled={row.isMaster}
                                  />
                                  <input
                                    value={row.modelNumber}
                                    onChange={(e) => updateRow(row.id, { modelNumber: e.target.value })}
-                                   className={`${inputClass} text-xs h-9 shadow-sm flex-[2] min-w-0 ${row.isMaster ? "bg-slate-100 text-slate-500 cursor-not-allowed border-slate-200" : "bg-white/50"}`}
+                                   className={`${inputClass} w-full text-xs h-9 shadow-sm flex-[2] min-w-0 ${row.isMaster ? "bg-slate-100 text-slate-500 cursor-not-allowed border-slate-200" : "bg-white/50"}`}
                                    placeholder="型番"
                                    disabled={row.isMaster}
                                  />
                                </div>
                             </td>
-                            <td className="px-6 py-4 align-top">
+                            <td className="px-3 py-3 align-top">
+                              <div className="flex items-center justify-end gap-1">
+                                <button type="button" onClick={() => updateRow(row.id, { quantity: Math.max(1, row.quantity - 1) })} className="h-8 w-8 shrink-0 rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 inline-flex items-center justify-center font-medium">−</button>
+                                <input
+                                  type="number"
+                                  min={1}
+                                  value={row.quantity}
+                                  onChange={(e) => updateRow(row.id, { quantity: Math.max(1, Number(e.target.value) || 1) })}
+                                  className={`${inputClass} w-14 h-9 text-center font-medium shadow-sm [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none`}
+                                />
+                                <button type="button" onClick={() => updateRow(row.id, { quantity: row.quantity + 1 })} className="h-8 w-8 shrink-0 rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 inline-flex items-center justify-center font-medium">+</button>
+                              </div>
+                            </td>
+                            <td className="px-3 py-3 align-top">
                               <div className="relative">
-                                <span className="absolute left-3 top-2.5 text-slate-400 text-xs">¥</span>
+                                <span className="absolute left-2 top-2.5 text-slate-400 text-xs">¥</span>
                                 <input
                                   type="number"
                                   min={0}
                                   value={row.basePrice || ""}
                                   onChange={(e) => updateRow(row.id, { basePrice: Number(e.target.value) || 0 })}
-                                  className={`${inputClass} text-right pl-6 h-10 font-medium shadow-sm ${isPriceMissing ? "border-red-400 focus-visible:ring-red-200" : ""}`}
+                                  className={`${inputClass} w-full text-right pl-6 h-10 font-medium shadow-sm ${isPriceMissing ? "border-red-400 focus-visible:ring-red-200" : ""}`}
                                   placeholder="0"
                                 />
                               </div>
                             </td>
-                            <td className="px-6 py-4 align-top text-center pt-3">
+                            <td className="px-3 py-3 align-top text-center pt-3">
                                <input
                                  type="checkbox"
                                  checked={row.fixedUnitPrice}
@@ -870,11 +883,11 @@ export default function InboundPage() {
                                  className="h-5 w-5 rounded border-slate-300 text-primary focus:ring-primary/20 cursor-pointer shadow-sm"
                                />
                             </td>
-                            <td className="px-6 py-4 align-top text-right font-bold text-slate-800 pt-3 tabular-nums">
+                            <td className="px-3 py-3 align-top text-right font-bold text-slate-800 pt-3 tabular-nums">
                               {effective > 0 ? Math.round(effective).toLocaleString() : "—"}
                               <span className="text-[10px] text-slate-400 ml-1 font-normal">円</span>
                             </td>
-                            <td className="px-6 py-4 align-top pt-2 text-right">
+                            <td className="px-3 py-3 align-top pt-2 text-right">
                               <button
                                 onClick={() => removeRow(row.id)}
                                 className="inline-flex h-9 w-9 items-center justify-center rounded-md text-slate-400 hover:bg-red-50 hover:text-red-600 transition-colors opacity-0 group-hover:opacity-100"

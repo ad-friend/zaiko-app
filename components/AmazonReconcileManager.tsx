@@ -565,7 +565,7 @@ function ManualOrderCard({
     <div
       className={`rounded-lg border p-4 shadow-sm transition-shadow ${
         noCandidates
-          ? "border-red-200 bg-red-50/80 hover:shadow-md"
+          ? "border-red-200 bg-red-50 hover:shadow-md"
           : "border-slate-200 bg-slate-50/50 hover:shadow-md"
       }`}
     >
