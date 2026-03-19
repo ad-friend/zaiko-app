@@ -184,7 +184,7 @@ export default function SuppliersPage() {
     <div className="flex-1 flex flex-col">
       <main className="flex-1 py-8 w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
-          <div className="bg-slate-50/80 px-6 py-4 border-b border-slate-100">
+          <div className="bg-slate-50/80 px-6 py-4 border-b border-slate-100 shrink-0">
             <h2 className="text-base font-bold text-slate-800 flex items-center gap-2">
               <DocumentIcon className="h-5 w-5 text-primary" />
               仕入先管理
@@ -192,7 +192,7 @@ export default function SuppliersPage() {
           </div>
 
           {/* 新規登録フォーム */}
-          <div className="p-6 border-b border-slate-100">
+          <div className="p-6 border-b border-slate-100 shrink-0">
             <h3 className="text-sm font-semibold text-slate-700 mb-4">新規登録</h3>
             <form onSubmit={handleSubmit} className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <div>
@@ -234,7 +234,7 @@ export default function SuppliersPage() {
 
           {/* リストツールバー */}
           {!loading && rows.length > 0 && (
-            <div className="flex flex-wrap items-center gap-3 px-6 py-3 border-b border-slate-100 bg-white">
+            <div className="flex flex-wrap items-center gap-3 px-6 py-3 border-b border-slate-100 bg-white shrink-0">
               <div className="flex items-center gap-3">
                 <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer">
                   <input type="checkbox" checked={selectedIds.size === processedRows.length && processedRows.length > 0} onChange={() => selectedIds.size >= processedRows.length ? setSelectedIds(new Set()) : setSelectedIds(new Set(processedRows.map((r) => r.id)))} className="rounded border-slate-300 text-primary" />
@@ -256,9 +256,10 @@ export default function SuppliersPage() {
             {loading && <p className="text-sm text-slate-500 py-8 text-center">読み込み中...</p>}
             {!loading && rows.length === 0 && <p className="text-sm text-slate-400 py-8 text-center">仕入先を登録してください</p>}
             {!loading && rows.length > 0 && (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm text-left min-w-[600px]">
-                  <thead className="bg-slate-50/80 border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold">
+              <div className="relative w-full max-h-[calc(100vh-280px)] overflow-y-auto border border-slate-200 rounded-md">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm text-left min-w-[600px]">
+                    <thead className="sticky top-0 z-10 bg-white border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold shadow-sm">
                     <tr>
                       <th className="px-6 py-4 w-10"></th>
                       <th className="px-6 py-4"><SortBtn k="name">仕入先名</SortBtn></th>
@@ -321,7 +322,8 @@ export default function SuppliersPage() {
                       </tr>
                     ))}
                   </tbody>
-                </table>
+                  </table>
+                </div>
               </div>
             )}
           </div>

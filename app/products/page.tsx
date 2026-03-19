@@ -282,7 +282,7 @@ const handleJanCodeCheck = async (jan: string) => {
     <div className="flex-1 flex flex-col">
       <main className="flex-1 py-8 w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
-          <div className="bg-slate-50/80 px-6 py-4 border-b border-slate-100">
+          <div className="bg-slate-50/80 px-6 py-4 border-b border-slate-100 shrink-0">
             <h2 className="text-base font-bold text-slate-800 flex items-center gap-2">
               <DocumentIcon className="h-5 w-5 text-primary" />
               商品マスター管理
@@ -290,7 +290,7 @@ const handleJanCodeCheck = async (jan: string) => {
           </div>
 
           {/* 新規登録フォーム：PCは横1列、スマホは縦積み */}
-          <div className="p-6 border-b border-slate-100">
+          <div className="p-6 border-b border-slate-100 shrink-0">
             <h3 className="text-sm font-semibold text-slate-700 mb-4">新規登録</h3>
             <form onSubmit={handleSubmit} className="flex flex-col gap-4 lg:flex-row lg:flex-wrap lg:items-end">
               <div className="w-full lg:flex-1 lg:min-w-0">
@@ -339,7 +339,7 @@ const handleJanCodeCheck = async (jan: string) => {
 
           {/* リストツールバー（CSV取込は空一覧時も利用可能） */}
           {!loading && (
-            <div className="flex flex-wrap items-center gap-3 px-6 py-3 border-b border-slate-100 bg-white">
+            <div className="flex flex-wrap items-center gap-3 px-6 py-3 border-b border-slate-100 bg-white shrink-0">
               <div className="flex items-center gap-3">
                 <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer">
                   <input
@@ -380,9 +380,10 @@ const handleJanCodeCheck = async (jan: string) => {
             {loading && <p className="text-sm text-slate-500 py-8 text-center">読み込み中...</p>}
             {!loading && rows.length === 0 && <p className="text-sm text-slate-400 py-8 text-center">商品を登録してください</p>}
             {!loading && rows.length > 0 && (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm text-left min-w-[600px]">
-                  <thead className="bg-slate-50/80 border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold">
+              <div className="relative w-full max-h-[calc(100vh-280px)] overflow-y-auto border border-slate-200 rounded-md">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm text-left min-w-[600px]">
+                    <thead className="sticky top-0 z-10 bg-white border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold shadow-sm">
                     <tr>
                       <th className="px-6 py-4 w-10"></th>
                       <th className="px-6 py-4">
@@ -459,7 +460,8 @@ const handleJanCodeCheck = async (jan: string) => {
                       </tr>
                     ))}
                   </tbody>
-                </table>
+                  </table>
+                </div>
               </div>
             )}
           </div>
