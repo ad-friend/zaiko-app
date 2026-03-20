@@ -124,6 +124,14 @@ export async function GET(request: NextRequest) {
           .eq("order_id", amazonOrderId);
 
         if (rollbackErr) throw rollbackErr;
+
+        // キャンセルを amazon_orders に反映して後続処理対象から外す
+        const { error: cancelStatusErr } = await supabase
+          .from("amazon_orders")
+          .update({ reconciliation_status: "canceled", updated_at: new Date().toISOString() })
+          .eq("amazon_order_id", amazonOrderId);
+
+        if (cancelStatusErr) throw cancelStatusErr;
         continue;
       }
 
