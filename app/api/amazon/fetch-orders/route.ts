@@ -77,7 +77,7 @@ export async function GET(request: NextRequest) {
 
     const spClient = createSpClient();
 
-    const allOrders: Array<{ AmazonOrderId: string }> = [];
+    const allOrders: Array<{ AmazonOrderId: string; OrderStatus?: string }> = [];
     let nextToken: string | null = null;
 
     do {
@@ -85,7 +85,7 @@ export async function GET(request: NextRequest) {
         CreatedAfter: createdAfter,
         CreatedBefore: createdBefore,
         MarketplaceIds: [MARKETPLACE_ID_JP],
-        OrderStatuses: ["Unshipped", "PartiallyShipped", "Shipped"],
+        OrderStatuses: ["Unshipped", "PartiallyShipped", "Shipped", "Canceled"],
       };
       if (nextToken) query.NextToken = nextToken;
 
@@ -93,7 +93,7 @@ export async function GET(request: NextRequest) {
         operation: "getOrders",
         endpoint: "orders",
         query,
-      })) as { Orders?: Array<{ AmazonOrderId: string }>; NextToken?: string };
+      })) as { Orders?: Array<{ AmazonOrderId: string; OrderStatus?: string }>; NextToken?: string };
 
       const orders = ordersRes?.Orders ?? [];
       allOrders.push(...orders);
@@ -115,6 +115,18 @@ export async function GET(request: NextRequest) {
     for (const order of allOrders) {
       const amazonOrderId = order.AmazonOrderId;
       if (!amazonOrderId) continue;
+
+      // 発送前キャンセル（Canceled）: 引き当てを巻き戻す
+      if (order.OrderStatus === "Canceled") {
+        const { error: rollbackErr } = await supabase
+          .from("inbound_items")
+          .update({ settled_at: null, order_id: null })
+          .eq("order_id", amazonOrderId);
+
+        if (rollbackErr) throw rollbackErr;
+        continue;
+      }
+
       if (seenOrderIds.has(amazonOrderId)) continue;
       seenOrderIds.add(amazonOrderId);
 
