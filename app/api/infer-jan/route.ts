@@ -20,6 +20,22 @@ export type InferJanResponse = {
 const GEMINI_MODEL = "gemini-3.1-flash-lite-preview";
 const RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 16000];
 
+/** Gemini / Google Generative Language API 等の非 OK レスポンスをクライアントへ返す */
+class ExternalApiError extends Error {
+  readonly httpStatus: number;
+  constructor(message: string, httpStatus: number) {
+    super(message);
+    this.name = "ExternalApiError";
+    this.httpStatus = httpStatus;
+  }
+}
+
+function clientStatusFromGoogleApiHttp(status: number): number {
+  if (status === 429) return 429;
+  if (status === 503) return 503;
+  return 500;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -329,15 +345,17 @@ export async function POST(request: NextRequest) {
 
         console.log("🤖 Step 3: API情報がないため、空欄を返します。");
         return NextResponse.json({ brand: "", productName: "", modelNumber: "", inferred: true, source: "ai", asin: amazonAsin ?? undefined });
-      } catch (geminiError: any) {
+      } catch (geminiError: unknown) {
         console.error("❌ Gemini Error:", geminiError);
-        return NextResponse.json({
-          ...inferHeuristic(jan),
-          brand: "❌ AIエラー",
-          productName: `理由: ${geminiError.message}`,
-          source: "ai",
-          asin: amazonAsin ?? undefined,
-        });
+        if (geminiError instanceof ExternalApiError) {
+          return NextResponse.json(
+            { error: geminiError.message },
+            { status: geminiError.httpStatus }
+          );
+        }
+        const message =
+          geminiError instanceof Error ? geminiError.message : "AI処理でエラーが発生しました";
+        return NextResponse.json({ error: message }, { status: 500 });
       }
     }
 
@@ -494,7 +512,10 @@ async function inferWithGemini(jan: string, apiKey: string): Promise<InferJanRes
 
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`Google API (${res.status}): ${errText.slice(0, 100)}`);
+    throw new ExternalApiError(
+      `Google API (${res.status}): ${errText.slice(0, 500)}`,
+      clientStatusFromGoogleApiHttp(res.status)
+    );
   }
 
   const data = await res.json();
@@ -536,7 +557,10 @@ ${buffer}`
   });
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`Google API (${res.status}): ${errText.slice(0, 100)}`);
+    throw new ExternalApiError(
+      `Google API (${res.status}): ${errText.slice(0, 500)}`,
+      clientStatusFromGoogleApiHttp(res.status)
+    );
   }
   const data = await res.json();
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
