@@ -69,11 +69,23 @@ const SELECT_WITHOUT_REGISTERED = `
   )
 `;
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
+    const yearsParam = request.nextUrl.searchParams.get("years");
+    let years = 2;
+    if (yearsParam !== null && yearsParam !== "") {
+      const n = parseInt(yearsParam, 10);
+      if (Number.isFinite(n) && n >= 1 && n <= 100) years = n;
+    }
+
+    const cutoff = new Date();
+    cutoff.setUTCFullYear(cutoff.getUTCFullYear() - years);
+    const cutoffIso = cutoff.toISOString();
+
     const { data, error } = await supabase
       .from("inbound_items")
       .select(SELECT_WITH_REGISTERED)
+      .gte("created_at", cutoffIso)
       .order("created_at", { ascending: false });
 
     // エラーがあればここでキャッチ処理へ飛ばす
@@ -95,7 +107,7 @@ export async function GET() {
         ? new Date(row.registered_at || row.created_at).toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo", year: "numeric", month: "2-digit", day: "2-digit" }).replace(/\//g, "-")
         : "",
         order_id: row.order_id ?? null,
-      　settled_at: row.settled_at ?? null,
+        settled_at: row.settled_at ?? null,
       header: Array.isArray(row.inbound_headers) ? row.inbound_headers[0] : row.inbound_headers ?? null,
     }));
 

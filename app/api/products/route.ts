@@ -19,7 +19,11 @@ export async function GET(request: NextRequest) {
       if (error) throw error;
       return NextResponse.json(data ?? null);
     }
-    const { data, error } = await supabase.from("products").select("*").order("product_name", { ascending: true });
+    const { data, error } = await supabase
+      .from("products")
+      .select("*")
+      .order("product_name", { ascending: true })
+      .limit(50000);
     if (error) throw error;
     return NextResponse.json(data ?? []);
   } catch (e: any) {

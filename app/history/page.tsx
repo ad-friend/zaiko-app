@@ -99,6 +99,7 @@ export default function HistoryPage() {
   const [bulkSnapshot, setBulkSnapshot] = useState<RecordRow[] | null>(null);
   const [bulkAction, setBulkAction] = useState<string>("bulk_delete");
   const [saving, setSaving] = useState(false);
+  const [csv5YearsLoading, setCsv5YearsLoading] = useState(false);
   const csvInputRef = useRef<HTMLInputElement>(null);
   const [csvImportPreview, setCsvImportPreview] = useState<CsvImportPreviewRow[] | null>(null);
 
@@ -538,6 +539,53 @@ export default function HistoryPage() {
     URL.revokeObjectURL(url);
   },[processedRows, getSupplierName]); // 🌟 依存配列に追加
 
+  const downloadCsv5Years = useCallback(async () => {
+    setCsv5YearsLoading(true);
+    try {
+      const res = await fetch("/api/records?years=5");
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error((errData as { error?: string }).error || "データの取得に失敗しました");
+      }
+      const data: RecordRow[] = await res.json();
+      if (!Array.isArray(data)) throw new Error("不正なレスポンスです");
+
+      const header =
+        "id,jan_code,brand,product_name,model_number,supplier,genre,base_price,effective_unit_price,created_at,registered_at,status";
+      const lines = data.map((r) =>
+        [
+          r.id,
+          r.jan_code ?? "",
+          r.brand ?? "",
+          r.product_name ?? "",
+          r.model_number ?? "",
+          getSupplierName(r.header?.supplier),
+          r.header?.genre ?? "",
+          r.base_price ?? "",
+          r.effective_unit_price ?? "",
+          r.created_at ?? "",
+          r.registered_at ?? "",
+          statusLabel(r.condition_type),
+        ]
+          .map((x) => escapeCsv(x))
+          .join(",")
+      );
+      const csv = [header, ...lines].join("\r\n");
+      const bom = "\uFEFF";
+      const blob = new Blob([bom + csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "inventory_5years.csv";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "CSVのダウンロードに失敗しました");
+    } finally {
+      setCsv5YearsLoading(false);
+    }
+  }, [getSupplierName]);
+
   const parseCsvLine = (line: string): string[] => {
     const result: string[] = [];
     let i = 0;
@@ -797,11 +845,22 @@ export default function HistoryPage() {
     <div className="flex-1 flex flex-col">
       <main className="flex-1 w-full max-w-[1800px] mx-auto px-4 sm:px-6 lg:px-8 py-6">
         <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
-          <div className="bg-slate-50/80 px-6 py-4 border-b border-slate-100 backdrop-blur shrink-0">
+          <div className="bg-slate-50/80 px-6 py-4 border-b border-slate-100 backdrop-blur shrink-0 flex flex-wrap items-center justify-between gap-3">
             <h2 className="text-base font-bold text-slate-800 flex items-center gap-2">
               <DocumentIcon className="h-5 w-5 text-primary" />
               在庫一覧
             </h2>
+            {!loading && !error && (
+              <button
+                type="button"
+                onClick={downloadCsv5Years}
+                disabled={csv5YearsLoading}
+                className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300 h-9 px-4 text-sm disabled:opacity-50`}
+              >
+                <Download className="mr-2 h-4 w-4 shrink-0" />
+                {csv5YearsLoading ? "取得中..." : "過去5年分のデータをCSVダウンロード"}
+              </button>
+            )}
           </div>
 
           {!loading && !error && rows.length > 0 && (

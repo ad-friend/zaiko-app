@@ -35,7 +35,22 @@ export default function ProductsPage() {
   const fetchRows = useCallback(async () => {
     try {
       const res = await fetch("/api/products");
-      if (res.ok) setRows(await res.json());
+      if (res.ok) {
+        // ▼ ここで1回だけ res.json() を読み込んで data に保存します
+        const data = (await res.json()) as ProductRow[]; 
+        
+        // ▼▼▼ テスト検証用コード ▼▼▼
+        const testJan = '0840356853925'; // ←ここに表示されないJANコードを入れてください
+        const targetProduct = data.find((item) => item.jan_code === testJan);
+        console.log('--- フロントエンド検証用 ---');
+        console.log('APIから届いた全件数:', data.length);
+        console.log('探している商品:', targetProduct || 'APIから届いていません！');
+        console.log('-------------------');
+        // ▲▲▲ ここまで ▲▲▲
+
+        // ▼ さきほど保存した data をそのままセットします（ここで res.json() と書くとエラーになります）
+        setRows(data);
+      }
     } finally {
       setLoading(false);
     }
