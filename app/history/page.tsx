@@ -805,19 +805,22 @@ export default function HistoryPage() {
     if (!csvImportPreview || csvImportPreview.length === 0) return;
     setSaving(true);
     try {
-      const items = csvImportPreview.map((row) => ({
-        id: row.id ? Number(row.id) : undefined,
-        jan_code: row.jan_code || undefined,
-        brand: row.brand || undefined,
-        product_name: row.product_name || undefined,
-        model_number: row.model_number || undefined,
-        supplier: row.supplierKana || undefined,
-        genre: row.genre || undefined,
-        base_price: row.base_price === "" ? undefined : Number(row.base_price),
-        effective_unit_price: row.effective_unit_price === "" ? undefined : Number(row.effective_unit_price),
-        created_at: row.created_at || undefined,
-        condition_type: statusToCondition(row.status),
-      }));
+      const items = csvImportPreview.map((row) => {
+        const isoDate = row.created_at ? slashedToIsoDate(row.created_at) : "";
+        return {
+          id: row.id ? Number(row.id) : undefined,
+          jan_code: row.jan_code || undefined,
+          brand: row.brand || undefined,
+          product_name: row.product_name || undefined,
+          model_number: row.model_number || undefined,
+          supplier: row.supplierKana || undefined,
+          genre: row.genre || undefined,
+          base_price: row.base_price === "" ? undefined : Number(row.base_price),
+          effective_unit_price: row.effective_unit_price === "" ? undefined : Number(row.effective_unit_price),
+          created_at: isoDate ? `${isoDate}T00:00:00.000Z` : undefined,
+          condition_type: statusToCondition(row.status),
+        };
+      });
       const res = await fetch("/api/infer-jan", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -835,7 +838,7 @@ export default function HistoryPage() {
     } finally {
       setSaving(false);
     }
-  }, [csvImportPreview, fetchRecords]);
+  }, [csvImportPreview, fetchRecords, slashedToIsoDate]);
 
   const closeCsvImportPreview = useCallback(() => {
     setCsvImportPreview(null);
