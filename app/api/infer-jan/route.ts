@@ -123,8 +123,9 @@ export async function PATCH(request: NextRequest) {
         for (const item of inserts) {
           const supplier = item.supplier ?? "";
           const genre = item.genre ?? "";
-          // 登録日（created_at）があればそれを、無ければ今日をキーにする
-          const date = item.created_at ? String(item.created_at).slice(0, 10) : new Date().toISOString().slice(0, 10);
+          // 仕入日: created_at または registered_at があればそれを、無ければ今日をキーにする
+          const dateRaw = item.created_at || item.registered_at;
+          const date = dateRaw ? String(dateRaw).slice(0, 10) : new Date().toISOString().slice(0, 10);
           const key = `${supplier}|${genre}|${date}`;
           
           if (!groups.has(key)) groups.set(key, []);
@@ -137,7 +138,8 @@ export async function PATCH(request: NextRequest) {
         // 2. グループごとにヘッダーを作成し、アイテムを紐付ける
         for (const [key, groupItems] of Array.from(groups.entries())) {
           const firstItem = groupItems[0];
-          const purchaseDate = firstItem.created_at ? String(firstItem.created_at).slice(0, 10) : new Date().toISOString().slice(0, 10);
+          const firstDateRaw = firstItem.created_at || firstItem.registered_at;
+          const purchaseDate = firstDateRaw ? String(firstDateRaw).slice(0, 10) : new Date().toISOString().slice(0, 10);
           
           const { data: headerRow, error: headerError } = await supabase
             .from("inbound_headers")
@@ -159,6 +161,7 @@ export async function PATCH(request: NextRequest) {
           
           // そのグループのアイテム全てに、作ったばかりのヘッダーIDをセットする
           for (const item of groupItems) {
+            const ts = item.created_at || item.registered_at;
             allItemsToInsert.push({
               header_id: headerId,
               jan_code: item.jan_code ?? null,
@@ -170,7 +173,8 @@ export async function PATCH(request: NextRequest) {
               base_price: Number(item.base_price ?? 0),
               is_fixed_price: false,
               effective_unit_price: Number(item.effective_unit_price ?? 0),
-              created_at: item.created_at ? String(item.created_at) : new Date().toISOString(),
+              created_at: ts ? String(ts) : new Date().toISOString(),
+              registered_at: ts ? String(ts) : undefined,
             });
 
             // マスタ登録用の配列も同時に作る

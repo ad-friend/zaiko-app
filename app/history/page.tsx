@@ -49,7 +49,10 @@ type CsvImportPreviewRow = {
   product_name: string;
   brand: string;
   model_number: string;
+  /** CSV の created_at 列（エイリアス含む） */
   created_at: string;
+  /** CSV の registered_at 列（あれば） */
+  registered_at: string;
   effective_unit_price: string;
   status: string;
   genre: string;
@@ -620,6 +623,7 @@ export default function HistoryPage() {
     product_name: string;
     model_number: string;
     created_at: string;
+    registered_at: string;
     effective_unit_price: string;
     status: string;
     brand: string;
@@ -631,7 +635,7 @@ export default function HistoryPage() {
 
   const validateRow = (row: ParsedCsvRow): string[] => {
     const reasons: string[] = [];
-    const createdAt = (row.created_at ?? "").trim();
+    const createdAt = (row.created_at ?? "").trim() || (row.registered_at ?? "").trim();
     const effPrice = (row.effective_unit_price ?? "").trim();
     const status = (row.status ?? "").trim();
     if (!createdAt) reasons.push("必須A: インポート日付（仕入日）が未入力");
@@ -683,6 +687,7 @@ export default function HistoryPage() {
           product_name: ["product_name", "商品名"],
           model_number: ["model_number", "型番"],
           created_at: ["created_at", "仕入日", "登録日", "インポート日付"],
+          registered_at: ["registered_at"],
           effective_unit_price: ["effective_unit_price", "実質価格", "実質単価"],
           status: ["status", "状態"],
           brand: ["brand", "ブランド"],
@@ -709,6 +714,7 @@ export default function HistoryPage() {
             product_name: get(cells, "product_name"),
             model_number: get(cells, "model_number"),
             created_at: get(cells, "created_at"),
+            registered_at: get(cells, "registered_at"),
             effective_unit_price: get(cells, "effective_unit_price"),
             status: get(cells, "status"),
             brand: get(cells, "brand"),
@@ -774,6 +780,7 @@ export default function HistoryPage() {
             brand,
             model_number,
             created_at: (row.created_at ?? "").trim(),
+            registered_at: (row.registered_at ?? "").trim(),
             effective_unit_price: (row.effective_unit_price ?? "").trim(),
             status: (row.status ?? "").trim(),
             genre: (row.genre ?? "").trim(),
@@ -806,7 +813,9 @@ export default function HistoryPage() {
     setSaving(true);
     try {
       const items = csvImportPreview.map((row) => {
-        const isoDate = row.created_at ? slashedToIsoDate(row.created_at) : "";
+        const rawDate = row.registered_at || row.created_at;
+        const isoDate = rawDate ? slashedToIsoDate(rawDate) : "";
+        const isoTs = isoDate ? `${isoDate}T00:00:00.000Z` : undefined;
         return {
           id: row.id ? Number(row.id) : undefined,
           jan_code: row.jan_code || undefined,
@@ -817,7 +826,8 @@ export default function HistoryPage() {
           genre: row.genre || undefined,
           base_price: row.base_price === "" ? undefined : Number(row.base_price),
           effective_unit_price: row.effective_unit_price === "" ? undefined : Number(row.effective_unit_price),
-          created_at: isoDate ? `${isoDate}T00:00:00.000Z` : undefined,
+          created_at: isoTs,
+          registered_at: isoTs,
           condition_type: statusToCondition(row.status),
         };
       });
@@ -991,81 +1001,81 @@ export default function HistoryPage() {
                   <table className="w-full max-w-full text-sm text-left table-fixed">
                     <thead className="sticky top-0 z-10 bg-white border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold tracking-wider shadow-sm">
                     <tr>
-                      <th className="px-1.5 py-3 w-[2%] text-center whitespace-nowrap"></th>
-                      <th className="px-1.5 py-3 w-12 text-center whitespace-nowrap font-mono text-xs">ID</th>
-                      <th className="px-1.5 py-3 w-[5%] whitespace-nowrap">
+                      <th className="px-1 py-3 w-[2.5%] text-center whitespace-nowrap"></th>
+                      <th className="px-0.5 py-3 w-[3%] max-w-[2.75rem] text-center whitespace-nowrap font-mono text-xs">ID</th>
+                      <th className="px-1.5 py-3 w-[11%] min-w-[8.5rem] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("created_at")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           仕入日
                           {sortConfig.key === "created_at" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-1.5 py-3 w-[5%] whitespace-nowrap">
+                      <th className="px-1.5 py-3 w-[11%] min-w-[8.5rem] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("registered_at")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           登録日
                           {sortConfig.key === "registered_at" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-1.5 py-3 w-[5%] whitespace-nowrap">
+                      <th className="px-1.5 py-3 w-[13%] min-w-[10rem] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("supplier")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           仕入先
                           {sortConfig.key === "supplier" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-1.5 py-3 w-[4%] whitespace-nowrap">
+                      <th className="px-1.5 py-3 w-[3.5%] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("genre")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           ジャンル
                           {sortConfig.key === "genre" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-1.5 py-3 w-[7%] whitespace-nowrap">
+                      <th className="px-1.5 py-3 w-[6%] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("jan_code")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           JAN
                           {sortConfig.key === "jan_code" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-1.5 py-3 w-[14%] whitespace-nowrap">
+                      <th className="px-1.5 py-3 w-[11%] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("product_name")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           商品名
                           {sortConfig.key === "product_name" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-1.5 py-3 w-[6%] whitespace-nowrap">
+                      <th className="px-1.5 py-3 w-[5%] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("brand")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           ブランド
                           {sortConfig.key === "brand" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-1.5 py-3 w-[6%] whitespace-nowrap">
+                      <th className="px-1.5 py-3 w-[5%] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("model_number")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           型番
                           {sortConfig.key === "model_number" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-1.5 py-3 w-[5%] text-right whitespace-nowrap">
+                      <th className="px-1.5 py-3 w-[4%] text-right whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("base_price")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded ml-auto">
                           基準価格
                           {sortConfig.key === "base_price" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-1.5 py-3 w-[5%] text-right whitespace-nowrap">
+                      <th className="px-1.5 py-3 w-[4%] text-right whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("effective_unit_price")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded ml-auto">
                           実質単価
                           {sortConfig.key === "effective_unit_price" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-1.5 py-3 w-[4%] whitespace-nowrap">
+                      <th className="px-1.5 py-3 w-[3.5%] whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("condition_type")} className="inline-flex items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           状態
                           {sortConfig.key === "condition_type" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />) : <ArrowUpDown className="h-3.5 w-3.5 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-1.5 py-3 w-[5%] whitespace-nowrap text-left text-slate-500 font-semibold">
+                      <th className="px-1.5 py-3 w-[4%] whitespace-nowrap text-left text-slate-500 font-semibold">
                         進捗
                       </th>
-                      <th className="px-1.5 py-3 w-[9%] whitespace-nowrap text-center text-slate-500 font-semibold">
+                      <th className="px-1.5 py-3 w-[7%] whitespace-nowrap text-center text-slate-500 font-semibold">
                         注文番号
                       </th>
-                      <th className="px-1.5 py-3 w-[6%] text-center whitespace-nowrap">操作</th>
+                      <th className="px-1.5 py-3 w-[5.5%] text-center whitespace-nowrap">操作</th>
                     </tr>
 
                   </thead>
@@ -1077,7 +1087,7 @@ export default function HistoryPage() {
 
                       return (
                         <tr key={row.id} className="hover:bg-slate-50/50 transition-colors">
-                          <td className="px-1.5 py-3 text-center align-middle">
+                          <td className="px-1 py-3 w-[2.5%] text-center align-middle">
                             <input
                               type="checkbox"
                               checked={selectedIds.has(row.id)}
@@ -1089,8 +1099,8 @@ export default function HistoryPage() {
                               className="rounded border-slate-300 text-primary focus:ring-primary"
                             />
                           </td>
-                          <td className="px-1.5 py-3 text-slate-600 whitespace-nowrap text-center font-mono text-xs">{row.id}</td>
-                          <td className="px-1.5 py-3 text-slate-600 whitespace-nowrap">
+                          <td className="px-0.5 py-3 w-[3%] max-w-[2.75rem] text-slate-600 whitespace-nowrap text-center font-mono text-xs align-middle">{row.id}</td>
+                          <td className="px-1.5 py-3 w-[11%] min-w-[8.5rem] text-slate-600 whitespace-nowrap align-middle">
                             {isEditMode ? (
                               <div className="flex items-center gap-1">
                                 <input
@@ -1151,7 +1161,7 @@ export default function HistoryPage() {
                               displayDate
                             )}
                           </td>
-                          <td className="px-1.5 py-3 text-slate-600 whitespace-nowrap">
+                          <td className="px-1.5 py-3 w-[11%] min-w-[8.5rem] text-slate-600 whitespace-nowrap align-middle">
   {isEditMode ? (
     <div className="flex items-center gap-1">
       <input
@@ -1212,7 +1222,7 @@ export default function HistoryPage() {
     formatDate(row.registered_at ?? row.created_at)
   )}
 </td>
-                          <td className="px-1.5 py-3 text-slate-700 min-w-0">
+                          <td className="px-1.5 py-3 w-[13%] min-w-[10rem] text-slate-700 align-middle">
                              {isEditMode ? (
                                 <input
                                     value={isIndividualEdit && editDraft ? editDraft.supplier : row.header?.supplier ?? ""}
@@ -1236,14 +1246,14 @@ export default function HistoryPage() {
                              ) : (
                                 // 🌟 変更点: 表示時はマスターから正式名称を引いてくる！
                                 <span
-                                  className="block truncate max-w-[180px]"
+                                  className="block truncate whitespace-nowrap"
                                   title={getSupplierName(row.header?.supplier)}
                                 >
                                   {getSupplierName(row.header?.supplier)}
                                 </span>
                              )}
                           </td>
-                          <td className="px-1.5 py-3 text-slate-600 min-w-0">
+                          <td className="px-1.5 py-3 w-[3.5%] text-slate-600 min-w-0">
                              {isEditMode ? (
                                 <input
                                     value={isIndividualEdit && editDraft ? editDraft.genre : row.header?.genre ?? ""}
@@ -1264,8 +1274,8 @@ export default function HistoryPage() {
                                 </span>
                              )}
                           </td>
-                          <td className="px-1.5 py-3 font-mono text-xs whitespace-nowrap">{row.jan_code ?? "—"}</td>
-                          <td className="px-1.5 py-3 font-medium text-slate-900 min-w-0" title={row.product_name ?? undefined}>
+                          <td className="px-1.5 py-3 w-[6%] font-mono text-xs whitespace-nowrap align-middle">{row.jan_code ?? "—"}</td>
+                          <td className="px-1.5 py-3 w-[11%] font-medium text-slate-900 min-w-0 align-middle" title={row.product_name ?? undefined}>
                             {isEditMode ? (
                               <input
                                 value={isIndividualEdit && editDraft ? editDraft.product_name : row.product_name ?? ""}
@@ -1282,7 +1292,7 @@ export default function HistoryPage() {
                               <span className="block truncate">{row.product_name ?? "—"}</span>
                             )}
                           </td>
-                          <td className="px-1.5 py-3 text-slate-600 min-w-0">
+                          <td className="px-1.5 py-3 w-[5%] text-slate-600 min-w-0 align-middle">
                             {isEditMode ? (
                               <input
                                 value={isIndividualEdit && editDraft ? editDraft.brand : row.brand ?? ""}
@@ -1304,7 +1314,7 @@ export default function HistoryPage() {
                               </span>
                             )}
                           </td>
-                          <td className="px-1.5 py-3 text-slate-600 min-w-[80px]">
+                          <td className="px-1.5 py-3 w-[5%] text-slate-600 min-w-[80px] align-middle">
                             {isEditMode ? (
                               <input
                                 value={isIndividualEdit && editDraft ? editDraft.model_number : row.model_number ?? ""}
@@ -1326,7 +1336,7 @@ export default function HistoryPage() {
                               </span>
                             )}
                           </td>
-                          <td className="px-1.5 py-3 text-right tabular-nums whitespace-nowrap">
+                          <td className="px-1.5 py-3 w-[4%] text-right tabular-nums whitespace-nowrap align-middle">
                             {isEditMode ? (
                                 <input
                                 type="number"
@@ -1342,7 +1352,7 @@ export default function HistoryPage() {
                                 row.base_price > 0 ? row.base_price.toLocaleString() + " 円" : "—"
                             )}
                           </td>
-                          <td className="px-1.5 py-3 text-right font-medium tabular-nums whitespace-nowrap">
+                          <td className="px-1.5 py-3 w-[4%] text-right font-medium tabular-nums whitespace-nowrap align-middle">
                              {isEditMode ? (
                                 <input
                                 type="number"
@@ -1358,8 +1368,8 @@ export default function HistoryPage() {
                                 row.effective_unit_price > 0 ? Math.round(row.effective_unit_price).toLocaleString() + " 円" : "—"
                              )}
                           </td>
-                          <td className="px-1.5 py-3 text-slate-600 whitespace-nowrap">{row.condition_type === "new" ? "新品" : row.condition_type === "used" ? "中古" : row.condition_type ?? "—"}</td>
-                          <td className="px-1.5 py-3 whitespace-nowrap">
+                          <td className="px-1.5 py-3 w-[3.5%] text-slate-600 whitespace-nowrap align-middle">{row.condition_type === "new" ? "新品" : row.condition_type === "used" ? "中古" : row.condition_type ?? "—"}</td>
+                          <td className="px-1.5 py-3 w-[4%] whitespace-nowrap align-middle">
                             {!row.order_id ? (
                               <span className="bg-green-100 text-green-700 px-2.5 py-1 rounded-full text-[10px] font-bold">販売中</span>
                             ) : !row.settled_at ? (
@@ -1368,7 +1378,7 @@ export default function HistoryPage() {
                               <span className="bg-slate-100 text-slate-500 px-2.5 py-1 rounded-full text-[10px] font-bold">確定済</span>
                             )}
                           </td>
-                          <td className="px-1.5 py-3 font-mono text-xs whitespace-nowrap text-center">
+                          <td className="px-1.5 py-3 w-[7%] font-mono text-xs whitespace-nowrap text-center align-middle">
                             {row.order_id ? (
                               <a href={`https://sellercentral.amazon.co.jp/orders-v3/order/${row.order_id}`} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">
                                 {row.order_id}
@@ -1377,7 +1387,7 @@ export default function HistoryPage() {
                               <span className="text-slate-300">—</span>
                             )}
                           </td>
-                          <td className="px-1.5 py-3 text-center whitespace-nowrap">
+                          <td className="px-1.5 py-3 w-[5.5%] text-center whitespace-nowrap align-middle">
                             {isIndividualEdit ? (
                               <div className="flex items-center justify-center gap-1">
                                 <button
@@ -1499,7 +1509,7 @@ export default function HistoryPage() {
                           {row.warnings.length === 0 && <span className="text-slate-400 text-xs">—</span>}
                         </div>
                       </td>
-                      <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{row.created_at || "—"}</td>
+                      <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{row.registered_at || row.created_at || "—"}</td>
                       <td className="px-3 py-2 text-slate-700 whitespace-nowrap">{row.supplierRaw || row.supplierKana || "—"}</td>
                       <td className="px-3 py-2 font-mono text-xs whitespace-nowrap">{row.jan_code || "—"}</td>
                       <td className="px-3 py-2 font-medium text-slate-900 min-w-[140px]">{row.product_name || "—"}</td>
