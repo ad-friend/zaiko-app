@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Pencil, Save, X, Download, Upload, Search, ArrowUp, ArrowDown, ArrowUpDown } from "lucide-react";
+import { Pencil, Save, X, Download, Upload, Search, ArrowUp, ArrowDown, ArrowUpDown, Loader2 } from "lucide-react";
 
 type ProductRow = {
   jan_code: string;
@@ -44,8 +44,16 @@ export default function ProductsPage() {
   const [sortConfig, setSortConfig] = useState<{ key: string | null; direction: "asc" | "desc" }>({ key: null, direction: "asc" });
   const [searchTerm, setSearchTerm] = useState("");
   const [saving, setSaving] = useState(false);
-  const [isInferring, setIsInferring] = useState(false); 
+  const [savingStockJan, setSavingStockJan] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ message: string; variant: "success" | "error" } | null>(null);
+  const [isInferring, setIsInferring] = useState(false);
   const csvInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!toast) return;
+    const id = setTimeout(() => setToast(null), 4000);
+    return () => clearTimeout(id);
+  }, [toast]);
 
   const fetchRows = useCallback(async () => {
     try {
@@ -67,6 +75,38 @@ export default function ProductsPage() {
       setLoading(false);
     }
   }, []);
+
+  const saveStockIfChanged = useCallback(
+    async (jan_code: string, previous: number, raw: string) => {
+      const n = raw === "" ? 0 : Math.max(0, Math.floor(Number(raw)));
+      if (!Number.isFinite(n) || n < 0) {
+        setToast({ message: "在庫数は0以上の整数にしてください", variant: "error" });
+        await fetchRows();
+        return;
+      }
+      if (n === previous) return;
+      setSavingStockJan(jan_code);
+      try {
+        const res = await fetch("/api/products", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jan_code, current_stock: n }),
+        });
+        if (!res.ok) {
+          const j = await res.json().catch(() => ({}));
+          throw new Error((j as { error?: string }).error || "更新に失敗しました");
+        }
+        setRows((prev) => prev.map((r) => (r.jan_code === jan_code ? { ...r, current_stock: n } : r)));
+        setToast({ message: "在庫数を更新しました", variant: "success" });
+      } catch (e) {
+        setToast({ message: e instanceof Error ? e.message : "在庫の更新に失敗しました", variant: "error" });
+        await fetchRows();
+      } finally {
+        setSavingStockJan(null);
+      }
+    },
+    [fetchRows]
+  );
 
   useEffect(() => {
     fetchRows();
@@ -279,7 +319,7 @@ const handleJanCodeCheck = async (jan: string) => {
   const saveEdit = async () => {
     if (!editDraft) return;
     if (!editDraft.product_name.trim()) {
-      alert("商品名は必須です");
+      setToast({ message: "商品名は必須です", variant: "error" });
       return;
     }
     setSaving(true);
@@ -302,8 +342,9 @@ const handleJanCodeCheck = async (jan: string) => {
       setEditingJanCode(null);
       setEditDraft(null);
       await fetchRows();
+      setToast({ message: "商品情報を保存しました", variant: "success" });
     } catch (e) {
-      alert(e instanceof Error ? e.message : "更新に失敗しました");
+      setToast({ message: e instanceof Error ? e.message : "更新に失敗しました", variant: "error" });
     } finally {
       setSaving(false);
     }
@@ -318,6 +359,18 @@ const handleJanCodeCheck = async (jan: string) => {
 
   return (
     <div className="flex-1 flex flex-col">
+      {toast && (
+        <div
+          className={`fixed bottom-6 right-6 z-[100] max-w-sm rounded-lg border px-4 py-3 text-sm shadow-lg ${
+            toast.variant === "success"
+              ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+              : "border-red-200 bg-red-50 text-red-900"
+          }`}
+          role="status"
+        >
+          {toast.message}
+        </div>
+      )}
       <main className="flex-1 py-8 w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
           <div className="bg-slate-50/80 px-6 py-4 border-b border-slate-100 shrink-0">
@@ -436,9 +489,9 @@ const handleJanCodeCheck = async (jan: string) => {
                       <th className="px-6 py-4">
                         <SortBtn k="model_number">型番</SortBtn>
                       </th>
-                      <th className="px-6 py-4 w-28 whitespace-nowrap">
+                      <th className="px-6 py-4 w-36 whitespace-nowrap">
                         <div className="flex justify-end">
-                          <SortBtn k="current_stock">在庫数</SortBtn>
+                          <SortBtn k="current_stock">現在の在庫数</SortBtn>
                         </div>
                       </th>
                       <th className="px-6 py-4 w-24 text-center">操作</th>
@@ -498,21 +551,52 @@ const handleJanCodeCheck = async (jan: string) => {
                               className={`${inputClass} h-9 w-24 text-right ml-auto block`}
                             />
                           ) : (
-                            row.current_stock
+                            <div className="relative flex justify-end items-center gap-2">
+                              {savingStockJan === row.jan_code && (
+                                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" aria-hidden />
+                              )}
+                              <input
+                                key={`stock-${row.jan_code}-${row.current_stock}`}
+                                type="number"
+                                min={0}
+                                step={1}
+                                defaultValue={row.current_stock}
+                                disabled={saving || savingStockJan !== null}
+                                title="編集後、フォーカスを外すと保存されます"
+                                onBlur={(e) => void saveStockIfChanged(row.jan_code, row.current_stock, e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                                }}
+                                className={`${inputClass} h-9 w-24 text-right disabled:opacity-60`}
+                              />
+                            </div>
                           )}
                         </td>
                         <td className="px-6 py-4 text-center">
                           {editingJanCode === row.jan_code ? (
                             <div className="flex justify-center gap-1">
-                              <button type="button" onClick={saveEdit} className={`${buttonClass} h-9 px-2 bg-primary text-white`}>
-                                <Save className="h-4 w-4" />
+                              <button
+                                type="button"
+                                onClick={() => void saveEdit()}
+                                disabled={saving}
+                                className={`${buttonClass} h-9 px-2 bg-primary text-white disabled:opacity-50`}
+                              >
+                                {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
                               </button>
                               <button type="button" onClick={() => { setEditingJanCode(null); setEditDraft(null); }} className={`${buttonClass} h-9 px-2 bg-white border border-slate-200`}>
                                 <X className="h-4 w-4" />
                               </button>
                             </div>
                           ) : (
-                            <button type="button" onClick={() => { setEditingJanCode(row.jan_code); setEditDraft({ ...row }); }} className={`${buttonClass} h-9 px-2 bg-white border border-slate-200`}>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingJanCode(row.jan_code);
+                                setEditDraft({ ...row });
+                              }}
+                              disabled={saving || savingStockJan !== null}
+                              className={`${buttonClass} h-9 px-2 bg-white border border-slate-200 disabled:opacity-50`}
+                            >
                               <Pencil className="h-4 w-4" />
                             </button>
                           )}
