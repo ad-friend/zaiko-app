@@ -2,38 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { applyPreservedReconciliationStatusForUpsert } from "@/lib/amazon-order-reconciliation-status";
 import { is13DigitJan, resolveJanForAmazonOrderLine } from "@/lib/amazon-resolve-order-jan";
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-/** fetch-orders と同様の SP-API クライアント（未設定時は null） */
-function tryCreateSpClient(): { callAPI: (params: Record<string, unknown>) => Promise<unknown> } | null {
-  const clientId = process.env.SP_API_CLIENT_ID;
-  const clientSecret = process.env.SP_API_CLIENT_SECRET;
-  const refreshToken = process.env.SP_API_REFRESH_TOKEN;
-  const accessKey = process.env.SP_API_AWS_ACCESS_KEY;
-  const secretKey = process.env.SP_API_AWS_SECRET_KEY;
-  if (!clientId || !clientSecret || !refreshToken || !accessKey || !secretKey) {
-    return null;
-  }
-  try {
-    const SellingPartnerAPI = require("amazon-sp-api");
-    return new SellingPartnerAPI({
-      region: "fe",
-      refresh_token: refreshToken,
-      credentials: {
-        SELLING_PARTNER_APP_CLIENT_ID: clientId,
-        SELLING_PARTNER_APP_CLIENT_SECRET: clientSecret,
-        AWS_ACCESS_KEY_ID: accessKey,
-        AWS_SECRET_ACCESS_KEY: secretKey,
-        AWS_SELLING_PARTNER_ROLE: "",
-      },
-    });
-  } catch {
-    return null;
-  }
-}
+import { sleep, tryCreateSpClient } from "@/lib/amazon-sp-try-client";
 
 type AmazonOrdersImportRow = {
   amazonOrderId: string;

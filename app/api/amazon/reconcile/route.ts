@@ -1,8 +1,8 @@
 /**
  * Amazon注文 自動消込エンジン（API）
  * POST: reconciliation_status = 'pending' のみ処理。
- * - sku_mappings（platform=Amazon）のセット商品ルールを最優先で維持
- * - 単品は amazon_orders.jan_code（＋単一マッピング時のフォールバック）で照合
+ * 1) pending かつ jan 未設定の行を lib/amazon-resolve-order-jan で補完（各行後 sleep 250ms）
+ * 2) sku_mappings セット品 → 単品 JAN 照合の既存フロー
  */
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
@@ -12,6 +12,8 @@ import {
   AMAZON_ORDER_STATUS_RECONCILED,
 } from "@/lib/amazon-order-reconciliation-status";
 import { normalizeOrderCondition, normalizeStockCondition } from "@/lib/amazon-condition-match";
+import { resolveJanForAmazonOrderLine } from "@/lib/amazon-resolve-order-jan";
+import { sleep, tryCreateSpClient } from "@/lib/amazon-sp-try-client";
 
 function sortFifo(a: { id: number; created_at: string | null }, b: { id: number; created_at: string | null }): number {
   const ta = a.created_at ? Date.parse(a.created_at) : 0;
@@ -76,6 +78,44 @@ async function finalizeReconciledInboundIds(
 
 export async function POST() {
   try {
+    const { data: pendingForJanFill, error: janFetchErr } = await supabase
+      .from("amazon_orders")
+      .select("id, sku, asin, jan_code")
+      .eq("reconciliation_status", AMAZON_ORDER_STATUS_PENDING)
+      .order("created_at", { ascending: true });
+
+    if (janFetchErr) throw janFetchErr;
+
+    if (!pendingForJanFill?.length) {
+      return NextResponse.json({
+        ok: true,
+        message: "対象のpending注文がありません。",
+        processed: 0,
+        completed: 0,
+        manual_required: 0,
+      });
+    }
+
+    const needJan = pendingForJanFill.filter((r) => !String(r.jan_code ?? "").trim());
+    if (needJan.length > 0) {
+      const spClient = tryCreateSpClient();
+      for (const row of needJan) {
+        const asin = row.asin != null ? String(row.asin).trim() : null;
+        const resolved = await resolveJanForAmazonOrderLine(supabase, spClient, {
+          sku: String(row.sku ?? "").trim(),
+          asin: asin || null,
+        });
+        if (resolved) {
+          const { error: upJanErr } = await supabase
+            .from("amazon_orders")
+            .update({ jan_code: resolved, updated_at: new Date().toISOString() })
+            .eq("id", row.id);
+          if (upJanErr) throw upJanErr;
+        }
+        await sleep(250);
+      }
+    }
+
     const { data: pendingOrders, error: fetchError } = await supabase
       .from("amazon_orders")
       .select("id, amazon_order_id, sku, condition_id, quantity, jan_code")
