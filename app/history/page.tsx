@@ -1495,12 +1495,8 @@ export default function HistoryPage() {
                                 販売済
                               </span>
                             ) : (
-                              <span className="text-slate-600 text-xs whitespace-nowrap">
-                                {row.condition_type === "new"
-                                  ? "新品"
-                                  : row.condition_type === "used"
-                                    ? "中古"
-                                    : row.condition_type ?? "—"}
+                              <span className="bg-green-100 text-green-800 px-2.5 py-1 rounded-full text-[10px] font-bold whitespace-nowrap">
+                                販売中
                               </span>
                             )}
                           </td>
