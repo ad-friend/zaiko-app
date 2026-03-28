@@ -1,47 +1,24 @@
 /**
  * 手動消込用：指定注文に紐づく在庫候補一覧
  * GET: ?amazon_order_id=xxx&sku=xxx または ?jan_code=xxx
- * 注文の asin / jan と在庫を突き合わせつつ、注文の condition_id と在庫の condition_type が一致する行のみ返す。
+ * 注文の asin / jan と在庫を突き合わせ、condition は大小文字を区別しない（ilike 等）で一致させる。
  */
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
+import { normalizeOrderCondition, type NormalizedListingCondition } from "@/lib/amazon-condition-match";
 
-type NormalizedCondition = "new" | "used";
-
-/** reconcile と同じ前提で注文 condition_id を new | used に寄せる */
-function normalizeOrderCondition(conditionId: string | null | undefined): NormalizedCondition | null {
-  const raw = String(conditionId ?? "").trim().toLowerCase();
-  if (!raw) return null;
-  if (raw === "new" || raw === "新品" || raw.startsWith("new")) return "new";
-  if (raw === "used" || raw === "中古" || raw.startsWith("used")) return "used";
-  return null;
-}
-
-/** PostgREST .or() 用: 在庫側の表記揺れを OR でまとめる */
-function conditionTypeOrFilter(norm: NormalizedCondition): string {
-  if (norm === "new") {
-    return [
-      "condition_type.eq.new",
-      "condition_type.eq.New",
-      "condition_type.eq.NEW",
-      "condition_type.eq.新品",
-      "condition_type.ilike.new%",
-      "condition_type.ilike.New%",
-    ].join(",");
-  }
-  return [
-    "condition_type.eq.used",
-    "condition_type.eq.Used",
-    "condition_type.eq.USED",
-    "condition_type.eq.中古",
-    "condition_type.ilike.used%",
-    "condition_type.ilike.Used%",
-  ].join(",");
-}
-
+/** PostgREST: 未割当または同一 Amazon 注文への仮引当のみ */
 function orderIdAvailabilityOr(amazonOrderId: string): string {
-  const id = amazonOrderId.trim();
-  return `order_id.is.null,order_id.eq.${id}`;
+  const id = amazonOrderId.trim().replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return `order_id.is.null,order_id.eq."${id}"`;
+}
+
+/** 在庫 condition_type: 英字は ilike で大小文字非区別、日本語は eq */
+function conditionTypeOrFilter(norm: NormalizedListingCondition): string {
+  if (norm === "new") {
+    return ["condition_type.ilike.new%", "condition_type.eq.新品"].join(",");
+  }
+  return ["condition_type.ilike.used%", "condition_type.eq.中古"].join(",");
 }
 
 type Row = {
@@ -73,7 +50,7 @@ export async function GET(request: NextRequest) {
 
     let asin: string | null = null;
     let jan: string | null = janCode || null;
-    let condNorm: NormalizedCondition | null = null;
+    let condNorm: NormalizedListingCondition | null = null;
     let orderRowFound = false;
 
     if (amazonOrderId) {

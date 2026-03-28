@@ -1,6 +1,8 @@
 /**
  * Amazon注文 自動消込エンジン（API）
- * POST: reconciliation_status = 'pending' の注文のみ処理（reconciled / manual_required / canceled は対象外）
+ * POST: reconciliation_status = 'pending' のみ処理。
+ * - sku_mappings（platform=Amazon）のセット商品ルールを最優先で維持
+ * - 単品は amazon_orders.jan_code（＋単一マッピング時のフォールバック）で照合
  */
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
@@ -9,28 +11,7 @@ import {
   AMAZON_ORDER_STATUS_PENDING,
   AMAZON_ORDER_STATUS_RECONCILED,
 } from "@/lib/amazon-order-reconciliation-status";
-
-type NormalizedCondition = "new" | "used";
-
-function normalizeOrderCondition(conditionId: string | null | undefined): NormalizedCondition | null {
-  const raw = String(conditionId ?? "").trim().toLowerCase();
-  if (!raw) return null;
-  if (raw === "new" || raw === "新品" || raw.startsWith("new")) return "new";
-  if (raw === "used" || raw === "中古" || raw.startsWith("used")) return "used";
-  return null;
-}
-
-function normalizeStockCondition(conditionType: string | null | undefined): NormalizedCondition | null {
-  const raw = String(conditionType ?? "").trim().toLowerCase();
-  if (!raw) return null;
-  if (raw === "new" || raw === "新品") return "new";
-  if (raw === "used" || raw === "中古") return "used";
-  if (raw.includes("新品") && !raw.includes("中古")) return "new";
-  if (raw.includes("中古")) return "used";
-  if (raw.includes("new") && !raw.includes("used")) return "new";
-  if (raw.includes("used")) return "used";
-  return null;
-}
+import { normalizeOrderCondition, normalizeStockCondition } from "@/lib/amazon-condition-match";
 
 function sortFifo(a: { id: number; created_at: string | null }, b: { id: number; created_at: string | null }): number {
   const ta = a.created_at ? Date.parse(a.created_at) : 0;
@@ -60,6 +41,39 @@ async function unlinkInboundFromOrder(inboundIds: number[], amazonOrderId: strin
   await supabase.from("inbound_items").update({ order_id: null }).in("id", inboundIds).eq("order_id", amazonOrderId);
 }
 
+function filterAvailableByOrderId<T extends { order_id: string | null }>(
+  rows: T[],
+  amazonOrderId: string
+): T[] {
+  const oidWant = String(amazonOrderId).trim();
+  return rows.filter((row) => {
+    const oid = row.order_id != null ? String(row.order_id).trim() : "";
+    return !oid || oid === oidWant;
+  });
+}
+
+async function finalizeReconciledInboundIds(
+  inboundIds: number[],
+  amazonOrderId: string,
+  orderDbId: number,
+  janForRow: string
+): Promise<void> {
+  const linked: number[] = [];
+  for (const id of inboundIds) {
+    const { error: uErr } = await supabase.from("inbound_items").update({ order_id: amazonOrderId }).eq("id", id);
+    if (uErr) {
+      await unlinkInboundFromOrder(linked, amazonOrderId);
+      throw new Error(uErr.message);
+    }
+    linked.push(id);
+  }
+  const { error: oErr } = await updateAmazonOrderReconciliation(orderDbId, AMAZON_ORDER_STATUS_RECONCILED, janForRow);
+  if (oErr) {
+    await unlinkInboundFromOrder(inboundIds, amazonOrderId);
+    throw oErr;
+  }
+}
+
 export async function POST() {
   try {
     const { data: pendingOrders, error: fetchError } = await supabase
@@ -85,23 +99,83 @@ export async function POST() {
     for (const order of pendingOrders) {
       const orderId = order.amazon_order_id;
       const orderQty = Math.max(1, Number(order.quantity) || 1);
-      const jan = String(order.jan_code ?? "").trim();
+      const sku = String(order.sku ?? "").trim();
 
       console.log(`\n=== 🔍 注文チェック: ${orderId} ===`);
-      console.log(`SKU: ${order.sku}, コンディション: ${order.condition_id}, 注文JAN: ${jan}`);
+      console.log(`SKU: ${sku}, コンディション: ${order.condition_id}, 注文JAN: ${order.jan_code}`);
 
-      if (!jan) {
-        console.log("❌ amazon_orders.jan_code が空のため手動確認");
-        const { error } = await updateAmazonOrderReconciliation(order.id, AMAZON_ORDER_STATUS_MANUAL_REQUIRED, null);
+      const orderCond = normalizeOrderCondition(order.condition_id);
+      if (!orderCond) {
+        console.log(`❌ 注文コンディションを new/used に判定できない: ${order.condition_id}`);
+        const { error } = await updateAmazonOrderReconciliation(
+          order.id,
+          AMAZON_ORDER_STATUS_MANUAL_REQUIRED,
+          String(order.jan_code ?? "").trim() || null
+        );
         if (error) throw error;
         manualRequired++;
         continue;
       }
 
-      const orderCond = normalizeOrderCondition(order.condition_id);
-      if (!orderCond) {
-        console.log(`❌ 注文コンディションを new/used に判定できない: ${order.condition_id}`);
-        const { error } = await updateAmazonOrderReconciliation(order.id, AMAZON_ORDER_STATUS_MANUAL_REQUIRED, jan);
+      const { data: mappings } = await supabase
+        .from("sku_mappings")
+        .select("jan_code, quantity")
+        .eq("sku", sku)
+        .eq("platform", "Amazon");
+
+      const mapList = mappings ?? [];
+      const isSetProduct =
+        mapList.length > 0 && (mapList.length > 1 || (Number(mapList[0].quantity) || 1) > 1);
+
+      if (isSetProduct) {
+        try {
+          const collectedIds: number[] = [];
+          let setOk = true;
+          for (const m of mapList) {
+            const need = (Number(m.quantity) || 1) * orderQty;
+            const { data: stockRows, error: stockErr } = await supabase
+              .from("inbound_items")
+              .select("id, condition_type, created_at, order_id")
+              .eq("jan_code", m.jan_code)
+              .is("settled_at", null);
+            if (stockErr) throw stockErr;
+            const available = filterAvailableByOrderId(stockRows ?? [], orderId);
+            const matching = available
+              .filter((row) => normalizeStockCondition(row.condition_type) === orderCond)
+              .sort(sortFifo);
+            if (matching.length < need) {
+              setOk = false;
+              break;
+            }
+            collectedIds.push(...matching.slice(0, need).map((r) => r.id));
+          }
+          if (setOk && collectedIds.length > 0) {
+            const janForRow =
+              String(order.jan_code ?? "").trim() ||
+              String(mapList[0]?.jan_code ?? "").trim() ||
+              null;
+            if (!janForRow) {
+              const { error } = await updateAmazonOrderReconciliation(order.id, AMAZON_ORDER_STATUS_MANUAL_REQUIRED, null);
+              if (error) throw error;
+              manualRequired++;
+              continue;
+            }
+            await finalizeReconciledInboundIds(collectedIds, orderId, order.id, janForRow);
+            completed++;
+            continue;
+          }
+        } catch (e) {
+          console.error("[amazon/reconcile] set product path failed order id=%s:", order.id, e);
+        }
+      }
+
+      let jan = String(order.jan_code ?? "").trim();
+      if (!jan && mapList.length === 1 && !isSetProduct) {
+        jan = String(mapList[0].jan_code ?? "").trim();
+      }
+      if (!jan) {
+        console.log("❌ jan_code が空のため手動確認");
+        const { error } = await updateAmazonOrderReconciliation(order.id, AMAZON_ORDER_STATUS_MANUAL_REQUIRED, null);
         if (error) throw error;
         manualRequired++;
         continue;
@@ -115,10 +189,7 @@ export async function POST() {
 
       if (stockErr) throw stockErr;
 
-      const available = (stockRows ?? []).filter((row) => {
-        const oid = row.order_id != null ? String(row.order_id).trim() : "";
-        return !oid || oid === String(orderId).trim();
-      });
+      const available = filterAvailableByOrderId(stockRows ?? [], orderId);
 
       const matching = available
         .filter((row) => normalizeStockCondition(row.condition_type) === orderCond)
@@ -127,21 +198,12 @@ export async function POST() {
       console.log(`📦 JAN一致・未販売・条件一致: ${matching.length} 件（注文側=${orderCond}, 必要数=${orderQty}）`);
 
       const finalizeReconciled = async (pick: typeof matching) => {
-        const ids = pick.map((p) => p.id);
-        const linked: number[] = [];
-        for (const row of pick) {
-          const { error: uErr } = await supabase.from("inbound_items").update({ order_id: orderId }).eq("id", row.id);
-          if (uErr) {
-            await unlinkInboundFromOrder(linked, orderId);
-            throw new Error(uErr.message);
-          }
-          linked.push(row.id);
-        }
-        const { error: oErr } = await updateAmazonOrderReconciliation(order.id, AMAZON_ORDER_STATUS_RECONCILED, jan);
-        if (oErr) {
-          await unlinkInboundFromOrder(ids, orderId);
-          throw oErr;
-        }
+        await finalizeReconciledInboundIds(
+          pick.map((p) => p.id),
+          orderId,
+          order.id,
+          jan
+        );
         completed++;
       };
 

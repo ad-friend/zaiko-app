@@ -6,12 +6,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { applyPreservedReconciliationStatusForUpsert } from "@/lib/amazon-order-reconciliation-status";
+import { is13DigitJan, resolveJanForAmazonOrderLine } from "@/lib/amazon-resolve-order-jan";
 
 const MARKETPLACE_ID_JP = "A1VC38T7YXB528";
-
-function is13DigitJan(s: string): boolean {
-  return /^\d{13}$/.test(String(s).trim());
-}
 
 function normalizeConditionId(conditionId: string | null | undefined): "New" | "Used" {
   const c = String(conditionId ?? "").trim().toLowerCase();
@@ -179,7 +176,14 @@ export async function GET(request: NextRequest) {
         const qty = Math.max(1, Number(item.QuantityOrdered) || 1);
         const conditionId = normalizeConditionId(item.ConditionId);
         const asin = item.ASIN ? String(item.ASIN).trim() : null;
-        const jan_code = is13DigitJan(sku) ? sku : null;
+        let jan_code: string | null = is13DigitJan(sku) ? sku : null;
+        if (!jan_code && asin) {
+          jan_code = await resolveJanForAmazonOrderLine(supabase, spClient, {
+            sku: sku || "UNKNOWN",
+            asin,
+          });
+          await sleep(250);
+        }
 
         rows.push({
           amazon_order_id: amazonOrderId,
