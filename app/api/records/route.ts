@@ -75,10 +75,13 @@ const SELECT_WITHOUT_REGISTERED = `
   )
 `;
 
+const LIST_MAX_ROWS = 50000;
+
 export async function GET(request: NextRequest) {
   try {
     const yearsParam = request.nextUrl.searchParams.get("years");
-    let years = 2;
+    /** 既定を長めにし、CSVで古い仕入日が付与された行も一覧に含める（!inner の埋め込みは使わず左結合相当の通常 select） */
+    let years = 30;
     if (yearsParam !== null && yearsParam !== "") {
       const n = parseInt(yearsParam, 10);
       if (Number.isFinite(n) && n >= 1 && n <= 100) years = n;
@@ -92,7 +95,9 @@ export async function GET(request: NextRequest) {
       .from("inbound_items")
       .select(SELECT_WITH_REGISTERED)
       .gte("created_at", cutoffIso)
-      .order("created_at", { ascending: false });
+      .order("created_at", { ascending: false, nullsFirst: false })
+      .order("id", { ascending: false })
+      .limit(LIST_MAX_ROWS);
 
     // エラーがあればここでキャッチ処理へ飛ばす
     if (error) throw error;
