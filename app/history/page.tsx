@@ -1167,12 +1167,6 @@ export default function HistoryPage() {
                           {sortConfig.key === "effective_unit_price" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5 shrink-0" /> : <ArrowDown className="h-3.5 w-3.5 shrink-0" />) : <ArrowUpDown className="h-3.5 w-3.5 shrink-0 opacity-50" />}
                         </button>
                       </th>
-                      <th className="w-px whitespace-nowrap px-1 py-3">
-                        <button type="button" onClick={() => requestSort("condition_type")} className="inline-flex items-center gap-1 whitespace-nowrap hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
-                          状態
-                          {sortConfig.key === "condition_type" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5 shrink-0" /> : <ArrowDown className="h-3.5 w-3.5 shrink-0" />) : <ArrowUpDown className="h-3.5 w-3.5 shrink-0 opacity-50" />}
-                        </button>
-                      </th>
                       <th className="w-px whitespace-nowrap px-1.5 py-3 text-left text-slate-500 font-semibold">
                         進捗
                       </th>
@@ -1441,38 +1435,11 @@ export default function HistoryPage() {
                             )}
                           </td>
                           <td className="w-px whitespace-nowrap px-1 py-3 text-right tabular-nums align-middle">
-                            {isEditMode ? (
-                                <input
-                                type="number"
-                                value={isIndividualEdit && editDraft ? editDraft.base_price : row.base_price}
-                                onChange={(e) =>
-                                    isIndividualEdit && editDraft
-                                    ? setEditDraft((d) => (d ? { ...d, base_price: Number(e.target.value) } : d))
-                                    : updateRowField(row.id, "base_price", Number(e.target.value))
-                                }
-                                className={`${inputClass} h-9 min-w-0 w-full max-w-full text-right`}
-                                />
-                            ) : (
-                                row.base_price > 0 ? row.base_price.toLocaleString() + " 円" : "—"
-                            )}
+                            {row.base_price > 0 ? row.base_price.toLocaleString() + " 円" : "—"}
                           </td>
                           <td className="w-px whitespace-nowrap px-1 py-3 text-right font-medium tabular-nums align-middle">
-                             {isEditMode ? (
-                                <input
-                                type="number"
-                                value={isIndividualEdit && editDraft ? editDraft.effective_unit_price : row.effective_unit_price}
-                                onChange={(e) =>
-                                    isIndividualEdit && editDraft
-                                    ? setEditDraft((d) => (d ? { ...d, effective_unit_price: Number(e.target.value) } : d))
-                                    : updateRowField(row.id, "effective_unit_price", Number(e.target.value))
-                                }
-                                className={`${inputClass} h-9 min-w-0 w-full max-w-full text-right`}
-                                />
-                             ) : (
-                                row.effective_unit_price > 0 ? Math.round(row.effective_unit_price).toLocaleString() + " 円" : "—"
-                             )}
+                            {row.effective_unit_price > 0 ? Math.round(row.effective_unit_price).toLocaleString() + " 円" : "—"}
                           </td>
-                          <td className="w-px whitespace-nowrap px-1 py-3 text-slate-600 align-middle">{row.condition_type === "new" ? "新品" : row.condition_type === "used" ? "中古" : row.condition_type ?? "—"}</td>
                           <td className="w-px whitespace-nowrap px-1 py-3 align-middle">
                             {row.exit_type ? (
                               <span
