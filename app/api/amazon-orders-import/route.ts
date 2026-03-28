@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { applyPreservedReconciliationStatusForUpsert } from "@/lib/amazon-order-reconciliation-status";
-import { is13DigitJan, resolveJanForAmazonOrderLine } from "@/lib/amazon-resolve-order-jan";
-import { sleep, tryCreateSpClient } from "@/lib/amazon-sp-try-client";
 
 type AmazonOrdersImportRow = {
   amazonOrderId: string;
@@ -51,8 +49,6 @@ export async function POST(request: NextRequest) {
     }
 
     const nowIso = new Date().toISOString();
-    const spClient = tryCreateSpClient();
-
     const validRows: Array<Record<string, unknown>> = [];
     const errors: ImportError[] = [];
 
@@ -78,17 +74,7 @@ export async function POST(request: NextRequest) {
 
       const qty = parseQuantity(row.quantity) ?? 1;
       const asin = row.asin != null ? toTrimmedString(row.asin) : "";
-
-      let janCode: string | null = is13DigitJan(sku) ? sku : null;
-      const asinForResolve = asin || null;
-      if (!janCode && asinForResolve) {
-        janCode = await resolveJanForAmazonOrderLine(supabase, spClient, {
-          sku,
-          asin: asinForResolve,
-        });
-        await sleep(250);
-      }
-      const conditionId = "New"; // レポートから条件が取れない場合でも NOT NULL 制約を満たすための既定値
+      const conditionId = "New";
       const createdAtIso = parseToIsoDateMaybe(purchaseDate);
 
       const payload: Record<string, unknown> = {
@@ -97,7 +83,7 @@ export async function POST(request: NextRequest) {
         condition_id: conditionId,
         reconciliation_status: "pending",
         quantity: qty,
-        jan_code: janCode,
+        jan_code: null,
         asin: asin ? asin : null,
         updated_at: nowIso,
       };
@@ -166,4 +152,3 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ ok: false, error: message }, { status: 500 });
   }
 }
-
