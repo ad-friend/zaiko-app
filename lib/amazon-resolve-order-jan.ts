@@ -5,6 +5,9 @@
  * 3) Catalog Items API getCatalogItem（identifiers の EAN / JAN / GTIN）
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { sleep } from "@/lib/amazon-sp-try-client";
+
+const IN_CHUNK = 80;
 
 const MARKETPLACE_ID_JP = "A1VC38T7YXB528";
 
@@ -51,6 +54,65 @@ export function extractJanFromCatalogPayload(payload: unknown): string | null {
 type SpClientLike = {
   callAPI: (params: Record<string, unknown>) => Promise<unknown>;
 };
+
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+/**
+ * ユニーク ASIN ごとに 1 回だけ JAN を解決する（自動消込前のバルク補完用）。
+ * 順序: products 一括 → amazon_orders の既存 jan 一括 → 未解決のみ Catalog API（各 ASIN 後に sleep）
+ */
+export async function buildAsinToJanMap(
+  supabase: SupabaseClient,
+  spClient: SpClientLike | null,
+  uniqueAsins: string[]
+): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  const normalized = [
+    ...new Set(
+      uniqueAsins
+        .map((a) => String(a ?? "").trim())
+        .filter((a) => a.length >= 10)
+    ),
+  ];
+
+  for (const part of chunkArray(normalized, IN_CHUNK)) {
+    const { data: prows } = await supabase.from("products").select("asin, jan_code").in("asin", part);
+    for (const p of prows ?? []) {
+      const a = String(p.asin ?? "").trim();
+      const j = String(p.jan_code ?? "").trim();
+      if (a && is13DigitJan(j)) map.set(a, j);
+    }
+  }
+
+  const afterProducts = normalized.filter((a) => !map.has(a));
+  for (const part of chunkArray(afterProducts, IN_CHUNK)) {
+    const { data: orows } = await supabase
+      .from("amazon_orders")
+      .select("asin, jan_code")
+      .in("asin", part)
+      .not("jan_code", "is", null);
+    for (const o of orows ?? []) {
+      const a = String(o.asin ?? "").trim();
+      const j = String(o.jan_code ?? "").trim();
+      if (a && is13DigitJan(j) && !map.has(a)) map.set(a, j);
+    }
+  }
+
+  const needCatalog = normalized.filter((a) => !map.has(a));
+  if (!spClient || needCatalog.length === 0) return map;
+
+  for (const asin of needCatalog) {
+    const j = await fetchJanFromAsinCatalog(spClient, asin);
+    if (j) map.set(asin, j);
+    await sleep(250);
+  }
+
+  return map;
+}
 
 export async function fetchJanFromAsinCatalog(spClient: SpClientLike, asin: string): Promise<string | null> {
   const a = String(asin ?? "").trim();

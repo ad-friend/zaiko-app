@@ -1,7 +1,7 @@
 /**
  * Amazon注文 自動消込エンジン（API）
  * POST: reconciliation_status = 'pending' のみ処理。
- * 1) pending かつ jan 未設定の行を lib/amazon-resolve-order-jan で補完（各行後 sleep 250ms）
+ * 1) pending かつ jan 未設定: ユニーク ASIN をバルク解決（products / amazon_orders / Catalog 各 ASIN 1 回＋sleep）
  * 2) sku_mappings セット品 → 単品 JAN 照合の既存フロー
  */
 import { NextResponse } from "next/server";
@@ -12,8 +12,14 @@ import {
   AMAZON_ORDER_STATUS_RECONCILED,
 } from "@/lib/amazon-order-reconciliation-status";
 import { normalizeOrderCondition, normalizeStockCondition } from "@/lib/amazon-condition-match";
-import { resolveJanForAmazonOrderLine } from "@/lib/amazon-resolve-order-jan";
-import { sleep, tryCreateSpClient } from "@/lib/amazon-sp-try-client";
+import { buildAsinToJanMap, is13DigitJan } from "@/lib/amazon-resolve-order-jan";
+import { tryCreateSpClient } from "@/lib/amazon-sp-try-client";
+
+function chunkIds(ids: number[], size: number): number[][] {
+  const out: number[][] = [];
+  for (let i = 0; i < ids.length; i += size) out.push(ids.slice(i, i + size));
+  return out;
+}
 
 function sortFifo(a: { id: number; created_at: string | null }, b: { id: number; created_at: string | null }): number {
   const ta = a.created_at ? Date.parse(a.created_at) : 0;
@@ -98,21 +104,43 @@ export async function POST() {
 
     const needJan = pendingForJanFill.filter((r) => !String(r.jan_code ?? "").trim());
     if (needJan.length > 0) {
-      const spClient = tryCreateSpClient();
+      const uniqueAsins = new Set<string>();
       for (const row of needJan) {
-        const asin = row.asin != null ? String(row.asin).trim() : null;
-        const resolved = await resolveJanForAmazonOrderLine(supabase, spClient, {
-          sku: String(row.sku ?? "").trim(),
-          asin: asin || null,
-        });
-        if (resolved) {
+        const sku = String(row.sku ?? "").trim();
+        if (is13DigitJan(sku)) continue;
+        const asin = row.asin != null ? String(row.asin).trim() : "";
+        if (asin.length >= 10) uniqueAsins.add(asin);
+      }
+
+      const asinToJan =
+        uniqueAsins.size > 0
+          ? await buildAsinToJanMap(supabase, tryCreateSpClient(), [...uniqueAsins])
+          : new Map<string, string>();
+
+      const janToOrderIds = new Map<string, number[]>();
+      for (const row of needJan) {
+        const sku = String(row.sku ?? "").trim();
+        let resolved: string | null = null;
+        if (is13DigitJan(sku)) resolved = sku;
+        else {
+          const asin = row.asin != null ? String(row.asin).trim() : "";
+          if (asin.length >= 10) resolved = asinToJan.get(asin) ?? null;
+        }
+        if (!resolved) continue;
+        const list = janToOrderIds.get(resolved) ?? [];
+        list.push(row.id);
+        janToOrderIds.set(resolved, list);
+      }
+
+      const nowJanIso = new Date().toISOString();
+      for (const [jan, ids] of janToOrderIds) {
+        for (const idChunk of chunkIds(ids, 200)) {
           const { error: upJanErr } = await supabase
             .from("amazon_orders")
-            .update({ jan_code: resolved, updated_at: new Date().toISOString() })
-            .eq("id", row.id);
+            .update({ jan_code: jan, updated_at: nowJanIso })
+            .in("id", idChunk);
           if (upJanErr) throw upJanErr;
         }
-        await sleep(250);
       }
     }
 
