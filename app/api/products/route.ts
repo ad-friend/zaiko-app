@@ -12,7 +12,10 @@ export type ProductRow = {
   current_stock: number;
 };
 
-/** settled_at / exit_type が NULL の inbound_items を JAN ごとに数える */
+/** 未販売・未調整: settled_at / exit_type が NULL または空文字の inbound_items を JAN ごとに数える */
+const ACTIVE_STOCK_SETTLED_OR = 'settled_at.is.null,settled_at.eq.""';
+const ACTIVE_STOCK_EXIT_OR = 'exit_type.is.null,exit_type.eq.""';
+
 async function countActiveStockByJan(): Promise<Map<string, number>> {
   const counts = new Map<string, number>();
   const pageSize = 1000;
@@ -21,16 +24,14 @@ async function countActiveStockByJan(): Promise<Map<string, number>> {
     const { data, error } = await supabase
       .from("inbound_items")
       .select("jan_code")
-      .is("settled_at", null)
-      .is("exit_type", null)
+      .or(ACTIVE_STOCK_SETTLED_OR)
+      .or(ACTIVE_STOCK_EXIT_OR)
       .order("id", { ascending: true })
       .range(from, from + pageSize - 1);
     if (error) throw error;
     if (!data?.length) break;
     for (const row of data) {
-      const j = row.jan_code;
-      if (j == null) continue;
-      const key = String(j).trim();
+      const key = row.jan_code == null ? "" : String(row.jan_code).trim();
       if (!key) continue;
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
@@ -45,8 +46,8 @@ async function countActiveStockForJan(jan: string): Promise<number> {
     .from("inbound_items")
     .select("*", { count: "exact", head: true })
     .eq("jan_code", jan)
-    .is("settled_at", null)
-    .is("exit_type", null);
+    .or(ACTIVE_STOCK_SETTLED_OR)
+    .or(ACTIVE_STOCK_EXIT_OR);
   if (error) throw error;
   return count ?? 0;
 }
@@ -145,13 +146,6 @@ export async function PATCH(request: NextRequest) {
       update.product_name = pn;
     }
     if (body.model_number !== undefined) update.model_number = body.model_number != null && String(body.model_number).trim() ? String(body.model_number).trim() : null;
-    if (body.current_stock !== undefined) {
-      const n = Number(body.current_stock);
-      if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
-        return NextResponse.json({ error: "current_stock は 0 以上の整数で指定してください" }, { status: 400 });
-      }
-      update.current_stock = n;
-    }
     if (Object.keys(update).length === 0) return NextResponse.json({ error: "更新項目がありません" }, { status: 400 });
     const { error } = await supabase.from("products").update(update).eq("jan_code", jan_code);
     if (error) throw error;

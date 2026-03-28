@@ -3,9 +3,10 @@
 import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Package, History, Users, Database, Layers, Menu, X, PackageCheck } from "lucide-react";
+import { Package, History, Users, Database, Layers, Menu, X, PackageCheck, LayoutDashboard } from "lucide-react";
 
 const navItems = [
+  { href: "/dashboard", label: "ダッシュボード", icon: LayoutDashboard },
   { href: "/", label: "入庫管理", icon: Package },
   { href: "/history", label: "在庫一覧", icon: History },
   { href: "/amazon-reconcile", label: "Amazon消込", icon: PackageCheck },
