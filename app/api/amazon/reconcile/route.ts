@@ -1,7 +1,7 @@
 /**
  * Amazon注文 自動消込エンジン（API）
  * POST: reconciliation_status = 'pending' のみ処理。
- * 1) pending かつ jan 未設定: ユニーク ASIN をバルク解決（products / amazon_orders / Catalog 各 ASIN 1 回＋sleep）
+ * 1) pending かつ jan 未設定: getOrderItems で ConditionId 補完 → ユニーク ASIN で JAN バルク解決 → jan_code・condition_id を一括 UPDATE
  * 2) sku_mappings セット品 → 単品 JAN 照合の既存フロー
  */
 import { NextResponse } from "next/server";
@@ -12,7 +12,7 @@ import {
   AMAZON_ORDER_STATUS_RECONCILED,
 } from "@/lib/amazon-order-reconciliation-status";
 import { normalizeOrderCondition, normalizeStockCondition } from "@/lib/amazon-condition-match";
-import { buildAsinToJanMap, is13DigitJan } from "@/lib/amazon-resolve-order-jan";
+import { buildAmazonOrderSkuToConditionMap, buildAsinToJanMap, is13DigitJan } from "@/lib/amazon-resolve-order-jan";
 import { tryCreateSpClient } from "@/lib/amazon-sp-try-client";
 
 function chunkIds(ids: number[], size: number): number[][] {
@@ -86,7 +86,7 @@ export async function POST() {
   try {
     const { data: pendingForJanFill, error: janFetchErr } = await supabase
       .from("amazon_orders")
-      .select("id, sku, asin, jan_code")
+      .select("id, amazon_order_id, sku, asin, jan_code, condition_id")
       .eq("reconciliation_status", AMAZON_ORDER_STATUS_PENDING)
       .order("created_at", { ascending: true });
 
@@ -104,6 +104,17 @@ export async function POST() {
 
     const needJan = pendingForJanFill.filter((r) => !String(r.jan_code ?? "").trim());
     if (needJan.length > 0) {
+      const spClient = tryCreateSpClient();
+
+      const uniqueOrderIds = [
+        ...new Set(
+          needJan
+            .map((r) => String(r.amazon_order_id ?? "").trim())
+            .filter(Boolean)
+        ),
+      ];
+      const orderSkuToCondition = await buildAmazonOrderSkuToConditionMap(spClient, uniqueOrderIds);
+
       const uniqueAsins = new Set<string>();
       for (const row of needJan) {
         const sku = String(row.sku ?? "").trim();
@@ -113,33 +124,48 @@ export async function POST() {
       }
 
       const asinToJan =
-        uniqueAsins.size > 0
-          ? await buildAsinToJanMap(supabase, tryCreateSpClient(), [...uniqueAsins])
-          : new Map<string, string>();
+        uniqueAsins.size > 0 ? await buildAsinToJanMap(supabase, spClient, [...uniqueAsins]) : new Map<string, string>();
 
-      const janToOrderIds = new Map<string, number[]>();
+      type Patch = { jan: string | null; condition: string };
+      const groupKey = (p: Patch) => `${p.jan ?? ""}\t${p.condition}`;
+      const patches = new Map<string, Patch & { ids: number[] }>();
+
       for (const row of needJan) {
         const sku = String(row.sku ?? "").trim();
-        let resolved: string | null = null;
-        if (is13DigitJan(sku)) resolved = sku;
+        const orderId = String(row.amazon_order_id ?? "").trim();
+        const condKey = `${orderId}\t${sku}`;
+        const prevCond = String(row.condition_id ?? "").trim() || "New";
+        const condition = orderSkuToCondition.get(condKey) ?? prevCond;
+
+        let jan: string | null = null;
+        if (is13DigitJan(sku)) jan = sku;
         else {
           const asin = row.asin != null ? String(row.asin).trim() : "";
-          if (asin.length >= 10) resolved = asinToJan.get(asin) ?? null;
+          if (asin.length >= 10) jan = asinToJan.get(asin) ?? null;
         }
-        if (!resolved) continue;
-        const list = janToOrderIds.get(resolved) ?? [];
-        list.push(row.id);
-        janToOrderIds.set(resolved, list);
+
+        const patch: Patch = { jan, condition };
+        const k = groupKey(patch);
+        let g = patches.get(k);
+        if (!g) {
+          g = { jan, condition, ids: [] };
+          patches.set(k, g);
+        }
+        g.ids.push(row.id);
       }
 
       const nowJanIso = new Date().toISOString();
-      for (const [jan, ids] of janToOrderIds) {
+      for (const { jan, condition, ids } of patches.values()) {
         for (const idChunk of chunkIds(ids, 200)) {
-          const { error: upJanErr } = await supabase
+          const { error: upErr } = await supabase
             .from("amazon_orders")
-            .update({ jan_code: jan, updated_at: nowJanIso })
+            .update({
+              jan_code: jan,
+              condition_id: condition,
+              updated_at: nowJanIso,
+            })
             .in("id", idChunk);
-          if (upJanErr) throw upJanErr;
+          if (upErr) throw upErr;
         }
       }
     }

@@ -157,3 +157,7 @@ export async function resolveJanForAmazonOrderLine(
 
   return null;
 }
+
+/** Orders API の OrderItem（ConditionId 等）— 実装は `amazon-sp-order-items` */
+export type { AmazonOrderItemLine } from "@/lib/amazon-sp-order-items";
+export { buildAmazonOrderSkuToConditionMap, normalizeOrderItemConditionId } from "@/lib/amazon-sp-order-items";
