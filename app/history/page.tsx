@@ -50,9 +50,9 @@ type CsvImportPreviewRow = {
   product_name: string;
   brand: string;
   model_number: string;
-  /** CSV の created_at 列（エイリアス含む） */
+  /** 仕入日（CSV: created_at / 仕入日 等） */
   created_at: string;
-  /** CSV の registered_at 列（あれば） */
+  /** 登録日（CSV: registered_at / 登録日 等） */
   registered_at: string;
   effective_unit_price: string;
   status: string;
@@ -623,7 +623,9 @@ export default function HistoryPage() {
     jan_code: string;
     product_name: string;
     model_number: string;
+    /** 仕入日 */
     created_at: string;
+    /** 登録日 */
     registered_at: string;
     effective_unit_price: string;
     status: string;
@@ -687,8 +689,8 @@ export default function HistoryPage() {
           jan_code: ["jan_code", "jan", "janコード"],
           product_name: ["product_name", "商品名"],
           model_number: ["model_number", "型番"],
-          created_at: ["created_at", "仕入日", "登録日", "インポート日付"],
-          registered_at: ["registered_at"],
+          created_at: ["created_at", "仕入日", "インポート日付"],
+          registered_at: ["registered_at", "登録日"],
           effective_unit_price: ["effective_unit_price", "実質価格", "実質単価"],
           status: ["status", "状態"],
           brand: ["brand", "ブランド"],
@@ -814,8 +816,8 @@ export default function HistoryPage() {
     setSaving(true);
     try {
       const items = csvImportPreview.map((row) => {
-        const isoRegisteredAt = row.registered_at ? slashedToIsoDate(row.registered_at) : "";
-        const isoCreatedAt = row.created_at ? slashedToIsoDate(row.created_at) : "";
+        const isoCreated = row.created_at ? slashedToIsoDate(row.created_at) : "";
+        const isoRegistered = row.registered_at ? slashedToIsoDate(row.registered_at) : "";
         return {
           id: row.id ? Number(row.id) : undefined,
           jan_code: row.jan_code || undefined,
@@ -826,8 +828,8 @@ export default function HistoryPage() {
           genre: row.genre || undefined,
           base_price: row.base_price === "" ? undefined : Number(row.base_price),
           effective_unit_price: row.effective_unit_price === "" ? undefined : Number(row.effective_unit_price),
-          registered_at: isoRegisteredAt ? `${isoRegisteredAt}T00:00:00.000Z` : undefined,
-          created_at: isoCreatedAt ? `${isoCreatedAt}T00:00:00.000Z` : undefined,
+          created_at: isoCreated ? `${isoCreated}T00:00:00.000Z` : undefined,
+          registered_at: isoRegistered ? `${isoRegistered}T00:00:00.000Z` : undefined,
           condition_type: statusToCondition(row.status),
         };
       });
@@ -1477,11 +1479,12 @@ export default function HistoryPage() {
               )}
             </div>
             <div className="overflow-auto flex-1 p-4">
-              <table className="w-full text-sm text-left min-w-[900px]">
+              <table className="w-full text-sm text-left min-w-[1000px]">
                 <thead className="bg-slate-50 border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold tracking-wider">
                   <tr>
                     <th className="px-3 py-2 whitespace-nowrap">警告</th>
                     <th className="px-3 py-2 whitespace-nowrap">仕入日</th>
+                    <th className="px-3 py-2 whitespace-nowrap">登録日</th>
                     <th className="px-3 py-2 whitespace-nowrap">仕入先</th>
                     <th className="px-3 py-2 whitespace-nowrap">JAN</th>
                     <th className="px-3 py-2 whitespace-nowrap min-w-[160px]">商品名</th>
@@ -1509,7 +1512,8 @@ export default function HistoryPage() {
                           {row.warnings.length === 0 && <span className="text-slate-400 text-xs">—</span>}
                         </div>
                       </td>
-                      <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{row.registered_at || row.created_at || "—"}</td>
+                      <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{row.created_at || "—"}</td>
+                      <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{row.registered_at || "—"}</td>
                       <td className="px-3 py-2 text-slate-700 whitespace-nowrap">{row.supplierRaw || row.supplierKana || "—"}</td>
                       <td className="px-3 py-2 font-mono text-xs whitespace-nowrap">{row.jan_code || "—"}</td>
                       <td className="px-3 py-2 font-medium text-slate-900 min-w-[140px]">{row.product_name || "—"}</td>
