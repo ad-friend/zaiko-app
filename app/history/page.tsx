@@ -91,6 +91,13 @@ function exitTypeLabel(exitType: string | null | undefined): string {
   }
 }
 
+/** inbound_items.condition_type（new / used 等）を一覧・CSV・検索用ラベルに */
+function statusLabel(c: string | null | undefined): string {
+  if (c === "new") return "新品";
+  if (c === "used") return "中古";
+  return c ?? "";
+}
+
 type EditDraft = {
   brand: string;
   product_name: string;
@@ -235,6 +242,8 @@ export default function HistoryPage() {
 
   const getSortValue = (row: RecordRow, key: string): string | number => {
     switch (key) {
+      case "id":
+        return row.id;
       case "registered_at":
         return row.registered_at ?? row.created_at ?? "";
       case "created_at":
@@ -267,16 +276,21 @@ export default function HistoryPage() {
     let list = rows;
     const term = searchTerm.trim().toLowerCase();
     if (term) {
-      list = list.filter(
-        (r) =>
+      list = list.filter((r) => {
+        const condRaw = (r.condition_type ?? "").toLowerCase();
+        const condLabel = statusLabel(r.condition_type).toLowerCase();
+        return (
+          String(r.id).includes(term) ||
           (r.jan_code ?? "").toLowerCase().includes(term) ||
           (r.brand ?? "").toLowerCase().includes(term) ||
           (r.product_name ?? "").toLowerCase().includes(term) ||
           (r.model_number ?? "").toLowerCase().includes(term) ||
-          // 🌟 変更点：検索時も「正式名称」と「カナ」の両方で引っかかるようにする
-          (getSupplierName(r.header?.supplier)).toLowerCase().includes(term) ||
-          (r.header?.supplier ?? "").toLowerCase().includes(term)
-      );
+          getSupplierName(r.header?.supplier).toLowerCase().includes(term) ||
+          (r.header?.supplier ?? "").toLowerCase().includes(term) ||
+          condRaw.includes(term) ||
+          condLabel.includes(term)
+        );
+      });
     }
     const { key, direction } = sortConfig;
     if (key) {
@@ -583,12 +597,6 @@ export default function HistoryPage() {
     const s = v === null || v === undefined ? "" : String(v);
     if (s.includes(",") || s.includes('"') || s.includes("\n")) return `"${s.replace(/"/g, '""')}"`;
     return s;
-  };
-
-  const statusLabel = (c: string | null | undefined): string => {
-    if (c === "new") return "新品";
-    if (c === "used") return "中古";
-    return c ?? "";
   };
 
   const handleCsvExport = useCallback(() => {
@@ -1000,7 +1008,7 @@ export default function HistoryPage() {
                     type="text"
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
-                    placeholder="商品名やJAN、仕入先で検索..."
+                    placeholder="ID・JAN・商品名・仕入先・新品/中古・new/used などで検索..."
                     className={`${inputClass} pl-10 rounded-lg border-0 focus-visible:ring-0`}
                   />
                 </div>
@@ -1119,11 +1127,28 @@ export default function HistoryPage() {
             {!loading && !error && rows.length > 0 && (
               <div className="relative w-full max-h-[calc(100vh-280px)] overflow-y-auto border border-slate-200 rounded-md">
                 <div className="w-full min-w-0 overflow-x-auto">
-                  <table className="w-full min-w-[1080px] border-collapse text-sm text-left">
+                  <table className="w-full min-w-[1160px] border-collapse text-sm text-left">
                     <thead className="sticky top-0 z-10 bg-white border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold tracking-wider shadow-sm">
                     <tr>
                       <th className="w-10 px-1 py-3 text-center align-middle whitespace-nowrap"></th>
-                      <th className="px-0.5 py-3 text-center font-mono text-xs align-middle whitespace-nowrap">ID</th>
+                      <th className="px-0.5 py-3 text-center font-mono text-xs align-middle whitespace-nowrap">
+                        <button
+                          type="button"
+                          onClick={() => requestSort("id")}
+                          className="inline-flex items-center justify-center gap-1 whitespace-nowrap hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded mx-auto"
+                        >
+                          ID
+                          {sortConfig.key === "id" ? (
+                            sortConfig.direction === "asc" ? (
+                              <ArrowUp className="h-3.5 w-3.5 shrink-0" />
+                            ) : (
+                              <ArrowDown className="h-3.5 w-3.5 shrink-0" />
+                            )
+                          ) : (
+                            <ArrowUpDown className="h-3.5 w-3.5 shrink-0 opacity-50" />
+                          )}
+                        </button>
+                      </th>
                       <th className="px-1.5 py-3 align-middle whitespace-nowrap">
                         <button type="button" onClick={() => requestSort("created_at")} className="inline-flex items-center gap-1 whitespace-nowrap hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           仕入日
@@ -1152,6 +1177,24 @@ export default function HistoryPage() {
                         <button type="button" onClick={() => requestSort("jan_code")} className="inline-flex items-center gap-1 whitespace-nowrap hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           JAN
                           {sortConfig.key === "jan_code" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5 shrink-0" /> : <ArrowDown className="h-3.5 w-3.5 shrink-0" />) : <ArrowUpDown className="h-3.5 w-3.5 shrink-0 opacity-50" />}
+                        </button>
+                      </th>
+                      <th className="px-1.5 py-3 align-middle whitespace-nowrap">
+                        <button
+                          type="button"
+                          onClick={() => requestSort("condition_type")}
+                          className="inline-flex items-center gap-1 whitespace-nowrap hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded"
+                        >
+                          コンディション
+                          {sortConfig.key === "condition_type" ? (
+                            sortConfig.direction === "asc" ? (
+                              <ArrowUp className="h-3.5 w-3.5 shrink-0" />
+                            ) : (
+                              <ArrowDown className="h-3.5 w-3.5 shrink-0" />
+                            )
+                          ) : (
+                            <ArrowUpDown className="h-3.5 w-3.5 shrink-0 opacity-50" />
+                          )}
                         </button>
                       </th>
                       <th className="min-w-0 max-w-[200px] px-1.5 py-3 align-middle">
@@ -1392,6 +1435,20 @@ export default function HistoryPage() {
                           </td>
                           <td className="min-w-0 px-1.5 py-3 font-mono text-xs align-middle whitespace-nowrap">
                             {row.jan_code ?? "—"}
+                          </td>
+                          <td className="min-w-0 px-1.5 py-3 align-middle whitespace-nowrap text-slate-700">
+                            <span
+                              className={
+                                row.condition_type === "new"
+                                  ? "font-medium text-emerald-700"
+                                  : row.condition_type === "used" || (row.condition_type && row.condition_type !== "new")
+                                    ? "font-medium text-amber-800"
+                                    : "text-slate-500"
+                              }
+                              title={row.condition_type ?? undefined}
+                            >
+                              {statusLabel(row.condition_type) || "—"}
+                            </span>
                           </td>
                           <td className="min-w-0 max-w-[200px] px-1.5 py-3 font-medium text-slate-900 align-middle">
                             {isEditMode ? (
