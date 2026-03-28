@@ -814,9 +814,8 @@ export default function HistoryPage() {
     setSaving(true);
     try {
       const items = csvImportPreview.map((row) => {
-        const rawDate = row.registered_at || row.created_at;
-        const isoDate = rawDate ? slashedToIsoDate(rawDate) : "";
-        const isoTs = isoDate ? `${isoDate}T00:00:00.000Z` : undefined;
+        const isoRegisteredAt = row.registered_at ? slashedToIsoDate(row.registered_at) : "";
+        const isoCreatedAt = row.created_at ? slashedToIsoDate(row.created_at) : "";
         return {
           id: row.id ? Number(row.id) : undefined,
           jan_code: row.jan_code || undefined,
@@ -827,8 +826,8 @@ export default function HistoryPage() {
           genre: row.genre || undefined,
           base_price: row.base_price === "" ? undefined : Number(row.base_price),
           effective_unit_price: row.effective_unit_price === "" ? undefined : Number(row.effective_unit_price),
-          created_at: isoTs,
-          registered_at: isoTs,
+          registered_at: isoRegisteredAt ? `${isoRegisteredAt}T00:00:00.000Z` : undefined,
+          created_at: isoCreatedAt ? `${isoCreatedAt}T00:00:00.000Z` : undefined,
           condition_type: statusToCondition(row.status),
         };
       });

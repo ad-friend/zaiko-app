@@ -161,7 +161,10 @@ export async function PATCH(request: NextRequest) {
           
           // そのグループのアイテム全てに、作ったばかりのヘッダーIDをセットする
           for (const item of groupItems) {
-            const ts = item.created_at || item.registered_at;
+            const c = item.created_at ? String(item.created_at) : null;
+            const r = item.registered_at ? String(item.registered_at) : null;
+            const createdAt = c || r || new Date().toISOString();
+            const registeredAt = r || c || undefined;
             allItemsToInsert.push({
               header_id: headerId,
               jan_code: item.jan_code ?? null,
@@ -173,8 +176,8 @@ export async function PATCH(request: NextRequest) {
               base_price: Number(item.base_price ?? 0),
               is_fixed_price: false,
               effective_unit_price: Number(item.effective_unit_price ?? 0),
-              created_at: ts ? String(ts) : new Date().toISOString(),
-              registered_at: ts ? String(ts) : undefined,
+              created_at: createdAt,
+              registered_at: registeredAt,
             });
 
             // マスタ登録用の配列も同時に作る
