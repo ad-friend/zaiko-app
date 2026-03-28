@@ -12,10 +12,7 @@ export type ProductRow = {
   current_stock: number;
 };
 
-/** 未販売・未調整: settled_at / exit_type が NULL または空文字の inbound_items を JAN ごとに数える */
-const ACTIVE_STOCK_SETTLED_OR = 'settled_at.is.null,settled_at.eq.""';
-const ACTIVE_STOCK_EXIT_OR = 'exit_type.is.null,exit_type.eq.""';
-
+/** 未販売・未調整: settled_at / exit_type が NULL の inbound_items を JAN ごとに数える */
 async function countActiveStockByJan(): Promise<Map<string, number>> {
   const counts = new Map<string, number>();
   const pageSize = 1000;
@@ -24,8 +21,8 @@ async function countActiveStockByJan(): Promise<Map<string, number>> {
     const { data, error } = await supabase
       .from("inbound_items")
       .select("jan_code")
-      .or(ACTIVE_STOCK_SETTLED_OR)
-      .or(ACTIVE_STOCK_EXIT_OR)
+      .is("settled_at", null)
+      .is("exit_type", null)
       .order("id", { ascending: true })
       .range(from, from + pageSize - 1);
     if (error) throw error;
@@ -46,8 +43,8 @@ async function countActiveStockForJan(jan: string): Promise<number> {
     .from("inbound_items")
     .select("*", { count: "exact", head: true })
     .eq("jan_code", jan)
-    .or(ACTIVE_STOCK_SETTLED_OR)
-    .or(ACTIVE_STOCK_EXIT_OR);
+    .is("settled_at", null)
+    .is("exit_type", null);
   if (error) throw error;
   return count ?? 0;
 }
