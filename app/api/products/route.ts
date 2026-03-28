@@ -8,8 +8,48 @@ export type ProductRow = {
   product_name: string;
   model_number: string | null;
   created_at: string;
+  /** GET レスポンスでは inbound_items から算出した有効在庫数（未販売・未調整） */
   current_stock: number;
 };
+
+/** settled_at / exit_type が NULL の inbound_items を JAN ごとに数える */
+async function countActiveStockByJan(): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  const pageSize = 1000;
+  let from = 0;
+  for (;;) {
+    const { data, error } = await supabase
+      .from("inbound_items")
+      .select("jan_code")
+      .is("settled_at", null)
+      .is("exit_type", null)
+      .order("id", { ascending: true })
+      .range(from, from + pageSize - 1);
+    if (error) throw error;
+    if (!data?.length) break;
+    for (const row of data) {
+      const j = row.jan_code;
+      if (j == null) continue;
+      const key = String(j).trim();
+      if (!key) continue;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    if (data.length < pageSize) break;
+    from += pageSize;
+  }
+  return counts;
+}
+
+async function countActiveStockForJan(jan: string): Promise<number> {
+  const { count, error } = await supabase
+    .from("inbound_items")
+    .select("*", { count: "exact", head: true })
+    .eq("jan_code", jan)
+    .is("settled_at", null)
+    .is("exit_type", null);
+  if (error) throw error;
+  return count ?? 0;
+}
 
 /** GET: 一覧 または ?jan= でJANコード検索（1件） */
 export async function GET(request: NextRequest) {
@@ -18,7 +58,9 @@ export async function GET(request: NextRequest) {
     if (jan) {
       const { data, error } = await supabase.from("products").select("*").eq("jan_code", jan).maybeSingle();
       if (error) throw error;
-      return NextResponse.json(data ?? null);
+      if (!data) return NextResponse.json(null);
+      const computed = await countActiveStockForJan(jan);
+      return NextResponse.json({ ...data, current_stock: computed });
     }
     const { data, error } = await supabase
       .from("products")
@@ -26,7 +68,13 @@ export async function GET(request: NextRequest) {
       .order("product_name", { ascending: true })
       .limit(50000);
     if (error) throw error;
-    return NextResponse.json(data ?? []);
+    const rows = data ?? [];
+    const stockByJan = await countActiveStockByJan();
+    const enriched = rows.map((p: Record<string, unknown>) => {
+      const jc = String(p.jan_code ?? "").trim();
+      return { ...p, current_stock: stockByJan.get(jc) ?? 0 };
+    });
+    return NextResponse.json(enriched);
   } catch (e: any) {
     if (e.code === "42P01" || e.message?.includes("does not exist")) {
       return NextResponse.json([]);

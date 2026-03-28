@@ -44,7 +44,6 @@ export default function ProductsPage() {
   const [sortConfig, setSortConfig] = useState<{ key: string | null; direction: "asc" | "desc" }>({ key: null, direction: "asc" });
   const [searchTerm, setSearchTerm] = useState("");
   const [saving, setSaving] = useState(false);
-  const [savingStockJan, setSavingStockJan] = useState<string | null>(null);
   const [toast, setToast] = useState<{ message: string; variant: "success" | "error" } | null>(null);
   const [isInferring, setIsInferring] = useState(false);
   const csvInputRef = useRef<HTMLInputElement>(null);
@@ -59,54 +58,13 @@ export default function ProductsPage() {
     try {
       const res = await fetch("/api/products");
       if (res.ok) {
-        // ▼ ここで1回だけ res.json() を読み込んで data に保存します
         const data = (await res.json()) as (ProductRow & { current_stock?: number | null })[];
-        // ▼▼▼ テスト検証用コード ▼▼▼
-        const testJan = "0840356853925"; // ←ここに表示されないJANコードを入れてください
-        const targetProduct = data.find((item) => item.jan_code === testJan);
-        console.log("--- フロントエンド検証用 ---");
-        console.log("APIから届いた全件数:", data.length);
-        console.log("探している商品:", targetProduct || "APIから届いていません！");
-        console.log("-------------------");
-        // ▲▲▲ ここまで ▲▲▲
         setRows(data.map(normalizeProductRow));
       }
     } finally {
       setLoading(false);
     }
   }, []);
-
-  const saveStockIfChanged = useCallback(
-    async (jan_code: string, previous: number, raw: string) => {
-      const n = raw === "" ? 0 : Math.max(0, Math.floor(Number(raw)));
-      if (!Number.isFinite(n) || n < 0) {
-        setToast({ message: "在庫数は0以上の整数にしてください", variant: "error" });
-        await fetchRows();
-        return;
-      }
-      if (n === previous) return;
-      setSavingStockJan(jan_code);
-      try {
-        const res = await fetch("/api/products", {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ jan_code, current_stock: n }),
-        });
-        if (!res.ok) {
-          const j = await res.json().catch(() => ({}));
-          throw new Error((j as { error?: string }).error || "更新に失敗しました");
-        }
-        setRows((prev) => prev.map((r) => (r.jan_code === jan_code ? { ...r, current_stock: n } : r)));
-        setToast({ message: "在庫数を更新しました", variant: "success" });
-      } catch (e) {
-        setToast({ message: e instanceof Error ? e.message : "在庫の更新に失敗しました", variant: "error" });
-        await fetchRows();
-      } finally {
-        setSavingStockJan(null);
-      }
-    },
-    [fetchRows]
-  );
 
   useEffect(() => {
     fetchRows();
@@ -324,7 +282,7 @@ const handleJanCodeCheck = async (jan: string) => {
     }
     setSaving(true);
     try {
-      const res = await fetch("/api/products", {
+        const res = await fetch("/api/products", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -332,7 +290,6 @@ const handleJanCodeCheck = async (jan: string) => {
           brand: editDraft.brand,
           product_name: editDraft.product_name.trim(),
           model_number: editDraft.model_number,
-          current_stock: editDraft.current_stock,
         }),
       });
       if (!res.ok) {
@@ -491,7 +448,7 @@ const handleJanCodeCheck = async (jan: string) => {
                       </th>
                       <th className="px-6 py-4 w-36 whitespace-nowrap">
                         <div className="flex justify-end">
-                          <SortBtn k="current_stock">現在の在庫数</SortBtn>
+                          <SortBtn k="current_stock">現在庫数</SortBtn>
                         </div>
                       </th>
                       <th className="px-6 py-4 w-24 text-center">操作</th>
@@ -537,40 +494,8 @@ const handleJanCodeCheck = async (jan: string) => {
                             row.model_number ?? "—"
                           )}
                         </td>
-                        <td className="px-6 py-4 text-right tabular-nums whitespace-nowrap">
-                          {editingJanCode === row.jan_code && editDraft ? (
-                            <input
-                              type="number"
-                              min={0}
-                              step={1}
-                              value={editDraft.current_stock}
-                              onChange={(e) => {
-                                const v = e.target.value === "" ? 0 : Math.max(0, Math.floor(Number(e.target.value)));
-                                setEditDraft({ ...editDraft, current_stock: Number.isFinite(v) ? v : 0 });
-                              }}
-                              className={`${inputClass} h-9 w-24 text-right ml-auto block`}
-                            />
-                          ) : (
-                            <div className="relative flex justify-end items-center gap-2">
-                              {savingStockJan === row.jan_code && (
-                                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" aria-hidden />
-                              )}
-                              <input
-                                key={`stock-${row.jan_code}-${row.current_stock}`}
-                                type="number"
-                                min={0}
-                                step={1}
-                                defaultValue={row.current_stock}
-                                disabled={saving || savingStockJan !== null}
-                                title="編集後、フォーカスを外すと保存されます"
-                                onBlur={(e) => void saveStockIfChanged(row.jan_code, row.current_stock, e.target.value)}
-                                onKeyDown={(e) => {
-                                  if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                                }}
-                                className={`${inputClass} h-9 w-24 text-right disabled:opacity-60`}
-                              />
-                            </div>
-                          )}
+                        <td className="px-6 py-4 text-right tabular-nums whitespace-nowrap text-slate-800">
+                          <span className="inline-block min-w-[4.5rem] text-right">{row.current_stock} 個</span>
                         </td>
                         <td className="px-6 py-4 text-center">
                           {editingJanCode === row.jan_code ? (
@@ -594,7 +519,7 @@ const handleJanCodeCheck = async (jan: string) => {
                                 setEditingJanCode(row.jan_code);
                                 setEditDraft({ ...row });
                               }}
-                              disabled={saving || savingStockJan !== null}
+                              disabled={saving}
                               className={`${buttonClass} h-9 px-2 bg-white border border-slate-200 disabled:opacity-50`}
                             >
                               <Pencil className="h-4 w-4" />
