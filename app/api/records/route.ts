@@ -128,15 +128,59 @@ export async function GET(request: NextRequest) {
   }
 }
 
-export async function DELETE(request: NextRequest) {
-  try {
-    const body = await request.json();
-    const ids = Array.isArray(body.ids) ? body.ids.map(Number).filter(Boolean) : [];
-    if (ids.length === 0) return NextResponse.json({ error: "idsが必要です" }, { status: 400 });
-    const { error } = await supabase.from("inbound_items").delete().in("id", ids);
-    if (error) throw error;
-    return NextResponse.json({ ok: true });
-  } catch (e: any) {
-    return NextResponse.json({ error: e.message }, { status: 500 });
+function normalizeDeleteIds(raw: unknown): number[] {
+  if (!Array.isArray(raw)) return [];
+  const out: number[] = [];
+  for (const x of raw) {
+    const n = typeof x === "number" ? x : Number(String(x).trim());
+    if (!Number.isInteger(n) || n < 1) continue;
+    out.push(n);
   }
+  return [...new Set(out)];
+}
+
+export async function DELETE(request: NextRequest) {
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "リクエストボディが不正なJSONです" }, { status: 400 });
+  }
+  if (body === null || typeof body !== "object") {
+    return NextResponse.json({ error: "リクエストボディが必要です" }, { status: 400 });
+  }
+  const ids = normalizeDeleteIds((body as { ids?: unknown }).ids);
+  if (ids.length === 0) {
+    return NextResponse.json({ error: "削除対象の ids を1件以上、正しい整数で指定してください" }, { status: 400 });
+  }
+
+  const CHUNK = 120;
+  let deleted = 0;
+  try {
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const chunk = ids.slice(i, i + CHUNK);
+      const { data, error } = await supabase.from("inbound_items").delete().in("id", chunk).select("id");
+      if (error) {
+        console.error("[records] DELETE chunk error:", error);
+        return NextResponse.json({ error: error.message || "inbound_items の削除に失敗しました" }, { status: 500 });
+      }
+      deleted += data?.length ?? 0;
+    }
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "削除処理中にエラーが発生しました";
+    console.error("[records] DELETE error:", e);
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+
+  if (deleted === 0) {
+    return NextResponse.json(
+      {
+        error:
+          "いずれの id にも該当する inbound_items が削除できませんでした（存在しない・既に削除済み、または権限・RLSの制限の可能性があります）",
+      },
+      { status: 400 }
+    );
+  }
+
+  return NextResponse.json({ ok: true, deleted, requested: ids.length });
 }

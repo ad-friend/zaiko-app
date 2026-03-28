@@ -557,7 +557,11 @@ export default function HistoryPage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ ids: Array.from(selectedIds) }),
         });
-        if (!res.ok) throw new Error("削除に失敗しました");
+        const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; deleted?: number };
+        if (!res.ok || data.ok !== true) {
+          alert(data.error || "削除に失敗しました");
+          return;
+        }
         setSelectedIds(new Set());
         await fetchRecords();
       } catch (e) {
