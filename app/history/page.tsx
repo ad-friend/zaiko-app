@@ -980,111 +980,115 @@ export default function HistoryPage() {
             )}
           </div>
 
-          {!loading && !error && rows.length > 0 && (
-            <div className="px-6 py-3 border-b border-slate-100 bg-white shrink-0">
-              <div className="relative rounded-lg border border-slate-200 bg-white shadow-sm focus-within:ring-2 focus-within:ring-primary/20 focus-within:border-primary/40 transition-all max-w-md">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-                <input
-                  type="text"
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  placeholder="商品名やJAN、仕入先で検索..."
-                  className={`${inputClass} pl-10 rounded-lg border-0 focus-visible:ring-0`}
-                />
+          {!loading && !error && (
+            <>
+              <div className="px-6 py-3 border-b border-slate-100 bg-white shrink-0">
+                <div className="relative rounded-lg border border-slate-200 bg-white shadow-sm focus-within:ring-2 focus-within:ring-primary/20 focus-within:border-primary/40 transition-all max-w-md">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                  <input
+                    type="text"
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    placeholder="商品名やJAN、仕入先で検索..."
+                    className={`${inputClass} pl-10 rounded-lg border-0 focus-visible:ring-0`}
+                  />
+                </div>
               </div>
-            </div>
-          )}
 
-          {!loading && !error && rows.length > 0 && (
-            <div className="flex flex-wrap items-center gap-3 px-6 py-3 border-b border-slate-100 bg-white shrink-0">
-              {!isBulkEditing ? (
-                <>
-                  {/* 左側固定：全選択、操作プルダウン、実行ボタン */}
-                  <div className="flex items-center gap-3">
-                    <label className="flex items-center gap-2 cursor-pointer text-sm text-slate-600">
-                        <input
-                        type="checkbox"
-                        checked={rows.length > 0 && selectedIds.size === rows.length}
-                        onChange={toggleSelectAll}
-                        className="rounded border-slate-300 text-primary focus:ring-primary"
-                        />
-                        全選択/解除
-                    </label>
-                    <select
-                        value={bulkAction}
-                        onChange={(e) => setBulkAction(e.target.value)}
-                        className={`${inputClass} w-auto min-w-[120px] h-9 py-1`}
+              <div className="flex flex-wrap items-center gap-3 px-6 py-3 border-b border-slate-100 bg-white shrink-0">
+                {!isBulkEditing ? (
+                  <>
+                    {rows.length > 0 && (
+                      <div className="flex items-center gap-3">
+                        <label className="flex items-center gap-2 cursor-pointer text-sm text-slate-600">
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.size === rows.length}
+                            onChange={toggleSelectAll}
+                            className="rounded border-slate-300 text-primary focus:ring-primary"
+                          />
+                          全選択/解除
+                        </label>
+                        <select
+                          value={bulkAction}
+                          onChange={(e) => setBulkAction(e.target.value)}
+                          className={`${inputClass} w-auto min-w-[120px] h-9 py-1`}
+                        >
+                          <option value="bulk_delete">一括削除</option>
+                        </select>
+                        <button
+                          type="button"
+                          onClick={executeBulkAction}
+                          disabled={selectedIds.size === 0 || saving}
+                          className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300 disabled:opacity-50`}
+                        >
+                          実行
+                        </button>
+                      </div>
+                    )}
+                    <div
+                      className={
+                        rows.length > 0
+                          ? "ml-auto flex flex-wrap items-center gap-3"
+                          : "ml-auto flex w-full flex-wrap items-center justify-end gap-3"
+                      }
                     >
-                        <option value="bulk_delete">一括削除</option>
-                    </select>
-                    <button
+                      <input
+                        type="file"
+                        accept=".csv"
+                        ref={csvInputRef}
+                        className="hidden"
+                        onChange={handleCsvImport}
+                      />
+                      <button
                         type="button"
-                        onClick={executeBulkAction}
-                        disabled={selectedIds.size === 0 || saving}
+                        onClick={handleCsvExport}
+                        className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300`}
+                      >
+                        <Download className="mr-2 h-4 w-4" />
+                        CSV出力（Download）
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => csvInputRef.current?.click()}
+                        disabled={saving}
                         className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300 disabled:opacity-50`}
-                    >
-                        実行
-                    </button>
-                  </div>
-                  
-                  {/* 右側：CSV出力・取込、一括編集 */}
-                  <div className="ml-auto flex items-center gap-3">
-                    <input
-                      type="file"
-                      accept=".csv"
-                      ref={csvInputRef}
-                      className="hidden"
-                      onChange={handleCsvImport}
-                    />
+                      >
+                        <Upload className="mr-2 h-4 w-4" />
+                        CSV取込（Upload）
+                      </button>
+                      {rows.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={startBulkEdit}
+                          className={`${buttonClass} bg-white text-primary border border-primary/20 hover:bg-primary/5`}
+                        >
+                          一括編集
+                        </button>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <div className="ml-auto flex w-full flex-wrap items-center justify-end gap-3">
                     <button
                       type="button"
-                      onClick={handleCsvExport}
+                      onClick={saveBulkEdit}
+                      disabled={saving}
+                      className={`${buttonClass} bg-primary text-white hover:bg-primary/90`}
+                    >
+                      {saving ? "保存中..." : "全保存"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={cancelBulkEdit}
                       className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300`}
                     >
-                      <Download className="mr-2 h-4 w-4" />
-                      CSV出力（Download）
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => csvInputRef.current?.click()}
-                      disabled={saving}
-                      className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300 disabled:opacity-50`}
-                    >
-                      <Upload className="mr-2 h-4 w-4" />
-                      CSV取込（Upload）
-                    </button>
-                    <button
-                        type="button"
-                        onClick={startBulkEdit}
-                        className={`${buttonClass} bg-white text-primary border border-primary/20 hover:bg-primary/5`}
-                    >
-                        一括編集
+                      全解除
                     </button>
                   </div>
-                </>
-              ) : (
-                <>
-                  {/* 右側：保存、解除ボタン */}
-                  <div className="ml-auto flex items-center gap-3">
-                    <button
-                        type="button"
-                        onClick={saveBulkEdit}
-                        disabled={saving}
-                        className={`${buttonClass} bg-primary text-white hover:bg-primary/90`}
-                    >
-                        {saving ? "保存中..." : "全保存"}
-                    </button>
-                    <button
-                        type="button"
-                        onClick={cancelBulkEdit}
-                        className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300`}
-                    >
-                        全解除
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
+                )}
+              </div>
+            </>
           )}
 
           <div className="p-6">
@@ -1097,7 +1101,9 @@ export default function HistoryPage() {
               </div>
             )}
             {!loading && !error && rows.length === 0 && (
-              <p className="text-sm text-slate-400 py-8 text-center">登録データがありません</p>
+              <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/50 py-16 text-center">
+                <p className="text-sm font-medium text-slate-600">データがありません</p>
+              </div>
             )}
             {!loading && !error && rows.length > 0 && (
               <div className="relative w-full min-w-0 max-h-[calc(100vh-280px)] overflow-y-auto border border-slate-200 rounded-md">
