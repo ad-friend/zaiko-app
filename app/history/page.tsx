@@ -40,6 +40,7 @@ type ProductMaster = {
   product_name: string | null;
   brand: string | null;
   model_number: string | null;
+  current_stock?: number;
 };
 
 /** CSV取込プレビュー用：マスタ照合・補完・警告フラグ付きの1行 */

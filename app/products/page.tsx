@@ -3,7 +3,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Pencil, Save, X, Download, Upload, Search, ArrowUp, ArrowDown, ArrowUpDown } from "lucide-react";
 
-type ProductRow = { jan_code: string; brand: string | null; product_name: string; model_number: string | null; created_at: string };
+type ProductRow = {
+  jan_code: string;
+  brand: string | null;
+  product_name: string;
+  model_number: string | null;
+  created_at: string;
+  current_stock: number;
+};
+
+function normalizeProductRow(r: ProductRow & { current_stock?: number | null }): ProductRow {
+  const n = Number(r.current_stock);
+  return {
+    ...r,
+    current_stock: Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0,
+  };
+}
 
 function DocumentIcon({ className }: { className?: string }) {
   return (
@@ -37,19 +52,16 @@ export default function ProductsPage() {
       const res = await fetch("/api/products");
       if (res.ok) {
         // ▼ ここで1回だけ res.json() を読み込んで data に保存します
-        const data = (await res.json()) as ProductRow[]; 
-        
+        const data = (await res.json()) as (ProductRow & { current_stock?: number | null })[];
         // ▼▼▼ テスト検証用コード ▼▼▼
-        const testJan = '0840356853925'; // ←ここに表示されないJANコードを入れてください
+        const testJan = "0840356853925"; // ←ここに表示されないJANコードを入れてください
         const targetProduct = data.find((item) => item.jan_code === testJan);
-        console.log('--- フロントエンド検証用 ---');
-        console.log('APIから届いた全件数:', data.length);
-        console.log('探している商品:', targetProduct || 'APIから届いていません！');
-        console.log('-------------------');
+        console.log("--- フロントエンド検証用 ---");
+        console.log("APIから届いた全件数:", data.length);
+        console.log("探している商品:", targetProduct || "APIから届いていません！");
+        console.log("-------------------");
         // ▲▲▲ ここまで ▲▲▲
-
-        // ▼ さきほど保存した data をそのままセットします（ここで res.json() と書くとエラーになります）
-        setRows(data);
+        setRows(data.map(normalizeProductRow));
       }
     } finally {
       setLoading(false);
@@ -69,13 +81,20 @@ export default function ProductsPage() {
     const t = searchTerm.trim().toLowerCase();
     if (t)
       list = list.filter((r) =>
-        [r.jan_code, r.brand ?? "", r.product_name, r.model_number ?? ""].some((v) => v.toLowerCase().includes(t))
+        [r.jan_code, r.brand ?? "", r.product_name, r.model_number ?? "", String(r.current_stock)].some((v) =>
+          v.toLowerCase().includes(t)
+        )
       );
     const { key, direction } = sortConfig;
     if (key) {
       list = [...list].sort((a, b) => {
-        const va = String((a as any)[key] ?? "");
-        const vb = String((b as any)[key] ?? "");
+        if (key === "current_stock") {
+          const na = a.current_stock ?? 0;
+          const nb = b.current_stock ?? 0;
+          return direction === "asc" ? na - nb : nb - na;
+        }
+        const va = String((a as Record<string, unknown>)[key] ?? "");
+        const vb = String((b as Record<string, unknown>)[key] ?? "");
         const c = va.localeCompare(vb, "ja");
         return direction === "asc" ? c : -c;
       });
@@ -146,9 +165,9 @@ const handleJanCodeCheck = async (jan: string) => {
   };
 
   const handleCsvExport = () => {
-    const h = "jan_code,brand,product_name,model_number,created_at";
+    const h = "jan_code,brand,product_name,model_number,current_stock,created_at";
     const lines = processedRows.map((r) =>
-      [r.jan_code, r.brand ?? "", r.product_name, r.model_number ?? "", r.created_at].map(escapeCsv).join(",")
+      [r.jan_code, r.brand ?? "", r.product_name, r.model_number ?? "", r.current_stock, r.created_at].map(escapeCsv).join(",")
     );
     const blob = new Blob(["\uFEFF" + [h, ...lines].join("\r\n")], { type: "text/csv;charset=utf-8" });
     const a = document.createElement("a");
@@ -273,9 +292,13 @@ const handleJanCodeCheck = async (jan: string) => {
           brand: editDraft.brand,
           product_name: editDraft.product_name.trim(),
           model_number: editDraft.model_number,
+          current_stock: editDraft.current_stock,
         }),
       });
-      if (!res.ok) throw new Error("更新に失敗しました");
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error((j as { error?: string }).error || "更新に失敗しました");
+      }
       setEditingJanCode(null);
       setEditDraft(null);
       await fetchRows();
@@ -413,6 +436,11 @@ const handleJanCodeCheck = async (jan: string) => {
                       <th className="px-6 py-4">
                         <SortBtn k="model_number">型番</SortBtn>
                       </th>
+                      <th className="px-6 py-4 w-28 whitespace-nowrap">
+                        <div className="flex justify-end">
+                          <SortBtn k="current_stock">在庫数</SortBtn>
+                        </div>
+                      </th>
                       <th className="px-6 py-4 w-24 text-center">操作</th>
                     </tr>
                   </thead>
@@ -454,6 +482,23 @@ const handleJanCodeCheck = async (jan: string) => {
                             <input value={editDraft.model_number ?? ""} onChange={(e) => setEditDraft({ ...editDraft, model_number: e.target.value || null })} className={`${inputClass} h-9`} />
                           ) : (
                             row.model_number ?? "—"
+                          )}
+                        </td>
+                        <td className="px-6 py-4 text-right tabular-nums whitespace-nowrap">
+                          {editingJanCode === row.jan_code && editDraft ? (
+                            <input
+                              type="number"
+                              min={0}
+                              step={1}
+                              value={editDraft.current_stock}
+                              onChange={(e) => {
+                                const v = e.target.value === "" ? 0 : Math.max(0, Math.floor(Number(e.target.value)));
+                                setEditDraft({ ...editDraft, current_stock: Number.isFinite(v) ? v : 0 });
+                              }}
+                              className={`${inputClass} h-9 w-24 text-right ml-auto block`}
+                            />
+                          ) : (
+                            row.current_stock
                           )}
                         </td>
                         <td className="px-6 py-4 text-center">

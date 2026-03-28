@@ -8,6 +8,7 @@ export type ProductRow = {
   product_name: string;
   model_number: string | null;
   created_at: string;
+  current_stock: number;
 };
 
 /** GET: 一覧 または ?jan= でJANコード検索（1件） */
@@ -96,6 +97,13 @@ export async function PATCH(request: NextRequest) {
       update.product_name = pn;
     }
     if (body.model_number !== undefined) update.model_number = body.model_number != null && String(body.model_number).trim() ? String(body.model_number).trim() : null;
+    if (body.current_stock !== undefined) {
+      const n = Number(body.current_stock);
+      if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
+        return NextResponse.json({ error: "current_stock は 0 以上の整数で指定してください" }, { status: 400 });
+      }
+      update.current_stock = n;
+    }
     if (Object.keys(update).length === 0) return NextResponse.json({ error: "更新項目がありません" }, { status: 400 });
     const { error } = await supabase.from("products").update(update).eq("jan_code", jan_code);
     if (error) throw error;
