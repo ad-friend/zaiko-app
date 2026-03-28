@@ -15,6 +15,18 @@ import { normalizeOrderCondition, normalizeStockCondition } from "@/lib/amazon-c
 import { buildAmazonOrderSkuToConditionMap, buildAsinToJanMap, is13DigitJan } from "@/lib/amazon-resolve-order-jan";
 import { tryCreateSpClient } from "@/lib/amazon-sp-try-client";
 
+/** 1 リクエストあたりのマッチング対象件数（Vercel タイムアウト対策） */
+const RECONCILE_MATCH_BATCH_SIZE = 50;
+
+async function countPendingAmazonOrders(): Promise<number> {
+  const { count, error } = await supabase
+    .from("amazon_orders")
+    .select("id", { count: "exact", head: true })
+    .eq("reconciliation_status", AMAZON_ORDER_STATUS_PENDING);
+  if (error) throw new Error(error.message);
+  return count ?? 0;
+}
+
 function chunkIds(ids: number[], size: number): number[][] {
   const out: number[][] = [];
   for (let i = 0; i < ids.length; i += size) out.push(ids.slice(i, i + size));
@@ -97,6 +109,8 @@ export async function POST() {
         ok: true,
         message: "対象のpending注文がありません。",
         processed: 0,
+        processedCount: 0,
+        hasMore: false,
         completed: 0,
         manual_required: 0,
       });
@@ -174,14 +188,18 @@ export async function POST() {
       .from("amazon_orders")
       .select("id, amazon_order_id, sku, condition_id, quantity, jan_code")
       .eq("reconciliation_status", AMAZON_ORDER_STATUS_PENDING)
-      .order("created_at", { ascending: true });
+      .order("created_at", { ascending: true })
+      .limit(RECONCILE_MATCH_BATCH_SIZE);
 
     if (fetchError) throw fetchError;
     if (!pendingOrders?.length) {
+      const remainingAfter = await countPendingAmazonOrders();
       return NextResponse.json({
         ok: true,
-        message: "対象のpending注文がありません。",
+        message: "マッチング対象のpending注文はありません（JAN補完のみ実施した可能性があります）。",
         processed: 0,
+        processedCount: 0,
+        hasMore: remainingAfter > 0,
         completed: 0,
         manual_required: 0,
       });
@@ -334,10 +352,15 @@ export async function POST() {
       }
     }
 
+    const processedCount = pendingOrders.length;
+    const remainingPending = await countPendingAmazonOrders();
+
     return NextResponse.json({
       ok: true,
       message: "消込処理を実行しました。",
-      processed: pendingOrders.length,
+      processed: processedCount,
+      processedCount,
+      hasMore: remainingPending > 0,
       completed,
       manual_required: manualRequired,
     });
