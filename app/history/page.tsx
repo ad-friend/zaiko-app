@@ -164,7 +164,7 @@ export default function HistoryPage() {
       case "registered_at":
         return row.registered_at ?? row.created_at ?? "";
       case "created_at":
-        return row.created_at ?? row.header?.created_at ?? "";
+        return row.header?.purchase_date ?? row.created_at ?? "";
       case "supplier":
         // 🌟 変更点：ソートする時も、正式名称で並び替えるようにする
         return getSupplierName(row.header?.supplier);
@@ -1110,7 +1110,7 @@ export default function HistoryPage() {
                     {processedRows.map((row) => {
                       const isIndividualEdit = editingId === row.id;
                       const isEditMode = isIndividualEdit || isBulkEditing;
-                      const displayDate = formatDate(row.header?.created_at ?? row.created_at);
+                      const displayDate = formatDate(row.header?.purchase_date ?? row.created_at);
 
                       return (
                         <tr key={row.id} className="hover:bg-slate-50/50 transition-colors">
