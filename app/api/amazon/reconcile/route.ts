@@ -1,22 +1,74 @@
 /**
  * Amazon注文 自動消込エンジン（API）
- * POST: 画面上のボタンから実行。reconciliation_status = 'pending' の注文に対して消込ロジックを実行する。
+ * POST: reconciliation_status = 'pending' の注文に対して消込ロジックを実行する。
+ *
+ * ルール（ブレない前提）:
+ * - 基準JANは amazon_orders.jan_code のみ（ASIN・SKUマスタで上書きしない）
+ * - 対象在庫: inbound_items で jan_code が一致し settled_at IS NULL（未販売）
+ * - 新品注文: 同一JAN・新品在庫が複数でも FIFO で必要数を自動消込（manual_required にしない）
+ * - 中古注文: 同一JAN・中古在庫が 2 件以上なら必ず manual_required。ちょうど 1 件かつ注文数量 1 のみ自動消込
  */
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 
-const CONDITION_NEW = "New";
-const CONDITION_USED = "Used";
+type NormalizedCondition = "new" | "used";
 
-function is13DigitJan(sku: string): boolean {
-  return /^\d{13}$/.test(String(sku).trim());
+/** 注文側 condition_id（New / Used 等）を new | used に正規化 */
+function normalizeOrderCondition(conditionId: string | null | undefined): NormalizedCondition | null {
+  const raw = String(conditionId ?? "").trim().toLowerCase();
+  if (!raw) return null;
+  if (raw === "new" || raw === "新品" || raw.startsWith("new")) return "new";
+  if (raw === "used" || raw === "中古" || raw.startsWith("used")) return "used";
+  return null;
+}
+
+/** 在庫側 condition_type（new / used / 新品 / 中古 等）を new | used に正規化 */
+function normalizeStockCondition(conditionType: string | null | undefined): NormalizedCondition | null {
+  const raw = String(conditionType ?? "").trim().toLowerCase();
+  if (!raw) return null;
+  if (raw === "new" || raw === "新品") return "new";
+  if (raw === "used" || raw === "中古") return "used";
+  if (raw.includes("新品") && !raw.includes("中古")) return "new";
+  if (raw.includes("中古")) return "used";
+  if (raw.includes("new") && !raw.includes("used")) return "new";
+  if (raw.includes("used")) return "used";
+  return null;
+}
+
+function sortFifo(a: { id: number; created_at: string | null }, b: { id: number; created_at: string | null }): number {
+  const ta = a.created_at ? Date.parse(a.created_at) : 0;
+  const tb = b.created_at ? Date.parse(b.created_at) : 0;
+  if (ta !== tb) return ta - tb;
+  return a.id - b.id;
+}
+
+async function markManual(orderDbId: number, jan: string | null) {
+  await supabase
+    .from("amazon_orders")
+    .update({
+      reconciliation_status: "manual_required",
+      jan_code: jan,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", orderDbId);
+}
+
+async function markCompleted(orderDbId: number, jan: string) {
+  await supabase
+    .from("amazon_orders")
+    .update({
+      reconciliation_status: "completed",
+      jan_code: jan,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", orderDbId);
 }
 
 export async function POST() {
   try {
     const { data: pendingOrders, error: fetchError } = await supabase
       .from("amazon_orders")
-      .select("id, amazon_order_id, sku, condition_id, quantity, jan_code, asin")
+      .select("id, amazon_order_id, sku, condition_id, quantity, jan_code")
       .eq("reconciliation_status", "pending")
       .order("created_at", { ascending: true });
 
@@ -36,161 +88,74 @@ export async function POST() {
 
     for (const order of pendingOrders) {
       const orderId = order.amazon_order_id;
-      const sku = String(order.sku ?? "").trim();
-      const conditionId = String(order.condition_id ?? "").trim();
       const orderQty = Math.max(1, Number(order.quantity) || 1);
+      const jan = String(order.jan_code ?? "").trim();
+
       console.log(`\n=== 🔍 注文チェック: ${orderId} ===`);
-      console.log(`SKU: ${sku}, コンディション: ${conditionId}, 注文のJAN: ${order.jan_code}`);
+      console.log(`SKU: ${order.sku}, コンディション: ${order.condition_id}, 注文JAN: ${jan}`);
 
-      // --- 最優先：SKUマスタ（sku_mappings）を検索 ---
-      const { data: mappings } = await supabase
-        .from("sku_mappings")
-        .select("jan_code, quantity")
-        .eq("sku", sku)
-        .eq("platform", "Amazon");
-
-      let masterJan = null;
-      let isSetProduct = false;
-
-      if (mappings && mappings.length > 0) {
-        masterJan = mappings[0].jan_code; 
-        isSetProduct = mappings.length > 1 || (mappings[0].quantity && mappings[0].quantity > 1);
-
-        if (isSetProduct) {
-          let allFound = true;
-          const toUpdate: number[] = [];
-
-          for (const m of mappings) {
-            const need = (Number(m.quantity) || 1) * orderQty;
-            const { data: items } = await supabase
-              .from("inbound_items")
-              .select("id")
-              .eq("jan_code", m.jan_code)
-              .or("order_id.is.null,order_id.eq.")
-              .order("created_at", { ascending: true })
-              .limit(need);
-            
-            if (!items || items.length < need) {
-              allFound = false;
-              break;
-            }
-            toUpdate.push(...items.map((x) => x.id));
-          }
-
-          if (allFound && toUpdate.length > 0) {
-            for (const inboundId of toUpdate) {
-              await supabase.from("inbound_items").update({ order_id: orderId }).eq("id", inboundId);
-            }
-            await supabase.from("amazon_orders").update({ reconciliation_status: "completed", updated_at: new Date().toISOString() }).eq("id", order.id);
-            completed++;
-          }
-          continue; 
-        }
+      if (!jan) {
+        console.log("❌ amazon_orders.jan_code が空のため手動確認");
+        await markManual(order.id, null);
+        manualRequired++;
+        continue;
       }
 
-      let targetJan = masterJan || order.jan_code?.trim() || (is13DigitJan(sku) ? sku : null);
-      const orderAsin = (order as { asin?: string | null }).asin?.trim() ?? null;
-
-      if (orderAsin) {
-        const { data: productRows } = await supabase
-          .from("products")
-          .select("jan_code")
-          .eq("asin", orderAsin)
-          .limit(1);
-        const janFromMaster = productRows?.[0]?.jan_code;
-        if (janFromMaster) targetJan = String(janFromMaster).trim();
+      const orderCond = normalizeOrderCondition(order.condition_id);
+      if (!orderCond) {
+        console.log(`❌ 注文コンディションを new/used に判定できない: ${order.condition_id}`);
+        await markManual(order.id, jan);
+        manualRequired++;
+        continue;
       }
-      console.log(`🎯 判定されたJAN: ${targetJan}, 注文ASIN: ${orderAsin}`);
 
-      const unlinkedFilter = "order_id.is.null,order_id.eq.";
-      const newConditionFilter = "condition_type.eq.新品,condition_type.ilike.%new%";
-      const usedConditionFilter = "condition_type.eq.中古,condition_type.ilike.%used%";
+      const { data: stockRows, error: stockErr } = await supabase
+        .from("inbound_items")
+        .select("id, condition_type, created_at, order_id")
+        .eq("jan_code", jan)
+        .is("settled_at", null);
 
-      const findCandidatesByJan = (conditionFilter: string, limit?: number) =>
-        targetJan
-          ? supabase
-              .from("inbound_items")
-              .select("id")
-              .eq("jan_code", targetJan)
-              .or(conditionFilter)
-              .or(unlinkedFilter)
-              .order("created_at", { ascending: true })
-              .limit(limit ?? 999)
-          : { data: null as { id: number }[] | null };
+      if (stockErr) throw stockErr;
 
-      const findCandidatesByAsin = (conditionFilter: string, limit?: number) =>
-        orderAsin
-          ? supabase
-              .from("inbound_items")
-              .select("id")
-              .eq("asin", orderAsin)
-              .or(conditionFilter)
-              .or(unlinkedFilter)
-              .order("created_at", { ascending: true })
-              .limit(limit ?? 999)
-          : { data: null as { id: number }[] | null };
+      const available = (stockRows ?? []).filter((row) => {
+        const oid = row.order_id != null ? String(row.order_id).trim() : "";
+        return !oid || oid === String(orderId).trim();
+      });
 
-      // --- 新品（単一）の消込（マスタ経由JANを優先、なければASINでフォールバック） ---
-      if (conditionId === CONDITION_NEW) {
-        let candidates: { id: number }[] | null = null;
-        const resJan = await findCandidatesByJan(newConditionFilter, orderQty);
-        candidates = resJan.data ?? null;
-        if (!candidates?.length) {
-          const resAsin = await findCandidatesByAsin(newConditionFilter, orderQty);
-          candidates = resAsin.data ?? null;
-        }
-        console.log(`📦 新品の在庫検索結果:`, candidates);
+      const matching = available
+        .filter((row) => normalizeStockCondition(row.condition_type) === orderCond)
+        .sort(sortFifo);
 
-        if (candidates && candidates.length === orderQty) {
-          for (const c of candidates) {
-            await supabase.from("inbound_items").update({ order_id: orderId }).eq("id", c.id);
+      console.log(`📦 JAN一致・未販売・条件一致: ${matching.length} 件（注文側=${orderCond}, 必要数=${orderQty}）`);
+
+      if (orderCond === "new") {
+        if (matching.length >= orderQty) {
+          const pick = matching.slice(0, orderQty);
+          for (const row of pick) {
+            await supabase.from("inbound_items").update({ order_id: orderId }).eq("id", row.id);
           }
-          await supabase.from("amazon_orders").update({
-            reconciliation_status: "completed",
-            jan_code: targetJan ?? undefined,
-            updated_at: new Date().toISOString(),
-          }).eq("id", order.id);
+          await markCompleted(order.id, jan);
           completed++;
         } else {
-          await supabase.from("amazon_orders").update({
-            reconciliation_status: "manual_required",
-            jan_code: targetJan ?? null,
-            updated_at: new Date().toISOString(),
-          }).eq("id", order.id);
+          await markManual(order.id, jan);
           manualRequired++;
         }
         continue;
       }
 
-      // --- 中古品（個体管理）の消込（マスタ経由JANを優先、なければASINでフォールバック） ---
-      if (conditionId === CONDITION_USED) {
-        let usedCandidates: { id: number }[] | null = null;
-        const resJan = await findCandidatesByJan(usedConditionFilter);
-        usedCandidates = resJan.data ?? null;
-        if (!usedCandidates?.length) {
-          const resAsin = await findCandidatesByAsin(usedConditionFilter);
-          usedCandidates = resAsin.data ?? null;
-        }
-        console.log(`📦 中古の在庫検索結果:`, usedCandidates);
-
-        const count = usedCandidates?.length ?? 0;
-        if (count === 1 && usedCandidates) {
-          await supabase.from("inbound_items").update({ order_id: orderId }).eq("id", usedCandidates[0].id);
-          await supabase.from("amazon_orders").update({
-            reconciliation_status: "completed",
-            jan_code: targetJan ?? undefined,
-            updated_at: new Date().toISOString(),
-          }).eq("id", order.id);
-          completed++;
-        } else {
-          await supabase.from("amazon_orders").update({
-            reconciliation_status: "manual_required",
-            jan_code: targetJan ?? null,
-            updated_at: new Date().toISOString(),
-          }).eq("id", order.id);
-          manualRequired++;
-        }
+      // 中古
+      if (matching.length >= 2) {
+        await markManual(order.id, jan);
+        manualRequired++;
         continue;
+      }
+      if (matching.length === 1 && orderQty === 1) {
+        await supabase.from("inbound_items").update({ order_id: orderId }).eq("id", matching[0].id);
+        await markCompleted(order.id, jan);
+        completed++;
+      } else {
+        await markManual(order.id, jan);
+        manualRequired++;
       }
     }
 
