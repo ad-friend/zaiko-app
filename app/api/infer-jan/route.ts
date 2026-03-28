@@ -124,7 +124,7 @@ export async function PATCH(request: NextRequest) {
           const supplier = item.supplier ?? "";
           const genre = item.genre ?? "";
           // 仕入日: created_at または registered_at があればそれを、無ければ今日をキーにする
-          const dateRaw = item.created_at || item.registered_at;
+          const dateRaw = (item as any).created_at || (item as any).registered_at;
           const date = dateRaw ? String(dateRaw).slice(0, 10) : new Date().toISOString().slice(0, 10);
           const key = `${supplier}|${genre}|${date}`;
           
@@ -138,7 +138,7 @@ export async function PATCH(request: NextRequest) {
         // 2. グループごとにヘッダーを作成し、アイテムを紐付ける
         for (const [key, groupItems] of Array.from(groups.entries())) {
           const firstItem = groupItems[0];
-          const firstDateRaw = firstItem.created_at || firstItem.registered_at;
+          const firstDateRaw = (firstItem as any).created_at || (firstItem as any).registered_at;
           const purchaseDate = firstDateRaw ? String(firstDateRaw).slice(0, 10) : new Date().toISOString().slice(0, 10);
           
           const { data: headerRow, error: headerError } = await supabase
@@ -161,8 +161,8 @@ export async function PATCH(request: NextRequest) {
           
           // そのグループのアイテム全てに、作ったばかりのヘッダーIDをセットする
           for (const item of groupItems) {
-            const c = item.created_at ? String(item.created_at) : null;
-            const r = item.registered_at ? String(item.registered_at) : null;
+            const c = (item as any).created_at ? String((item as any).created_at) : null;
+            const r = (item as any).registered_at ? String((item as any).registered_at) : null;
             const createdAt = c || r || new Date().toISOString();
             const registeredAt = r || c || undefined;
             allItemsToInsert.push({

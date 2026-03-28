@@ -856,6 +856,31 @@ export default function HistoryPage() {
     setCsvImportPreview(null);
   }, []);
 
+  /** CSVプレビュー用: 日付を yyyy/mm/dd で表示（ISO も解釈） */
+  const formatCsvPreviewDateDisplay = (raw: string) => {
+    const t = (raw ?? "").trim();
+    if (!t) return "—";
+    if (t.includes("T") || /^\d{4}-\d{2}-\d{2}/.test(t)) {
+      const sl = isoToSlashed(t);
+      if (sl) return sl;
+    }
+    const n = normalizeDateToSlashed(t);
+    return n.length >= 10 ? n : t;
+  };
+
+  /** 仕入日・登録日列。日付列が1つだけのときは両列に同じ値を表示 */
+  const csvPreviewShiireAndTouroku = (row: CsvImportPreviewRow) => {
+    const c = (row.created_at ?? "").trim();
+    const r = (row.registered_at ?? "").trim();
+    const single = c || r;
+    const rawShiire = c || single;
+    const rawTouroku = r || single;
+    return {
+      shiire: formatCsvPreviewDateDisplay(rawShiire),
+      touroku: formatCsvPreviewDateDisplay(rawTouroku),
+    };
+  };
+
   return (
     <div className="flex-1 flex flex-col">
       <main className="flex-1 w-full max-w-[1800px] mx-auto px-4 sm:px-6 lg:px-8 py-6">
@@ -1495,7 +1520,9 @@ export default function HistoryPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {csvImportPreview.map((row, idx) => (
+                  {csvImportPreview.map((row, idx) => {
+                    const { shiire, touroku } = csvPreviewShiireAndTouroku(row);
+                    return (
                     <tr key={idx} className={row.warnings.length > 0 ? "bg-amber-50/50" : ""}>
                       <td className="px-3 py-2">
                         <div className="flex flex-wrap gap-1">
@@ -1512,8 +1539,12 @@ export default function HistoryPage() {
                           {row.warnings.length === 0 && <span className="text-slate-400 text-xs">—</span>}
                         </div>
                       </td>
-                      <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{row.created_at || "—"}</td>
-                      <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{row.registered_at || "—"}</td>
+                      <td className="px-3 py-2 font-mono text-xs text-slate-700 whitespace-nowrap tabular-nums" title={row.created_at || row.registered_at || undefined}>
+                        {shiire}
+                      </td>
+                      <td className="px-3 py-2 font-mono text-xs text-slate-700 whitespace-nowrap tabular-nums" title={row.registered_at || row.created_at || undefined}>
+                        {touroku}
+                      </td>
                       <td className="px-3 py-2 text-slate-700 whitespace-nowrap">{row.supplierRaw || row.supplierKana || "—"}</td>
                       <td className="px-3 py-2 font-mono text-xs whitespace-nowrap">{row.jan_code || "—"}</td>
                       <td className="px-3 py-2 font-medium text-slate-900 min-w-[140px]">{row.product_name || "—"}</td>
@@ -1522,7 +1553,8 @@ export default function HistoryPage() {
                       <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap">{row.effective_unit_price || "—"}</td>
                       <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{row.status === "new" || row.status === "新品" ? "新品" : row.status === "used" || row.status === "中古" ? "中古" : row.status || "—"}</td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
