@@ -18,7 +18,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_amazon_orders_order_id_sku ON amazon_order
 CREATE INDEX IF NOT EXISTS idx_amazon_orders_status ON amazon_orders (reconciliation_status);
 CREATE INDEX IF NOT EXISTS idx_amazon_orders_sku ON amazon_orders (sku);
 
-COMMENT ON TABLE amazon_orders IS 'Amazon注文（消込ステータス: pending, completed, manual_required）';
+COMMENT ON TABLE amazon_orders IS 'Amazon注文（消込ステータス: pending, reconciled, manual_required, canceled。旧 completed は reconciled と同義の残存値）';
 
 -- inbound_items に order_id がない場合は追加（既存プロジェクトでは既にある想定）
 -- ALTER TABLE inbound_items ADD COLUMN IF NOT EXISTS order_id TEXT;

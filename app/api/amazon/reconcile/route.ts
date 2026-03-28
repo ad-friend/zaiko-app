@@ -1,19 +1,17 @@
 /**
  * Amazon注文 自動消込エンジン（API）
- * POST: reconciliation_status = 'pending' の注文に対して消込ロジックを実行する。
- *
- * ルール（ブレない前提）:
- * - 基準JANは amazon_orders.jan_code のみ（ASIN・SKUマスタで上書きしない）
- * - 対象在庫: inbound_items で jan_code が一致し settled_at IS NULL（未販売）
- * - 新品注文: 同一JAN・新品在庫が複数でも FIFO で必要数を自動消込（manual_required にしない）
- * - 中古注文: 同一JAN・中古在庫が 2 件以上なら必ず manual_required。ちょうど 1 件かつ注文数量 1 のみ自動消込
+ * POST: reconciliation_status = 'pending' の注文のみ処理（reconciled / manual_required / canceled は対象外）
  */
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
+import {
+  AMAZON_ORDER_STATUS_MANUAL_REQUIRED,
+  AMAZON_ORDER_STATUS_PENDING,
+  AMAZON_ORDER_STATUS_RECONCILED,
+} from "@/lib/amazon-order-reconciliation-status";
 
 type NormalizedCondition = "new" | "used";
 
-/** 注文側 condition_id（New / Used 等）を new | used に正規化 */
 function normalizeOrderCondition(conditionId: string | null | undefined): NormalizedCondition | null {
   const raw = String(conditionId ?? "").trim().toLowerCase();
   if (!raw) return null;
@@ -22,7 +20,6 @@ function normalizeOrderCondition(conditionId: string | null | undefined): Normal
   return null;
 }
 
-/** 在庫側 condition_type（new / used / 新品 / 中古 等）を new | used に正規化 */
 function normalizeStockCondition(conditionType: string | null | undefined): NormalizedCondition | null {
   const raw = String(conditionType ?? "").trim().toLowerCase();
   if (!raw) return null;
@@ -42,26 +39,25 @@ function sortFifo(a: { id: number; created_at: string | null }, b: { id: number;
   return a.id - b.id;
 }
 
-async function markManual(orderDbId: number, jan: string | null) {
-  await supabase
+async function updateAmazonOrderReconciliation(
+  orderDbId: number,
+  status: typeof AMAZON_ORDER_STATUS_RECONCILED | typeof AMAZON_ORDER_STATUS_MANUAL_REQUIRED,
+  jan: string | null
+): Promise<{ error: Error | null }> {
+  const { error } = await supabase
     .from("amazon_orders")
     .update({
-      reconciliation_status: "manual_required",
+      reconciliation_status: status,
       jan_code: jan,
       updated_at: new Date().toISOString(),
     })
     .eq("id", orderDbId);
+  return { error: error ? new Error(error.message) : null };
 }
 
-async function markCompleted(orderDbId: number, jan: string) {
-  await supabase
-    .from("amazon_orders")
-    .update({
-      reconciliation_status: "completed",
-      jan_code: jan,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", orderDbId);
+async function unlinkInboundFromOrder(inboundIds: number[], amazonOrderId: string): Promise<void> {
+  if (inboundIds.length === 0) return;
+  await supabase.from("inbound_items").update({ order_id: null }).in("id", inboundIds).eq("order_id", amazonOrderId);
 }
 
 export async function POST() {
@@ -69,7 +65,7 @@ export async function POST() {
     const { data: pendingOrders, error: fetchError } = await supabase
       .from("amazon_orders")
       .select("id, amazon_order_id, sku, condition_id, quantity, jan_code")
-      .eq("reconciliation_status", "pending")
+      .eq("reconciliation_status", AMAZON_ORDER_STATUS_PENDING)
       .order("created_at", { ascending: true });
 
     if (fetchError) throw fetchError;
@@ -96,7 +92,8 @@ export async function POST() {
 
       if (!jan) {
         console.log("❌ amazon_orders.jan_code が空のため手動確認");
-        await markManual(order.id, null);
+        const { error } = await updateAmazonOrderReconciliation(order.id, AMAZON_ORDER_STATUS_MANUAL_REQUIRED, null);
+        if (error) throw error;
         manualRequired++;
         continue;
       }
@@ -104,7 +101,8 @@ export async function POST() {
       const orderCond = normalizeOrderCondition(order.condition_id);
       if (!orderCond) {
         console.log(`❌ 注文コンディションを new/used に判定できない: ${order.condition_id}`);
-        await markManual(order.id, jan);
+        const { error } = await updateAmazonOrderReconciliation(order.id, AMAZON_ORDER_STATUS_MANUAL_REQUIRED, jan);
+        if (error) throw error;
         manualRequired++;
         continue;
       }
@@ -128,33 +126,54 @@ export async function POST() {
 
       console.log(`📦 JAN一致・未販売・条件一致: ${matching.length} 件（注文側=${orderCond}, 必要数=${orderQty}）`);
 
-      if (orderCond === "new") {
-        if (matching.length >= orderQty) {
-          const pick = matching.slice(0, orderQty);
-          for (const row of pick) {
-            await supabase.from("inbound_items").update({ order_id: orderId }).eq("id", row.id);
+      const finalizeReconciled = async (pick: typeof matching) => {
+        const ids = pick.map((p) => p.id);
+        const linked: number[] = [];
+        for (const row of pick) {
+          const { error: uErr } = await supabase.from("inbound_items").update({ order_id: orderId }).eq("id", row.id);
+          if (uErr) {
+            await unlinkInboundFromOrder(linked, orderId);
+            throw new Error(uErr.message);
           }
-          await markCompleted(order.id, jan);
-          completed++;
+          linked.push(row.id);
+        }
+        const { error: oErr } = await updateAmazonOrderReconciliation(order.id, AMAZON_ORDER_STATUS_RECONCILED, jan);
+        if (oErr) {
+          await unlinkInboundFromOrder(ids, orderId);
+          throw oErr;
+        }
+        completed++;
+      };
+
+      try {
+        if (orderCond === "new") {
+          if (matching.length >= orderQty) {
+            await finalizeReconciled(matching.slice(0, orderQty));
+          } else {
+            const { error } = await updateAmazonOrderReconciliation(order.id, AMAZON_ORDER_STATUS_MANUAL_REQUIRED, jan);
+            if (error) throw error;
+            manualRequired++;
+          }
+          continue;
+        }
+
+        if (matching.length >= 2) {
+          const { error } = await updateAmazonOrderReconciliation(order.id, AMAZON_ORDER_STATUS_MANUAL_REQUIRED, jan);
+          if (error) throw error;
+          manualRequired++;
+          continue;
+        }
+        if (matching.length === 1 && orderQty === 1) {
+          await finalizeReconciled(matching);
         } else {
-          await markManual(order.id, jan);
+          const { error } = await updateAmazonOrderReconciliation(order.id, AMAZON_ORDER_STATUS_MANUAL_REQUIRED, jan);
+          if (error) throw error;
           manualRequired++;
         }
-        continue;
-      }
-
-      // 中古
-      if (matching.length >= 2) {
-        await markManual(order.id, jan);
-        manualRequired++;
-        continue;
-      }
-      if (matching.length === 1 && orderQty === 1) {
-        await supabase.from("inbound_items").update({ order_id: orderId }).eq("id", matching[0].id);
-        await markCompleted(order.id, jan);
-        completed++;
-      } else {
-        await markManual(order.id, jan);
+      } catch (e) {
+        console.error("[amazon/reconcile] order row id=%s rollback or failure:", order.id, e);
+        const { error: mErr } = await updateAmazonOrderReconciliation(order.id, AMAZON_ORDER_STATUS_MANUAL_REQUIRED, jan);
+        if (mErr) throw mErr;
         manualRequired++;
       }
     }

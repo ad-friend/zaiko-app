@@ -547,6 +547,8 @@ function ManualOrderCard({
         body: JSON.stringify({
           amazon_order_id: order.amazon_order_id,
           inbound_item_id: selectedId,
+          amazon_order_db_id: order.id,
+          sku: order.sku,
         }),
       });
       const data = await res.json();

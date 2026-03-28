@@ -5,6 +5,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
+import { applyPreservedReconciliationStatusForUpsert } from "@/lib/amazon-order-reconciliation-status";
 
 const MARKETPLACE_ID_JP = "A1VC38T7YXB528";
 
@@ -203,6 +204,13 @@ export async function GET(request: NextRequest) {
         rowsUpserted: 0,
       });
     }
+
+    const distinctOrderIds = [...new Set(rows.map((r) => r.amazon_order_id))];
+    const { data: existingStatuses } = await supabase
+      .from("amazon_orders")
+      .select("amazon_order_id, sku, reconciliation_status")
+      .in("amazon_order_id", distinctOrderIds);
+    applyPreservedReconciliationStatusForUpsert(rows, existingStatuses ?? []);
 
     const { data: upserted, error } = await supabase
       .from("amazon_orders")

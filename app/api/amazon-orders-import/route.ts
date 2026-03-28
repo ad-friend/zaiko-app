@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
+import { applyPreservedReconciliationStatusForUpsert } from "@/lib/amazon-order-reconciliation-status";
 
 type AmazonOrdersImportRow = {
   amazonOrderId: string;
@@ -105,6 +106,16 @@ export async function POST(request: NextRequest) {
     for (let start = 0; start < validRows.length; start += chunkSize) {
       const end = Math.min(start + chunkSize, validRows.length);
       const chunk = validRows.slice(start, end);
+
+      const chunkOrderIds = [...new Set(chunk.map((r) => String(r.amazon_order_id)))];
+      const { data: existingStatuses } = await supabase
+        .from("amazon_orders")
+        .select("amazon_order_id, sku, reconciliation_status")
+        .in("amazon_order_id", chunkOrderIds);
+      applyPreservedReconciliationStatusForUpsert(
+        chunk as Array<{ amazon_order_id: string; sku: string; reconciliation_status?: string }>,
+        existingStatuses ?? []
+      );
 
       const { data, error } = await supabase
         .from("amazon_orders")
