@@ -75,7 +75,7 @@ export async function fetchJanFromAsinCatalog(spClient: SpClientLike, asin: stri
 
 export async function resolveJanForAmazonOrderLine(
   supabase: SupabaseClient,
-  spClient: SpClientLike,
+  spClient: SpClientLike | null,
   params: { sku: string; asin: string | null }
 ): Promise<string | null> {
   const sku = String(params.sku ?? "").trim();
@@ -87,6 +87,8 @@ export async function resolveJanForAmazonOrderLine(
   const { data: productRow } = await supabase.from("products").select("jan_code").eq("asin", asin).maybeSingle();
   const fromProducts = productRow?.jan_code != null ? String(productRow.jan_code).trim() : "";
   if (is13DigitJan(fromProducts)) return fromProducts;
+
+  if (!spClient) return null;
 
   const fromCatalog = await fetchJanFromAsinCatalog(spClient, asin);
   if (fromCatalog) return fromCatalog;
