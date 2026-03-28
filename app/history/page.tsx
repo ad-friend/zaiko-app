@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Pencil, Save, X, ChevronLeft, Download, Upload, Search, ArrowUp, ArrowDown, ArrowUpDown, Calendar } from "lucide-react";
+import { Pencil, Save, X, ChevronLeft, Download, Upload, Search, ArrowUp, ArrowDown, ArrowUpDown, Calendar, Loader2, PackageMinus } from "lucide-react";
 import { normalizeToFullWidthKatakana } from "@/lib/kana";
 import { normalizeSupplierForMatch } from "@/lib/normalizeSupplier";
 
@@ -20,6 +20,7 @@ type RecordRow = {
   created_at: string;
   order_id: string | null;
   settled_at: string | null;
+  exit_type: string | null;
   header: {
     id: number;
     purchase_date: string;
@@ -75,6 +76,21 @@ const inputClass = "flex h-10 w-full rounded-md border border-slate-200 bg-white
 // px-4 -> px-6
 const buttonClass = "inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 h-10 px-6 py-2 shadow-sm active:scale-[0.98] duration-100";
 
+function exitTypeLabel(exitType: string | null | undefined): string {
+  switch (exitType) {
+    case "damaged":
+      return "破損";
+    case "lost":
+      return "紛失";
+    case "internal_use":
+      return "社内使用";
+    case "entertainment":
+      return "接待";
+    default:
+      return exitType ?? "";
+  }
+}
+
 type EditDraft = {
   brand: string;
   product_name: string;
@@ -106,6 +122,12 @@ export default function HistoryPage() {
   const [csv5YearsLoading, setCsv5YearsLoading] = useState(false);
   const csvInputRef = useRef<HTMLInputElement>(null);
   const [csvImportPreview, setCsvImportPreview] = useState<CsvImportPreviewRow[] | null>(null);
+  const [inventoryModalOpen, setInventoryModalOpen] = useState(false);
+  const [invJan, setInvJan] = useState("");
+  const [invCondition, setInvCondition] = useState<"new" | "used">("new");
+  const [invQuantity, setInvQuantity] = useState("1");
+  const [invReason, setInvReason] = useState<"damaged" | "lost" | "internal_use" | "entertainment">("damaged");
+  const [inventorySubmitting, setInventorySubmitting] = useState(false);
 
   const [searchTerm, setSearchTerm] = useState("");
   const [sortConfig, setSortConfig] = useState<{ key: string | null; direction: "asc" | "desc" }>({ key: null, direction: "asc" });
@@ -120,7 +142,13 @@ export default function HistoryPage() {
       
       if (!recordsRes.ok) throw new Error("在庫データの取得に失敗しました");
       const recordsData = await recordsRes.json();
-      setRows(recordsData);
+      const list = Array.isArray(recordsData) ? recordsData : [];
+      setRows(
+        list.map((r: RecordRow & { exit_type?: string | null }) => ({
+          ...r,
+          exit_type: r.exit_type ?? null,
+        }))
+      );
 
       if (suppliersRes.ok) {
         const suppliersData = await suppliersRes.json();
@@ -136,6 +164,45 @@ export default function HistoryPage() {
   useEffect(() => {
     fetchRecords();
   }, [fetchRecords]);
+
+  const submitInventoryAdjustment = useCallback(async () => {
+    const jan = invJan.trim();
+    const q = Math.floor(Number(invQuantity));
+    if (!jan) {
+      alert("JANコードを入力してください");
+      return;
+    }
+    if (!Number.isFinite(q) || q < 1) {
+      alert("処理する個数は 1 以上の整数にしてください");
+      return;
+    }
+    setInventorySubmitting(true);
+    try {
+      const res = await fetch("/api/inventory-adjustment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jan_code: jan,
+          condition: invCondition,
+          quantity: q,
+          reason: invReason,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error((data as { error?: string }).error || "在庫調整に失敗しました");
+      }
+      setInventoryModalOpen(false);
+      setInvJan("");
+      setInvQuantity("1");
+      await fetchRecords();
+      alert(`在庫調整を反映しました（${(data as { updated?: number }).updated ?? q} 件）`);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "在庫調整に失敗しました");
+    } finally {
+      setInventorySubmitting(false);
+    }
+  }, [invJan, invCondition, invQuantity, invReason, fetchRecords]);
 
   // 🌟 追加：「カナ」を渡すと、マスターから「正式名称（name）」を探して返す関数
   const getSupplierName = useCallback((kanaOrName: string | null | undefined): string => {
@@ -891,15 +958,25 @@ export default function HistoryPage() {
               在庫一覧
             </h2>
             {!loading && !error && (
-              <button
-                type="button"
-                onClick={downloadCsv5Years}
-                disabled={csv5YearsLoading}
-                className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300 h-9 px-4 text-sm disabled:opacity-50`}
-              >
-                <Download className="mr-2 h-4 w-4 shrink-0" />
-                {csv5YearsLoading ? "取得中..." : "過去5年分のデータをCSVダウンロード"}
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setInventoryModalOpen(true)}
+                  className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300 h-9 px-4 text-sm`}
+                >
+                  <PackageMinus className="mr-2 h-4 w-4 shrink-0" />
+                  在庫調整
+                </button>
+                <button
+                  type="button"
+                  onClick={downloadCsv5Years}
+                  disabled={csv5YearsLoading}
+                  className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300 h-9 px-4 text-sm disabled:opacity-50`}
+                >
+                  <Download className="mr-2 h-4 w-4 shrink-0" />
+                  {csv5YearsLoading ? "取得中..." : "過去5年分のデータをCSVダウンロード"}
+                </button>
+              </div>
             )}
           </div>
 
@@ -1397,12 +1474,34 @@ export default function HistoryPage() {
                           </td>
                           <td className="w-px whitespace-nowrap px-1 py-3 text-slate-600 align-middle">{row.condition_type === "new" ? "新品" : row.condition_type === "used" ? "中古" : row.condition_type ?? "—"}</td>
                           <td className="w-px whitespace-nowrap px-1 py-3 align-middle">
-                            {!row.order_id ? (
-                              <span className="bg-green-100 text-green-700 px-2.5 py-1 rounded-full text-[10px] font-bold">販売中</span>
-                            ) : !row.settled_at ? (
-                              <span className="bg-blue-100 text-blue-700 px-2.5 py-1 rounded-full text-[10px] font-bold">発送済</span>
+                            {row.exit_type ? (
+                              <span
+                                className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-bold ${
+                                  row.exit_type === "damaged"
+                                    ? "bg-red-100 text-red-800"
+                                    : row.exit_type === "lost"
+                                      ? "bg-orange-100 text-orange-800"
+                                      : row.exit_type === "internal_use"
+                                        ? "bg-violet-100 text-violet-800"
+                                        : row.exit_type === "entertainment"
+                                          ? "bg-indigo-100 text-indigo-800"
+                                          : "bg-slate-100 text-slate-600"
+                                }`}
+                              >
+                                {exitTypeLabel(row.exit_type)}
+                              </span>
+                            ) : row.settled_at ? (
+                              <span className="bg-emerald-100 text-emerald-800 px-2.5 py-1 rounded-full text-[10px] font-bold">
+                                販売済
+                              </span>
                             ) : (
-                              <span className="bg-slate-100 text-slate-500 px-2.5 py-1 rounded-full text-[10px] font-bold">確定済</span>
+                              <span className="text-slate-600 text-xs whitespace-nowrap">
+                                {row.condition_type === "new"
+                                  ? "新品"
+                                  : row.condition_type === "used"
+                                    ? "中古"
+                                    : row.condition_type ?? "—"}
+                              </span>
                             )}
                           </td>
                           <td className="px-1 py-3 min-w-0 max-w-[9.5rem] font-mono text-xs text-center align-middle">
@@ -1479,6 +1578,108 @@ export default function HistoryPage() {
           </div>
         </div>
       </main>
+
+      {inventoryModalOpen && (
+        <div
+          className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="inventory-adjust-title"
+          onClick={() => !inventorySubmitting && setInventoryModalOpen(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-xl border border-slate-200 bg-white shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="border-b border-slate-100 px-5 py-4">
+              <h3 id="inventory-adjust-title" className="text-base font-bold text-slate-800">
+                在庫調整
+              </h3>
+              <p className="mt-1 text-xs text-slate-500">
+                破損・紛失・社内使用・接待など、古い在庫から指定件数に <code className="text-[11px]">exit_type</code> を付与します。
+              </p>
+            </div>
+            <div className="space-y-4 px-5 py-4">
+              <div>
+                <label className="text-xs font-semibold text-slate-600 block mb-1">JANコード</label>
+                <input
+                  type="text"
+                  value={invJan}
+                  onChange={(e) => setInvJan(e.target.value)}
+                  className={inputClass}
+                  placeholder="例: 4901234567890"
+                  disabled={inventorySubmitting}
+                />
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-slate-600 block mb-1">コンディション</label>
+                <select
+                  value={invCondition}
+                  onChange={(e) => setInvCondition(e.target.value as "new" | "used")}
+                  className={`${inputClass} h-10`}
+                  disabled={inventorySubmitting}
+                >
+                  <option value="new">新品 (new)</option>
+                  <option value="used">中古 (used)</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-slate-600 block mb-1">処理する個数（1以上）</label>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={invQuantity}
+                  onChange={(e) => setInvQuantity(e.target.value)}
+                  className={inputClass}
+                  disabled={inventorySubmitting}
+                />
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-slate-600 block mb-1">理由</label>
+                <select
+                  value={invReason}
+                  onChange={(e) =>
+                    setInvReason(e.target.value as "damaged" | "lost" | "internal_use" | "entertainment")
+                  }
+                  className={`${inputClass} h-10`}
+                  disabled={inventorySubmitting}
+                >
+                  <option value="damaged">破損 (damaged)</option>
+                  <option value="lost">紛失 (lost)</option>
+                  <option value="internal_use">社内使用 (internal_use)</option>
+                  <option value="entertainment">接待 (entertainment)</option>
+                </select>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-slate-100 px-5 py-4 bg-slate-50/80 rounded-b-xl">
+              <button
+                type="button"
+                onClick={() => !inventorySubmitting && setInventoryModalOpen(false)}
+                className={`${buttonClass} bg-white text-slate-700 border border-slate-200 h-9 px-4 text-sm`}
+                disabled={inventorySubmitting}
+              >
+                キャンセル
+              </button>
+              <button
+                type="button"
+                onClick={() => void submitInventoryAdjustment()}
+                disabled={inventorySubmitting}
+                className={`${buttonClass} bg-primary text-white hover:bg-primary/90 h-9 px-4 text-sm disabled:opacity-50`}
+              >
+                {inventorySubmitting ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    実行中...
+                  </>
+                ) : (
+                  "実行"
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {csvImportPreview !== null && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">

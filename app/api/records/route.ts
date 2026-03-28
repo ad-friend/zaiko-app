@@ -15,6 +15,10 @@ export type RecordRow = {
   created_at: string;
   /** 入庫登録処理実行時刻（登録日） */
   registered_at?: string;
+  order_id?: string | null;
+  settled_at?: string | null;
+  /** 在庫調整理由（damaged 等） */
+  exit_type?: string | null;
   header: {
     id: number;
     purchase_date: string;
@@ -38,6 +42,7 @@ const SELECT_WITH_REGISTERED = `
   registered_at,
   order_id,
   settled_at,
+  exit_type,
   inbound_headers (
     id,
     purchase_date,
@@ -60,6 +65,7 @@ const SELECT_WITHOUT_REGISTERED = `
   created_at,
   order_id,
   settled_at,
+  exit_type,
   inbound_headers (
     id,
     purchase_date,
@@ -106,8 +112,9 @@ export async function GET(request: NextRequest) {
       registered_at: (row.registered_at || row.created_at)
         ? new Date(row.registered_at || row.created_at).toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo", year: "numeric", month: "2-digit", day: "2-digit" }).replace(/\//g, "-")
         : "",
-        order_id: row.order_id ?? null,
-        settled_at: row.settled_at ?? null,
+      order_id: row.order_id ?? null,
+      settled_at: row.settled_at ?? null,
+      exit_type: row.exit_type ?? null,
       header: Array.isArray(row.inbound_headers) ? row.inbound_headers[0] : row.inbound_headers ?? null,
     }));
 

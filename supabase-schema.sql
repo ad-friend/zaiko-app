@@ -64,3 +64,7 @@ CREATE POLICY "Allow anon all on suppliers"
 -- 入庫登録実行時刻（登録日として一覧表示）
 ALTER TABLE inbound_items
   ADD COLUMN IF NOT EXISTS registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+-- 在庫調整理由（破損・紛失・社内使用・接待）
+ALTER TABLE inbound_items
+  ADD COLUMN IF NOT EXISTS exit_type TEXT;
