@@ -21,7 +21,14 @@ export async function GET(request: NextRequest) {
 
     const { data, error } = await q;
     if (error) throw error;
-    return NextResponse.json(data ?? []);
+    const rows = data ?? [];
+    return NextResponse.json(
+      rows.map((row) => ({
+        ...row,
+        /** `id` と同一。amazon_orders の主キー（bigint）を明示（フロントの取り違え防止） */
+        order_row_id: row.id,
+      }))
+    );
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "取得に失敗しました。";
     return NextResponse.json({ error: message }, { status: 500 });

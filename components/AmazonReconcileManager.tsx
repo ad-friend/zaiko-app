@@ -5,8 +5,13 @@ import ManualFinanceProcessModal, { type PendingFinanceGroupData } from "@/compo
 import { normalizeOrderCondition } from "@/lib/amazon-condition-match";
 
 type AmazonOrder = {
-  /** Supabase の bigint は JSON で string になることがある */
+  /**
+   * amazon_orders の主キー（bigint）。JSON では string になることがある。
+   * 数字のみの文字列のみ有効（503-xxx 形式の Amazon 注文番号が入っていてはならない）。
+   */
   id: number | string;
+  /** GET /api/amazon/orders が付与。`id` と同じ DB 主キー */
+  order_row_id?: number | string;
   amazon_order_id: string;
   sku: string;
   condition_id: string;
@@ -26,14 +31,27 @@ type InboundCandidate = {
   order_id: string | null;
 };
 
-function toNumericOrderId(id: number | string): number {
-  if (typeof id === "number" && Number.isFinite(id)) return Math.trunc(id);
-  const n = Number.parseInt(String(id).trim(), 10);
-  return Number.isFinite(n) ? n : 0;
+/** DB 主キー amazon_orders.id のみ（数字のみの文字列）。ハイフン付き注文番号は 0 扱い */
+function resolveOrderRowPk(o: Pick<AmazonOrder, "id" | "order_row_id">): number {
+  const candidates = [o.order_row_id, o.id];
+  for (const raw of candidates) {
+    if (raw == null || raw === "") continue;
+    if (typeof raw === "number" && Number.isFinite(raw) && raw > 0 && raw === Math.trunc(raw)) {
+      return Math.trunc(raw);
+    }
+    const s = String(raw).trim();
+    if (/^\d+$/.test(s)) {
+      const n = Number.parseInt(s, 10);
+      if (n > 0) return n;
+    }
+  }
+  return 0;
 }
 
-function orderIdMapKey(id: number | string): string {
-  return String(toNumericOrderId(id));
+function orderStableKey(o: AmazonOrder): string {
+  const pk = resolveOrderRowPk(o);
+  if (pk > 0) return `pk:${pk}`;
+  return `amz:${encodeURIComponent(o.amazon_order_id)}|sku:${encodeURIComponent(o.sku)}`;
 }
 
 const buttonClass =
@@ -110,24 +128,29 @@ export default function AmazonReconcileManager() {
     fetchManualOrders();
   }, [fetchManualOrders]);
 
-  const handleCandidatesLoaded = useCallback((orderId: number, count: number) => {
-    setCandidateCountByOrderId((prev) => ({ ...prev, [String(orderId)]: count }));
+  const handleCandidatesLoaded = useCallback((orderKey: string, count: number) => {
+    setCandidateCountByOrderId((prev) => ({ ...prev, [orderKey]: count }));
   }, []);
 
-  const handleOrderConditionUpdated = useCallback((orderId: number, condition_id: string) => {
-    setManualOrders((prev) =>
-      prev.map((o) => {
-        const oid =
-          typeof o.id === "number" && Number.isFinite(o.id) ? Math.trunc(o.id) : Number.parseInt(String(o.id), 10);
-        return oid === orderId ? { ...o, condition_id } : o;
-      })
-    );
-  }, []);
+  const handleOrderConditionUpdated = useCallback(
+    (rowId: number, condition_id: string, amazon_order_id: string, sku: string) => {
+      setManualOrders((prev) =>
+        prev.map((o) => {
+          const samePk = rowId > 0 && resolveOrderRowPk(o) === rowId;
+          const sameBiz =
+            String(o.amazon_order_id).trim() === String(amazon_order_id).trim() &&
+            String(o.sku).trim() === String(sku).trim();
+          return samePk || sameBiz ? { ...o, condition_id } : o;
+        })
+      );
+    },
+    []
+  );
 
   const filteredManualOrders = showOnlyNoStock
-    ? manualOrders.filter((o) => (candidateCountByOrderId[orderIdMapKey(o.id)] ?? -1) === 0)
+    ? manualOrders.filter((o) => (candidateCountByOrderId[orderStableKey(o)] ?? -1) === 0)
     : manualOrders;
-  const noStockCount = manualOrders.filter((o) => (candidateCountByOrderId[orderIdMapKey(o.id)] ?? -1) === 0).length;
+  const noStockCount = manualOrders.filter((o) => (candidateCountByOrderId[orderStableKey(o)] ?? -1) === 0).length;
 
   const fetchPendingFinances = useCallback(async () => {
     setIsLoadingPendingFinances(true);
@@ -600,8 +623,8 @@ function ManualOrderCard({
 }: {
   order: AmazonOrder;
   onConfirmed: () => void;
-  onCandidatesLoaded?: (orderId: number, candidateCount: number) => void;
-  onConditionUpdated?: (orderId: number, condition_id: string) => void;
+  onCandidatesLoaded?: (orderKey: string, candidateCount: number) => void;
+  onConditionUpdated?: (rowId: number, condition_id: string, amazon_order_id: string, sku: string) => void;
 }) {
   const [candidates, setCandidates] = useState<InboundCandidate[]>([]);
   const [loadingCandidates, setLoadingCandidates] = useState(false);
@@ -632,13 +655,13 @@ function ManualOrderCard({
         const list = Array.isArray(data) ? data : [];
         if (!cancelled) {
           setCandidates(list);
-          onCandidatesLoaded?.(toNumericOrderId(order.id), list.length);
+          onCandidatesLoaded?.(orderStableKey(order), list.length);
         }
       })
       .catch(() => {
         if (!cancelled) {
           setError("候補の取得に失敗しました");
-          onCandidatesLoaded?.(toNumericOrderId(order.id), 0);
+          onCandidatesLoaded?.(orderStableKey(order), 0);
         }
       })
       .finally(() => {
@@ -655,35 +678,52 @@ function ManualOrderCard({
     const nextNorm = next === "Used" ? "used" : "new";
     if (currentNorm === nextNorm) return;
 
-    const orderDbId = toNumericOrderId(order.id);
-    if (!Number.isFinite(orderDbId) || orderDbId < 1) {
-      setConditionMessage({
-        type: "err",
-        text: "注文IDが無効です。一覧を再読み込みしてください。",
-      });
+    if (!String(order.amazon_order_id ?? "").trim()) {
+      setConditionMessage({ type: "err", text: "Amazon注文番号がありません。一覧を再読み込みしてください。" });
       return;
     }
+
+    const orderDbId = resolveOrderRowPk(order);
 
     setConditionSaving(true);
     setConditionMessage(null);
     setError(null);
     try {
+      const body: Record<string, unknown> = {
+        condition_id: next,
+        amazon_order_id: order.amazon_order_id,
+        sku: order.sku,
+      };
+      if (orderDbId > 0) {
+        body.id = orderDbId;
+        body.order_row_id = orderDbId;
+      }
+
+      console.log("📡 送信データ:", { id: body.id ?? null, condition_id: body.condition_id });
+
       const res = await fetch("/api/amazon/orders/condition", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          id: orderDbId,
-          condition_id: next,
-        }),
+        body: JSON.stringify(body),
       });
-      const data = (await res.json()) as { error?: string; condition_id?: string };
-      if (!res.ok) throw new Error(data.error ?? "コンディションの更新に失敗しました");
+      const data = (await res.json()) as { error?: string; condition_id?: string; id?: number };
+      if (!res.ok) {
+        const errorResponse = {
+          httpStatus: res.status,
+          httpStatusText: res.statusText,
+          message: data.error,
+          body: data,
+        };
+        console.error("❌ APIエラー詳細:", errorResponse);
+        throw new Error(data.error ?? "コンディションの更新に失敗しました");
+      }
       const saved = (data.condition_id === "New" || data.condition_id === "Used" ? data.condition_id : next) as
         | "New"
         | "Used";
+      const serverRowId = typeof data.id === "number" && data.id > 0 ? data.id : orderDbId;
       setConditionId(saved);
       setSelectedId(null);
-      onConditionUpdated?.(orderDbId, saved);
+      onConditionUpdated?.(serverRowId, saved, order.amazon_order_id, order.sku);
       setCandidatesRefreshKey((k) => k + 1);
       setConditionMessage({
         type: "ok",
