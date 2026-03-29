@@ -684,27 +684,33 @@ function ManualOrderCard({
     }
 
     const orderDbId = resolveOrderRowPk(order);
+    const rawId = order.order_row_id ?? order.id;
 
     setConditionSaving(true);
     setConditionMessage(null);
     setError(null);
     try {
-      const body: Record<string, unknown> = {
+      const payload: Record<string, unknown> = {
         condition_id: next,
         amazon_order_id: order.amazon_order_id,
+        order_id: order.amazon_order_id,
         sku: order.sku,
+        id: Number(rawId),
+        id_numeric: Number(rawId),
+        id_string: String(rawId ?? ""),
       };
       if (orderDbId > 0) {
-        body.id = orderDbId;
-        body.order_row_id = orderDbId;
+        payload.id = orderDbId;
+        payload.id_numeric = orderDbId;
+        payload.order_row_id = orderDbId;
       }
 
-      console.log("📡 送信データ:", { id: body.id ?? null, condition_id: body.condition_id });
+      console.log("📦 Final Payload:", JSON.stringify(payload));
 
       const res = await fetch("/api/amazon/orders/condition", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify(payload),
       });
       const data = (await res.json()) as { error?: string; condition_id?: string; id?: number };
       if (!res.ok) {
