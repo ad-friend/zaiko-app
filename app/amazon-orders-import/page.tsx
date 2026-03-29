@@ -98,6 +98,9 @@ function buildMappingAndRows(text: string, fileName: string): ParseResult {
     "amazon-order-id",
     "amazon order id",
     "amazonorderid",
+    "order-id",
+    "order id",
+    "orderid",
     "注文ID",
     "注文番号",
     "amazon注文id",
@@ -192,6 +195,7 @@ export default function AmazonOrdersImportPage() {
     received: number;
     upserted: number;
     skipped: number;
+    skipped_removal_orders?: number;
     skipped_cancelled?: number;
     skipped_cancelled_new?: number;
     cancellation_rollbacks?: number;
@@ -243,7 +247,15 @@ export default function AmazonOrdersImportPage() {
       });
 
       if (!parsed.rows.length) {
-        setResult({ ok: true, received: 0, upserted: 0, skipped: 0, skipped_cancelled: 0, errors: parsed.rowErrors });
+        setResult({
+          ok: true,
+          received: 0,
+          upserted: 0,
+          skipped: 0,
+          skipped_removal_orders: 0,
+          skipped_cancelled: 0,
+          errors: parsed.rowErrors,
+        });
         return;
       }
 
@@ -258,6 +270,7 @@ export default function AmazonOrdersImportPage() {
         received?: number;
         upserted?: number;
         skipped?: number;
+        skipped_removal_orders?: number;
         skipped_cancelled?: number;
         skipped_cancelled_new?: number;
         cancellation_rollbacks?: number;
@@ -271,6 +284,7 @@ export default function AmazonOrdersImportPage() {
           received: data?.received ?? parsed.rows.length,
           upserted: data?.upserted ?? 0,
           skipped: data?.skipped ?? 0,
+          skipped_removal_orders: data?.skipped_removal_orders,
           skipped_cancelled: data?.skipped_cancelled,
           skipped_cancelled_new: data?.skipped_cancelled_new,
           cancellation_rollbacks: data?.cancellation_rollbacks,
@@ -286,6 +300,7 @@ export default function AmazonOrdersImportPage() {
         received: data.received ?? parsed.rows.length,
         upserted: data.upserted ?? 0,
         skipped: data.skipped ?? 0,
+        skipped_removal_orders: data.skipped_removal_orders,
         skipped_cancelled: data.skipped_cancelled,
         skipped_cancelled_new: data.skipped_cancelled_new,
         cancellation_rollbacks: data.cancellation_rollbacks,
@@ -464,7 +479,13 @@ export default function AmazonOrdersImportPage() {
         <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
           <h2 className="text-lg font-bold text-slate-800 mb-3">1) 注文レポート — ファイル選択</h2>
           <p className="text-sm text-slate-600 mb-4">
-            必須ヘッダー: <span className="font-mono">amazonOrderId / purchaseDate / sku</span>
+            必須ヘッダー: <span className="font-mono">amazon-order-id</span> または{" "}
+            <span className="font-mono">order-id</span>、<span className="font-mono">purchaseDate</span>、
+            <span className="font-mono">sku</span>
+            <br />
+            <span className="text-slate-500">
+              FBA の手元返送オーダー（注文番号が <span className="font-mono">S##-#######-#######</span> 形式）は自動で除外します。
+            </span>
             <br />
             コンディション・JAN は自社 DB（sku_mappings / products 等）照合のみです。外部 SP-API は呼び出しません。
           </p>
@@ -531,6 +552,9 @@ export default function AmazonOrdersImportPage() {
                 <span>受信: {result.received}件</span>
                 <span>登録: {result.upserted}件</span>
                 <span>スキップ: {result.skipped}件</span>
+                <span>
+                  返送等の非標準オーダー（スキップ）: {result.skipped_removal_orders ?? 0}件
+                </span>
                 {(result.skipped_cancelled ?? 0) > 0 || (result.cancellation_rollbacks ?? 0) > 0 ? (
                   <span className="text-emerald-800/90">
                     キャンセル行 {result.skipped_cancelled ?? 0}件（うちDB未登録で破棄: {result.skipped_cancelled_new ?? 0}件） / 在庫巻き戻しした注文:{" "}
@@ -556,6 +580,9 @@ export default function AmazonOrdersImportPage() {
                 <span>受信: {result.received}件</span>
                 <span>登録: {result.upserted}件</span>
                 <span>スキップ: {result.skipped}件</span>
+                <span>
+                  返送等の非標準オーダー（スキップ）: {result.skipped_removal_orders ?? 0}件
+                </span>
                 {(result.skipped_cancelled ?? 0) > 0 || (result.cancellation_rollbacks ?? 0) > 0 ? (
                   <span>
                     キャンセル行 {result.skipped_cancelled ?? 0}件 / 巻き戻し {result.cancellation_rollbacks ?? 0}件

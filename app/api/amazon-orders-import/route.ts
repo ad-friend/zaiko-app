@@ -65,6 +65,16 @@ function importRowIndicatesCancelled(row: AmazonOrdersImportRow & Record<string,
   return false;
 }
 
+/**
+ * FBA マルチチャネル等の「手元への返送オーダー」に見られる注文番号形式（S + 2 桁 + 2 区切りの 7 桁）。
+ * 他販路の任意 ID は弾かないよう、このパターンのみブラックリストする。
+ */
+const FBA_REMOVAL_STYLE_ORDER_ID_RE = /^S\d{2}-\d{7}-\d{7}$/;
+
+function isBlacklistedFbaRemovalStyleOrderId(amazonOrderId: string): boolean {
+  return FBA_REMOVAL_STYLE_ORDER_ID_RE.test(amazonOrderId.trim());
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -83,6 +93,7 @@ export async function POST(request: NextRequest) {
     const errors: ImportError[] = [];
     let skippedCancelledNew = 0;
     let skippedCancelledLines = 0;
+    let skippedRemovalOrders = 0;
     let cancellationRollbacks = 0;
     const rolledBackAmazonOrderIds = new Set<string>();
 
@@ -103,6 +114,11 @@ export async function POST(request: NextRequest) {
       }
       if (!sku) {
         errors.push({ type: "invalid_row", index: i, error: "sku が必須です。", row });
+        continue;
+      }
+
+      if (isBlacklistedFbaRemovalStyleOrderId(amazonOrderId)) {
+        skippedRemovalOrders += 1;
         continue;
       }
 
@@ -160,6 +176,7 @@ export async function POST(request: NextRequest) {
           received: inputs.length,
           upserted: 0,
           skipped,
+          skipped_removal_orders: skippedRemovalOrders,
           skipped_cancelled: skippedCancelledLines,
           skipped_cancelled_new: skippedCancelledNew,
           cancellation_rollbacks: cancellationRollbacks,
@@ -171,6 +188,7 @@ export async function POST(request: NextRequest) {
           ok: false,
           upserted: 0,
           skipped,
+          skipped_removal_orders: skippedRemovalOrders,
           skipped_cancelled: skippedCancelledLines,
           skipped_cancelled_new: skippedCancelledNew,
           cancellation_rollbacks: cancellationRollbacks,
@@ -219,6 +237,7 @@ export async function POST(request: NextRequest) {
           error: error.message,
           upserted: 0,
           skipped,
+          skipped_removal_orders: skippedRemovalOrders,
           skipped_cancelled: skippedCancelledLines,
           skipped_cancelled_new: skippedCancelledNew,
           cancellation_rollbacks: cancellationRollbacks,
@@ -235,6 +254,7 @@ export async function POST(request: NextRequest) {
       received: inputs.length,
       upserted,
       skipped,
+      skipped_removal_orders: skippedRemovalOrders,
       skipped_cancelled: skippedCancelledLines,
       skipped_cancelled_new: skippedCancelledNew,
       cancellation_rollbacks: cancellationRollbacks,
