@@ -196,6 +196,7 @@ export default function AmazonOrdersImportPage() {
     upserted: number;
     skipped: number;
     skipped_removal_orders?: number;
+    duplicate_lines_merged?: number;
     skipped_cancelled?: number;
     skipped_cancelled_new?: number;
     cancellation_rollbacks?: number;
@@ -253,6 +254,7 @@ export default function AmazonOrdersImportPage() {
           upserted: 0,
           skipped: 0,
           skipped_removal_orders: 0,
+          duplicate_lines_merged: 0,
           skipped_cancelled: 0,
           errors: parsed.rowErrors,
         });
@@ -271,6 +273,7 @@ export default function AmazonOrdersImportPage() {
         upserted?: number;
         skipped?: number;
         skipped_removal_orders?: number;
+        duplicate_lines_merged?: number;
         skipped_cancelled?: number;
         skipped_cancelled_new?: number;
         cancellation_rollbacks?: number;
@@ -285,6 +288,7 @@ export default function AmazonOrdersImportPage() {
           upserted: data?.upserted ?? 0,
           skipped: data?.skipped ?? 0,
           skipped_removal_orders: data?.skipped_removal_orders,
+          duplicate_lines_merged: data?.duplicate_lines_merged,
           skipped_cancelled: data?.skipped_cancelled,
           skipped_cancelled_new: data?.skipped_cancelled_new,
           cancellation_rollbacks: data?.cancellation_rollbacks,
@@ -301,6 +305,7 @@ export default function AmazonOrdersImportPage() {
         upserted: data.upserted ?? 0,
         skipped: data.skipped ?? 0,
         skipped_removal_orders: data.skipped_removal_orders,
+        duplicate_lines_merged: data.duplicate_lines_merged,
         skipped_cancelled: data.skipped_cancelled,
         skipped_cancelled_new: data.skipped_cancelled_new,
         cancellation_rollbacks: data.cancellation_rollbacks,
@@ -555,6 +560,11 @@ export default function AmazonOrdersImportPage() {
                 <span>
                   返送等の非標準オーダー（スキップ）: {result.skipped_removal_orders ?? 0}件
                 </span>
+                {(result.duplicate_lines_merged ?? 0) > 0 ? (
+                  <span className="text-emerald-800/90" title="同一注文ID・同一SKUの行を1行にまとめました（数量は合算）">
+                    ファイル内の重複行を統合: {result.duplicate_lines_merged}件
+                  </span>
+                ) : null}
                 {(result.skipped_cancelled ?? 0) > 0 || (result.cancellation_rollbacks ?? 0) > 0 ? (
                   <span className="text-emerald-800/90">
                     キャンセル行 {result.skipped_cancelled ?? 0}件（うちDB未登録で破棄: {result.skipped_cancelled_new ?? 0}件） / 在庫巻き戻しした注文:{" "}
@@ -583,6 +593,11 @@ export default function AmazonOrdersImportPage() {
                 <span>
                   返送等の非標準オーダー（スキップ）: {result.skipped_removal_orders ?? 0}件
                 </span>
+                {(result.duplicate_lines_merged ?? 0) > 0 ? (
+                  <span title="同一注文ID・同一SKUの行を1行にまとめました">
+                    ファイル内の重複行を統合: {result.duplicate_lines_merged}件
+                  </span>
+                ) : null}
                 {(result.skipped_cancelled ?? 0) > 0 || (result.cancellation_rollbacks ?? 0) > 0 ? (
                   <span>
                     キャンセル行 {result.skipped_cancelled ?? 0}件 / 巻き戻し {result.cancellation_rollbacks ?? 0}件

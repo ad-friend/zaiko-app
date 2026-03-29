@@ -6,6 +6,14 @@ export type DashboardPeriod = {
   dateEndExclusive: string;
 };
 
+/** GET /api/dashboard が返すお知らせ1件（未確認のみ） */
+export type DashboardNoticeRow = {
+  id: string;
+  notice_type: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+};
+
 export type DashboardPayload = {
   period: DashboardPeriod;
   inventory: { count: number; totalAmount: number };
@@ -18,4 +26,5 @@ export type DashboardPayload = {
     feesAndAdjustments: number;
     profit: number;
   };
+  notices: DashboardNoticeRow[];
 };

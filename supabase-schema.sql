@@ -72,3 +72,19 @@ ALTER TABLE inbound_items
 -- Amazon 返品の検品待ち（引当除外用）。詳細は docs/migration_inbound_items_stock_status.sql
 ALTER TABLE inbound_items
   ADD COLUMN IF NOT EXISTS stock_status TEXT;
+
+-- ダッシュボードお知らせ。詳細は docs/migration_dashboard_notices.sql
+CREATE TABLE IF NOT EXISTS dashboard_notices (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  notice_type TEXT NOT NULL,
+  payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  dismissed_at TIMESTAMPTZ NULL
+);
+CREATE INDEX IF NOT EXISTS idx_dashboard_notices_undismissed
+  ON dashboard_notices (created_at DESC)
+  WHERE dismissed_at IS NULL;
+ALTER TABLE dashboard_notices ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow anon all on dashboard_notices"
+  ON dashboard_notices FOR ALL
+  USING (true) WITH CHECK (true);

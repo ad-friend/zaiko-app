@@ -75,6 +75,64 @@ function isBlacklistedFbaRemovalStyleOrderId(amazonOrderId: string): boolean {
   return FBA_REMOVAL_STYLE_ORDER_ID_RE.test(amazonOrderId.trim());
 }
 
+function amazonOrderUpsertKey(row: Record<string, unknown>): string {
+  return `${String(row.amazon_order_id ?? "").trim()}\t${String(row.sku ?? "").trim()}`;
+}
+
+/**
+ * 同一バッチ内で (amazon_order_id, sku) が重複していると、Postgres の
+ * ON CONFLICT DO UPDATE が「同じ行に2回触れる」として 21000 エラーになる。
+ * レポート上の複数行（同一注文・同一SKU）を1行にまとめてから upsert する。
+ *
+ * - quantity: 合算（複数明細の合計数量想定）
+ * - asin: 空でない値を優先、両方ある場合は後勝ち（ファイル後段を採用）
+ * - created_at: 早い日時を残す（注文日の代表値）
+ */
+const MAX_NOTICE_ORDER_IDS = 400;
+
+function collapseDuplicateAmazonOrderRows(rows: Array<Record<string, unknown>>): {
+  collapsed: Array<Record<string, unknown>>;
+  duplicate_lines_merged: number;
+  amazon_order_ids_with_merge: string[];
+} {
+  const byKey = new Map<string, Record<string, unknown>>();
+  let duplicate_lines_merged = 0;
+  const orderIdsWithMerge = new Set<string>();
+
+  for (const r of rows) {
+    const key = amazonOrderUpsertKey(r);
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, r);
+      continue;
+    }
+
+    duplicate_lines_merged += 1;
+    const oid = String(existing.amazon_order_id ?? "").trim();
+    if (oid) orderIdsWithMerge.add(oid);
+
+    const qA = Math.max(1, Math.floor(Number(existing.quantity) || 1));
+    const qB = Math.max(1, Math.floor(Number(r.quantity) || 1));
+    existing.quantity = qA + qB;
+
+    const asinNew = r.asin != null ? String(r.asin).trim() : "";
+    if (asinNew) {
+      existing.asin = asinNew;
+    }
+
+    const ca = existing.created_at != null ? String(existing.created_at) : "";
+    const cb = r.created_at != null ? String(r.created_at) : "";
+    if (cb && (!ca || cb < ca)) {
+      existing.created_at = r.created_at;
+    }
+
+    existing.updated_at = r.updated_at;
+  }
+
+  const amazon_order_ids_with_merge = [...orderIdsWithMerge].sort();
+  return { collapsed: [...byKey.values()], duplicate_lines_merged, amazon_order_ids_with_merge };
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -176,6 +234,7 @@ export async function POST(request: NextRequest) {
           received: inputs.length,
           upserted: 0,
           skipped,
+          duplicate_lines_merged: 0,
           skipped_removal_orders: skippedRemovalOrders,
           skipped_cancelled: skippedCancelledLines,
           skipped_cancelled_new: skippedCancelledNew,
@@ -188,6 +247,7 @@ export async function POST(request: NextRequest) {
           ok: false,
           upserted: 0,
           skipped,
+          duplicate_lines_merged: 0,
           skipped_removal_orders: skippedRemovalOrders,
           skipped_cancelled: skippedCancelledLines,
           skipped_cancelled_new: skippedCancelledNew,
@@ -220,9 +280,16 @@ export async function POST(request: NextRequest) {
       existingStatuses ?? []
     );
 
+    const { collapsed: rowsToUpsert, duplicate_lines_merged, amazon_order_ids_with_merge } =
+      collapseDuplicateAmazonOrderRows(validRows);
+
+    for (const r of rowsToUpsert) {
+      r.jan_code = resolveJanFromLocalMaps(String(r.sku), r.asin as string | null, asinToJan, skuToJan);
+    }
+
     const { data, error } = await supabase
       .from("amazon_orders")
-      .upsert(validRows, { onConflict: "amazon_order_id,sku" })
+      .upsert(rowsToUpsert, { onConflict: "amazon_order_id,sku" })
       .select("id");
 
     if (error) {
@@ -230,13 +297,14 @@ export async function POST(request: NextRequest) {
         type: "upsert_error",
         error: error.message,
         details: error,
-        chunk: { start: 0, end: validRows.length },
+        chunk: { start: 0, end: rowsToUpsert.length },
       });
       return NextResponse.json(
         {
           error: error.message,
           upserted: 0,
           skipped,
+          duplicate_lines_merged,
           skipped_removal_orders: skippedRemovalOrders,
           skipped_cancelled: skippedCancelledLines,
           skipped_cancelled_new: skippedCancelledNew,
@@ -249,11 +317,30 @@ export async function POST(request: NextRequest) {
 
     const upserted = Array.isArray(data) ? data.length : 0;
 
+    if (duplicate_lines_merged > 0 && amazon_order_ids_with_merge.length > 0) {
+      const idsForPayload = amazon_order_ids_with_merge.slice(0, MAX_NOTICE_ORDER_IDS);
+      const { error: noticeErr } = await supabase.from("dashboard_notices").insert({
+        notice_type: "amazon_order_import_duplicate_lines",
+        payload: {
+          duplicate_lines_merged,
+          amazon_order_ids: idsForPayload,
+          amazon_order_id_count: amazon_order_ids_with_merge.length,
+          truncated: amazon_order_ids_with_merge.length > idsForPayload.length,
+          received: inputs.length,
+          upserted,
+        },
+      });
+      if (noticeErr) {
+        console.error("[amazon-orders-import] dashboard_notices insert failed:", noticeErr.message);
+      }
+    }
+
     return NextResponse.json({
       ok: true,
       received: inputs.length,
       upserted,
       skipped,
+      duplicate_lines_merged,
       skipped_removal_orders: skippedRemovalOrders,
       skipped_cancelled: skippedCancelledLines,
       skipped_cancelled_new: skippedCancelledNew,

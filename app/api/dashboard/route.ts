@@ -234,14 +234,39 @@ async function sumSalesTransactionsForOrders(
   return { revenue, feesAndAdjustments };
 }
 
+async function fetchUndismissedDashboardNotices(): Promise<DashboardPayload["notices"]> {
+  const { data, error } = await supabase
+    .from("dashboard_notices")
+    .select("id, notice_type, payload, created_at")
+    .is("dismissed_at", null)
+    .order("created_at", { ascending: false })
+    .limit(40);
+
+  if (error) {
+    const msg = error.message ?? "";
+    if (error.code === "42P01" || msg.includes("does not exist") || msg.includes("schema cache")) {
+      return [];
+    }
+    throw error;
+  }
+
+  return (data ?? []).map((row) => ({
+    id: String(row.id),
+    notice_type: String(row.notice_type ?? ""),
+    payload: typeof row.payload === "object" && row.payload !== null && !Array.isArray(row.payload) ? (row.payload as Record<string, unknown>) : {},
+    created_at: String(row.created_at ?? ""),
+  }));
+}
+
 export async function GET() {
   try {
     const period = monthBoundsTokyo();
-    const [inventory, monthlyPurchase, monthlyLoss, settled] = await Promise.all([
+    const [inventory, monthlyPurchase, monthlyLoss, settled, notices] = await Promise.all([
       aggregateCurrentInventory(),
       aggregateMonthlyPurchase(period),
       aggregateMonthlyLoss(period),
       fetchSettledInMonth(period),
+      fetchUndismissedDashboardNotices(),
     ]);
     const { revenue, feesAndAdjustments } = await sumSalesTransactionsForOrders(settled.orderIds, period);
     const profit = revenue + feesAndAdjustments - settled.costOfGoodsSold - monthlyLoss.totalAmount;
@@ -264,6 +289,7 @@ export async function GET() {
         feesAndAdjustments,
         profit,
       },
+      notices,
     };
     return NextResponse.json(payload);
   } catch (e: unknown) {
