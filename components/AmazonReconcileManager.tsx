@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import ManualFinanceProcessModal, { type PendingFinanceGroupData } from "@/components/ManualFinanceProcessModal";
+import { normalizeOrderCondition } from "@/lib/amazon-condition-match";
 
 type AmazonOrder = {
   id: number;
@@ -100,6 +101,10 @@ export default function AmazonReconcileManager() {
 
   const handleCandidatesLoaded = useCallback((orderId: number, count: number) => {
     setCandidateCountByOrderId((prev) => ({ ...prev, [orderId]: count }));
+  }, []);
+
+  const handleOrderConditionUpdated = useCallback((orderId: number, condition_id: string) => {
+    setManualOrders((prev) => prev.map((o) => (o.id === orderId ? { ...o, condition_id } : o)));
   }, []);
 
   const filteredManualOrders = showOnlyNoStock
@@ -421,6 +426,7 @@ export default function AmazonReconcileManager() {
                     order={order}
                     onConfirmed={fetchManualOrders}
                     onCandidatesLoaded={handleCandidatesLoaded}
+                    onConditionUpdated={handleOrderConditionUpdated}
                   />
                 ))}
               </div>
@@ -573,16 +579,29 @@ function ManualOrderCard({
   order,
   onConfirmed,
   onCandidatesLoaded,
+  onConditionUpdated,
 }: {
   order: AmazonOrder;
   onConfirmed: () => void;
   onCandidatesLoaded?: (orderId: number, candidateCount: number) => void;
+  onConditionUpdated?: (orderId: number, condition_id: string) => void;
 }) {
   const [candidates, setCandidates] = useState<InboundCandidate[]>([]);
   const [loadingCandidates, setLoadingCandidates] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [conditionId, setConditionId] = useState(order.condition_id);
+  const [conditionSaving, setConditionSaving] = useState(false);
+  const [conditionMessage, setConditionMessage] = useState<{ type: "ok" | "err"; text: string } | null>(null);
+  const [candidatesRefreshKey, setCandidatesRefreshKey] = useState(0);
+
+  useEffect(() => {
+    setConditionId(order.condition_id);
+  }, [order.id, order.condition_id]);
+
+  const orderCondNorm = normalizeOrderCondition(conditionId);
+  const isUsedDisplay = orderCondNorm === "used";
 
   useEffect(() => {
     let cancelled = false;
@@ -591,7 +610,7 @@ function ManualOrderCard({
     const params = new URLSearchParams({ amazon_order_id: order.amazon_order_id });
     if (order.sku) params.set("sku", order.sku);
     fetch(`/api/amazon/orders/candidates?${params}`)
-      .then((res) => res.ok ? res.json() : [])
+      .then((res) => (res.ok ? res.json() : []))
       .then((data) => {
         const list = Array.isArray(data) ? data : [];
         if (!cancelled) {
@@ -608,8 +627,42 @@ function ManualOrderCard({
       .finally(() => {
         if (!cancelled) setLoadingCandidates(false);
       });
-    return () => { cancelled = true; };
-  }, [order.amazon_order_id, order.sku, order.id, onCandidatesLoaded]);
+    return () => {
+      cancelled = true;
+    };
+  }, [order.amazon_order_id, order.sku, order.id, onCandidatesLoaded, candidatesRefreshKey]);
+
+  const patchCondition = async (next: "New" | "Used") => {
+    if (conditionSaving) return;
+    const currentNorm = normalizeOrderCondition(conditionId);
+    const nextNorm = next === "Used" ? "used" : "new";
+    if (currentNorm === nextNorm) return;
+
+    setConditionSaving(true);
+    setConditionMessage(null);
+    try {
+      const res = await fetch("/api/amazon/orders/condition", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: order.id, condition_id: next }),
+      });
+      const data = (await res.json()) as { error?: string; condition_id?: string };
+      if (!res.ok) throw new Error(data.error ?? "コンディションの更新に失敗しました");
+      const saved = data.condition_id ?? next;
+      setConditionId(saved);
+      setSelectedId(null);
+      onConditionUpdated?.(order.id, saved);
+      setCandidatesRefreshKey((k) => k + 1);
+      setConditionMessage({ type: "ok", text: `コンディションを「${next === "Used" ? "中古（Used）" : "新品（New）"}」に更新しました。` });
+    } catch (e) {
+      setConditionMessage({
+        type: "err",
+        text: e instanceof Error ? e.message : "コンディションの更新に失敗しました",
+      });
+    } finally {
+      setConditionSaving(false);
+    }
+  };
 
   const confirmSelection = async () => {
     if (selectedId == null) return;
@@ -655,8 +708,75 @@ function ManualOrderCard({
         >
           {order.amazon_order_id}
         </a>
-        <p className="text-xs text-slate-500 mt-1">SKU: {order.sku} / 状態: {order.condition_id} / 数量: {order.quantity}</p>
-        {order.jan_code && <p className="text-xs text-slate-500 font-medium">JAN: {order.jan_code}</p>}
+        <p className="text-xs text-slate-500 mt-1">
+          SKU: {order.sku} / 数量: {order.quantity}
+        </p>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <span
+            className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+              orderCondNorm == null
+                ? "bg-amber-100 text-amber-900"
+                : isUsedDisplay
+                  ? "bg-violet-100 text-violet-800"
+                  : "bg-emerald-100 text-emerald-800"
+            }`}
+          >
+            コンディション:{" "}
+            {orderCondNorm == null
+              ? `未判定（${conditionId || "—"}）`
+              : isUsedDisplay
+                ? "中古（Used）"
+                : "新品（New）"}
+          </span>
+          {orderCondNorm == null ? (
+            <div className="flex flex-wrap gap-1.5">
+              <button
+                type="button"
+                disabled={conditionSaving}
+                onClick={() => patchCondition("New")}
+                className="rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-medium text-emerald-900 hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {conditionSaving ? "更新中..." : "新品（New）に設定"}
+              </button>
+              <button
+                type="button"
+                disabled={conditionSaving}
+                onClick={() => patchCondition("Used")}
+                className="rounded-md border border-violet-200 bg-violet-50 px-2.5 py-1 text-[11px] font-medium text-violet-800 hover:bg-violet-100 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {conditionSaving ? "更新中..." : "中古（Used）に設定"}
+              </button>
+            </div>
+          ) : isUsedDisplay ? (
+            <button
+              type="button"
+              disabled={conditionSaving}
+              onClick={() => patchCondition("New")}
+              className="rounded-md border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {conditionSaving ? "更新中..." : "新品（New）に変更"}
+            </button>
+          ) : (
+            <button
+              type="button"
+              disabled={conditionSaving}
+              onClick={() => patchCondition("Used")}
+              className="rounded-md border border-violet-200 bg-violet-50 px-2.5 py-1 text-[11px] font-medium text-violet-800 hover:bg-violet-100 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {conditionSaving ? "更新中..." : "中古（Used）に変更"}
+            </button>
+          )}
+        </div>
+        {conditionMessage && (
+          <p
+            className={`mt-1.5 text-[11px] ${conditionMessage.type === "ok" ? "text-emerald-700" : "text-red-600"}`}
+            role="status"
+          >
+            {conditionMessage.type === "ok" ? "✓ " : ""}
+            {conditionMessage.text}
+          </p>
+        )}
+        {order.jan_code && <p className="text-xs text-slate-500 font-medium mt-1">JAN: {order.jan_code}</p>}
         {order.asin && <p className="text-xs text-slate-500 font-medium">ASIN: {order.asin}</p>}
       </div>
       {loadingCandidates ? (
@@ -693,7 +813,7 @@ function ManualOrderCard({
           <button
             type="button"
             onClick={confirmSelection}
-            disabled={selectedId == null || submitting}
+            disabled={selectedId == null || submitting || conditionSaving}
             className={`${buttonClass} w-full bg-amber-500 text-white hover:bg-amber-600 disabled:bg-slate-300 text-sm`}
           >
             {submitting ? "確定中..." : "この在庫で確定"}
