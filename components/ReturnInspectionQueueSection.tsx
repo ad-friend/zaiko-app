@@ -27,7 +27,7 @@ function ReturnInspectionCard({
   row: ReturnInspectionRow;
   onConfirmed: (id: number) => void;
 }) {
-  const [cond, setCond] = useState<"new" | "used">(() => initialListingCondition(row.condition_type));
+  const [cond, setCond] = useState<"new" | "used" | "junk">(() => initialListingCondition(row.condition_type));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -38,10 +38,14 @@ function ReturnInspectionCard({
     setSubmitting(true);
     setError(null);
     try {
+      const body =
+        cond === "junk"
+          ? { id: row.id, action: "junk" as const }
+          : { id: row.id, condition_type: cond };
       const res = await fetch("/api/amazon/return-inspection", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: row.id, condition_type: cond }),
+        body: JSON.stringify(body),
       });
       const data = (await res.json().catch(() => ({}))) as { error?: string };
       if (!res.ok) throw new Error(data.error ?? "更新に失敗しました");
@@ -82,7 +86,7 @@ function ReturnInspectionCard({
 
         <div className="rounded-lg border border-rose-100 bg-white/90 p-2.5 space-y-2">
           <p className="text-[11px] font-bold text-slate-700">コンディション（再判定）</p>
-          <div className="flex gap-1.5">
+          <div className="flex flex-wrap gap-1.5">
             <button
               type="button"
               disabled={submitting}
@@ -107,6 +111,18 @@ function ReturnInspectionCard({
             >
               中古（Used）
             </button>
+            <button
+              type="button"
+              disabled={submitting}
+              onClick={() => setCond("junk")}
+              className={`${condToggleClass} flex-[1_1_100%] sm:flex-1 ${
+                cond === "junk"
+                  ? "border-red-500 bg-red-100 text-red-950 ring-2 ring-red-400/70"
+                  : "border-slate-300 bg-slate-100 text-slate-800 hover:bg-slate-200"
+              }`}
+            >
+              ジャンク（廃棄）
+            </button>
           </div>
           <p className="text-[10px] text-slate-500 leading-snug">
             DB: <span className="font-mono">{row.condition_type ?? "—"}</span>
@@ -117,9 +133,13 @@ function ReturnInspectionCard({
           type="button"
           onClick={() => void submit()}
           disabled={submitting}
-          className={`${buttonClass} h-9 w-full bg-rose-600 text-xs font-bold text-white hover:bg-rose-700 disabled:bg-slate-300 px-3`}
+          className={`${buttonClass} h-9 w-full text-xs font-bold text-white disabled:bg-slate-300 px-3 ${
+            cond === "junk"
+              ? "bg-slate-700 hover:bg-slate-800"
+              : "bg-rose-600 hover:bg-rose-700"
+          }`}
         >
-          {submitting ? "処理中…" : "在庫として再登録"}
+          {submitting ? "処理中…" : cond === "junk" ? "廃棄として確定" : "在庫として再登録"}
         </button>
         {error ? <p className="text-xs font-medium text-red-700">{error}</p> : null}
       </div>

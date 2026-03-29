@@ -1,11 +1,17 @@
 /**
- * Amazon 返品: 検品待ち（stock_status=return_inspection）の一覧と、確定（condition_type 更新 + available）
+ * Amazon 返品: 検品待ち（stock_status=return_inspection）の一覧と、確定（再販 or ジャンク廃棄）
  */
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
-import { STOCK_STATUS_AVAILABLE, STOCK_STATUS_RETURN_INSPECTION } from "@/lib/inbound-stock-status";
+import {
+  EXIT_TYPE_JUNK_RETURN,
+  STOCK_STATUS_AVAILABLE,
+  STOCK_STATUS_DISPOSED,
+  STOCK_STATUS_RETURN_INSPECTION,
+} from "@/lib/inbound-stock-status";
 
 const CONDITION_VALUES = new Set(["new", "used"]);
+const JUNK_ACTIONS = new Set(["junk", "dispose"]);
 
 export async function GET() {
   try {
@@ -27,15 +33,44 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   try {
-    const body = (await request.json()) as { id?: unknown; condition_type?: unknown };
+    const body = (await request.json()) as { id?: unknown; condition_type?: unknown; action?: unknown };
     const id = body.id != null ? Number(body.id) : NaN;
+    const actionRaw = body.action != null ? String(body.action).trim().toLowerCase() : "";
     const condition_type = body.condition_type != null ? String(body.condition_type).trim().toLowerCase() : "";
 
     if (!Number.isFinite(id) || id < 1) {
       return NextResponse.json({ error: "有効な id を指定してください。" }, { status: 400 });
     }
+
+    const isJunk = JUNK_ACTIONS.has(actionRaw);
+
+    if (isJunk) {
+      const { data: updated, error } = await supabase
+        .from("inbound_items")
+        .update({
+          stock_status: STOCK_STATUS_DISPOSED,
+          exit_type: EXIT_TYPE_JUNK_RETURN,
+        })
+        .eq("id", id)
+        .eq("stock_status", STOCK_STATUS_RETURN_INSPECTION)
+        .select("id");
+
+      if (error) throw error;
+      if (!updated?.length) {
+        return NextResponse.json(
+          { error: "対象行が見つからないか、すでに検品済みです。" },
+          { status: 409 }
+        );
+      }
+
+      return NextResponse.json({ ok: true, id, action: "junk" });
+    }
+
     if (!CONDITION_VALUES.has(condition_type)) {
-      return NextResponse.json({ error: "condition_type は new または used を指定してください。" }, { status: 400 });
+      return NextResponse.json(
+        { error: "condition_type は new / used、または action に junk / dispose を指定してください。" },
+        { status: 400 }
+      );
     }
 
     const { data: updated, error } = await supabase

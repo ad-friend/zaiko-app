@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Ban, Trash2 } from "lucide-react";
 import ManualFinanceProcessModal, { type PendingFinanceGroupData } from "@/components/ManualFinanceProcessModal";
 import ReturnInspectionQueueSection from "@/components/ReturnInspectionQueueSection";
@@ -676,6 +676,10 @@ function ManualOrderCard({
   const [candidatesRefreshKey, setCandidatesRefreshKey] = useState(0);
   const [deleting, setDeleting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [rescueExtra, setRescueExtra] = useState<InboundCandidate[]>([]);
+  const [rescueQuery, setRescueQuery] = useState("");
+  const [rescueLoading, setRescueLoading] = useState(false);
+  const [rescueError, setRescueError] = useState<string | null>(null);
 
   useEffect(() => {
     setConditionId(order.condition_id);
@@ -683,6 +687,23 @@ function ManualOrderCard({
 
   const orderCondNorm = normalizeOrderCondition(conditionId);
   const isUsedDisplay = orderCondNorm === "used";
+
+  const mergedCandidates = useMemo(() => {
+    const m = new Map<number, InboundCandidate>();
+    for (const c of candidates) m.set(c.id, c);
+    for (const c of rescueExtra) m.set(c.id, c);
+    return [...m.values()].sort((a, b) => a.id - b.id);
+  }, [candidates, rescueExtra]);
+
+  useEffect(() => {
+    onCandidatesLoaded?.(orderStableKey(order), mergedCandidates.length);
+  }, [mergedCandidates.length, order, onCandidatesLoaded]);
+
+  useEffect(() => {
+    setRescueExtra([]);
+    setRescueQuery("");
+    setRescueError(null);
+  }, [order.id, order.amazon_order_id, order.sku, candidatesRefreshKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -696,13 +717,11 @@ function ManualOrderCard({
         const list = Array.isArray(data) ? data : [];
         if (!cancelled) {
           setCandidates(list);
-          onCandidatesLoaded?.(orderStableKey(order), list.length);
         }
       })
       .catch(() => {
         if (!cancelled) {
           setError("候補の取得に失敗しました");
-          onCandidatesLoaded?.(orderStableKey(order), 0);
         }
       })
       .finally(() => {
@@ -711,7 +730,58 @@ function ManualOrderCard({
     return () => {
       cancelled = true;
     };
-  }, [order.amazon_order_id, order.sku, order.id, onCandidatesLoaded, candidatesRefreshKey]);
+  }, [order.amazon_order_id, order.sku, order.id, candidatesRefreshKey]);
+
+  const runRescueSearch = async () => {
+    const q = rescueQuery.trim();
+    if (q.length < 1) {
+      setRescueError("検索語を入力してください");
+      return;
+    }
+    setRescueLoading(true);
+    setRescueError(null);
+    try {
+      const params = new URLSearchParams({ search: q, amazon_order_id: order.amazon_order_id });
+      const res = await fetch(`/api/amazon/candidate-stocks?${params}`);
+      const raw: unknown = await res.json().catch(() => null);
+      if (!res.ok) {
+        const msg =
+          raw &&
+          typeof raw === "object" &&
+          "error" in raw &&
+          typeof (raw as { error?: unknown }).error === "string"
+            ? (raw as { error: string }).error
+            : "検索に失敗しました";
+        throw new Error(msg);
+      }
+      const list = Array.isArray(raw) ? raw : [];
+      type ApiCand = {
+        id: number;
+        sku: string | null;
+        condition: string | null;
+        product_name: string | null;
+        created_at: string | null;
+        amazon_order_id: string | null;
+      };
+      const mapped: InboundCandidate[] = (list as ApiCand[]).map((r) => ({
+        id: r.id,
+        jan_code: r.sku,
+        product_name: r.product_name,
+        condition_type: r.condition,
+        created_at: r.created_at ?? "",
+        order_id: r.amazon_order_id,
+      }));
+      setRescueExtra(mapped);
+      if (mapped.length === 0) {
+        setRescueError("該当する在庫がありませんでした");
+      }
+    } catch (e) {
+      setRescueError(e instanceof Error ? e.message : "検索に失敗しました");
+      setRescueExtra([]);
+    } finally {
+      setRescueLoading(false);
+    }
+  };
 
   const patchCondition = async (next: "New" | "Used") => {
     if (conditionSaving) return;
@@ -871,7 +941,8 @@ function ManualOrderCard({
     }
   };
 
-  const noCandidates = !loadingCandidates && candidates.length === 0;
+  const hasSelectableStock = mergedCandidates.length > 0;
+  const autoCandidatesEmpty = !loadingCandidates && candidates.length === 0;
 
   const createdLabel =
     order.created_at != null && String(order.created_at).trim() !== ""
@@ -891,7 +962,7 @@ function ManualOrderCard({
   return (
     <div
       className={`min-w-0 w-full rounded-lg border-2 p-4 lg:p-5 shadow-sm transition-shadow ${
-        noCandidates
+        !loadingCandidates && !hasSelectableStock
           ? "border-red-200/90 bg-red-50/40 hover:shadow-md"
           : "border-slate-200/90 bg-white hover:shadow-md hover:border-slate-300"
       }`}
@@ -1058,45 +1129,94 @@ function ManualOrderCard({
 
         {loadingCandidates ? (
           <p className="text-xs font-medium text-slate-500">在庫候補を取得中…</p>
-        ) : noCandidates ? (
-          <div className="space-y-2 rounded-lg border border-red-100 bg-red-50/50 p-3">
-            <p className="text-xs font-semibold text-red-800 flex items-start gap-1.5 leading-snug">
-              <span className="shrink-0" aria-hidden>
-                ⚠
-              </span>
-              紐付け可能な在庫がありません。JAN / ASIN を確認し在庫を登録してください。
-            </p>
-            <button
-              type="button"
-              disabled
-              className={`${buttonClass} h-9 w-full cursor-not-allowed bg-slate-200 text-slate-500 text-xs`}
-            >
-              手動で紐付け（在庫なしのため選択不可）
-            </button>
-          </div>
         ) : (
-          <div className="space-y-2 border-t border-slate-100 pt-3">
-            <label className="block text-xs font-bold text-slate-700">在庫候補を選択</label>
-            <select
-              value={selectedId ?? ""}
-              onChange={(e) => setSelectedId(e.target.value ? Number(e.target.value) : null)}
-              className="w-full rounded-md border-2 border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-800 focus:border-amber-400 focus:outline-none focus:ring-2 focus:ring-amber-400/30"
-            >
-              <option value="">選択してください</option>
-              {candidates.map((c) => (
-                <option key={c.id} value={c.id}>
-                  ID:{c.id} {c.product_name ?? ""} ({c.created_at?.slice(0, 10)})
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              onClick={confirmSelection}
-              disabled={selectedId == null || submitting || conditionSaving}
-              className={`${buttonClass} h-10 w-full bg-amber-600 text-sm font-bold text-white shadow-sm hover:bg-amber-700 disabled:bg-slate-300 disabled:text-slate-500`}
-            >
-              {submitting ? "確定中…" : "この在庫で確定"}
-            </button>
+          <div className="space-y-3 border-t border-slate-100 pt-3">
+            <div className="rounded-lg border border-sky-200 bg-sky-50/60 p-3 space-y-2">
+              <p className="text-xs font-bold text-sky-900">強制検索（カタログ消滅・JAN 不明時）</p>
+              <p className="text-[11px] text-sky-900/85 leading-snug">
+                Amazon 側で SKU から JAN が取れず候補が 0 件のとき、手元在庫を{" "}
+                <span className="font-medium">JAN コード</span> または <span className="font-medium">商品名の一部</span>{" "}
+                で検索します（未引当・検品待ち以外は除外）。
+              </p>
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <input
+                  type="text"
+                  value={rescueQuery}
+                  onChange={(e) => setRescueQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void runRescueSearch();
+                    }
+                  }}
+                  placeholder="例: 4901234567890 または 商品名の一部"
+                  disabled={rescueLoading || submitting}
+                  className="min-w-0 flex-1 rounded-md border border-sky-200 bg-white px-2.5 py-2 text-xs text-slate-800 placeholder:text-slate-400 focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-300/40"
+                />
+                <button
+                  type="button"
+                  onClick={() => void runRescueSearch()}
+                  disabled={rescueLoading || submitting}
+                  className={`${buttonClass} h-9 shrink-0 bg-sky-700 text-white hover:bg-sky-800 text-xs px-4 disabled:bg-slate-300`}
+                >
+                  {rescueLoading ? "検索中…" : "検索"}
+                </button>
+              </div>
+              {rescueError ? <p className="text-[11px] font-medium text-red-700">{rescueError}</p> : null}
+              {rescueExtra.length > 0 ? (
+                <p className="text-[11px] text-sky-800/90">レスキュー検索で {rescueExtra.length} 件ヒット（下の候補に反映）</p>
+              ) : null}
+            </div>
+
+            {!hasSelectableStock ? (
+              <div className="space-y-2 rounded-lg border border-red-100 bg-red-50/50 p-3">
+                <p className="text-xs font-semibold text-red-800 flex items-start gap-1.5 leading-snug">
+                  <span className="shrink-0" aria-hidden>
+                    ⚠
+                  </span>
+                  {autoCandidatesEmpty
+                    ? "自動候補がありません。上の強制検索で在庫を探すか、JAN / ASIN を確認して在庫を登録してください。"
+                    : "表示できる在庫候補がありません。"}
+                </p>
+                <button
+                  type="button"
+                  disabled
+                  className={`${buttonClass} h-9 w-full cursor-not-allowed bg-slate-200 text-slate-500 text-xs`}
+                >
+                  手動で紐付け（候補なしのため選択不可）
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <label className="block text-xs font-bold text-slate-700">
+                  在庫候補を選択
+                  {rescueExtra.length > 0 ? (
+                    <span className="ml-1.5 font-normal text-sky-700">（強制検索の結果を含む）</span>
+                  ) : null}
+                </label>
+                <select
+                  value={selectedId ?? ""}
+                  onChange={(e) => setSelectedId(e.target.value ? Number(e.target.value) : null)}
+                  className="w-full rounded-md border-2 border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-800 focus:border-amber-400 focus:outline-none focus:ring-2 focus:ring-amber-400/30"
+                >
+                  <option value="">選択してください</option>
+                  {mergedCandidates.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      ID:{c.id} JAN:{c.jan_code ?? "—"} {c.product_name ? String(c.product_name).slice(0, 28) : ""}
+                      {c.created_at ? ` (${c.created_at.slice(0, 10)})` : ""}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={confirmSelection}
+                  disabled={selectedId == null || submitting || conditionSaving}
+                  className={`${buttonClass} h-10 w-full bg-amber-600 text-sm font-bold text-white shadow-sm hover:bg-amber-700 disabled:bg-slate-300 disabled:text-slate-500`}
+                >
+                  {submitting ? "確定中…" : "この在庫で確定"}
+                </button>
+              </div>
+            )}
           </div>
         )}
 
