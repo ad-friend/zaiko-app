@@ -6,7 +6,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { applyPreservedReconciliationStatusForUpsert } from "@/lib/amazon-order-reconciliation-status";
-import { is13DigitJan, resolveJanForAmazonOrderLine } from "@/lib/amazon-resolve-order-jan";
+import { buildLocalJanLookupMaps, resolveJanFromLocalMaps } from "@/lib/amazon-order-local-jan";
 
 const MARKETPLACE_ID_JP = "A1VC38T7YXB528";
 
@@ -176,14 +176,6 @@ export async function GET(request: NextRequest) {
         const qty = Math.max(1, Number(item.QuantityOrdered) || 1);
         const conditionId = normalizeConditionId(item.ConditionId);
         const asin = item.ASIN ? String(item.ASIN).trim() : null;
-        let jan_code: string | null = is13DigitJan(sku) ? sku : null;
-        if (!jan_code && asin) {
-          jan_code = await resolveJanForAmazonOrderLine(supabase, spClient, {
-            sku: sku || "UNKNOWN",
-            asin,
-          });
-          await sleep(250);
-        }
 
         rows.push({
           amazon_order_id: amazonOrderId,
@@ -191,7 +183,7 @@ export async function GET(request: NextRequest) {
           quantity: qty,
           condition_id: conditionId,
           reconciliation_status: "pending",
-          jan_code,
+          jan_code: null,
           asin,
         });
       }
@@ -207,6 +199,13 @@ export async function GET(request: NextRequest) {
         orderItemsProcessed: 0,
         rowsUpserted: 0,
       });
+    }
+
+    const asinList = rows.map((r) => r.asin).filter((a): a is string => Boolean(a));
+    const skuList = rows.map((r) => r.sku);
+    const { asinToJan, skuToJan } = await buildLocalJanLookupMaps(supabase, asinList, skuList);
+    for (const r of rows) {
+      r.jan_code = resolveJanFromLocalMaps(r.sku, r.asin, asinToJan, skuToJan);
     }
 
     const distinctOrderIds = [...new Set(rows.map((r) => r.amazon_order_id))];

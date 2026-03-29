@@ -1,8 +1,7 @@
 /**
  * Amazon注文 自動消込エンジン（API）
- * POST: reconciliation_status = 'pending' のみ処理。
- * 1) pending かつ jan 未設定: getOrderItems で ConditionId 補完 → ユニーク ASIN で JAN バルク解決 → jan_code・condition_id を一括 UPDATE
- * 2) sku_mappings セット品 → 単品 JAN 照合の既存フロー
+ * - pending かつ (jan_code IS NULL OR condition_id IS NULL) を最大20件取得し、SP で JAN・condition・ASIN を補完（products は既存 JAN の asin のみ UPDATE）
+ * - 続けて pending を最大20件マッチング（sku_mappings セット・コンディション正規化・Used 安全装置・引き当て時は order_id + settled_at）
  */
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
@@ -12,26 +11,7 @@ import {
   AMAZON_ORDER_STATUS_RECONCILED,
 } from "@/lib/amazon-order-reconciliation-status";
 import { normalizeOrderCondition, normalizeStockCondition } from "@/lib/amazon-condition-match";
-import { buildAmazonOrderSkuToConditionMap, buildAsinToJanMap, is13DigitJan } from "@/lib/amazon-resolve-order-jan";
-import { tryCreateSpClient } from "@/lib/amazon-sp-try-client";
-
-/** 1 リクエストあたりのマッチング対象件数（Vercel タイムアウト対策） */
-const RECONCILE_MATCH_BATCH_SIZE = 50;
-
-async function countPendingAmazonOrders(): Promise<number> {
-  const { count, error } = await supabase
-    .from("amazon_orders")
-    .select("id", { count: "exact", head: true })
-    .eq("reconciliation_status", AMAZON_ORDER_STATUS_PENDING);
-  if (error) throw new Error(error.message);
-  return count ?? 0;
-}
-
-function chunkIds(ids: number[], size: number): number[][] {
-  const out: number[][] = [];
-  for (let i = 0; i < ids.length; i += size) out.push(ids.slice(i, i + size));
-  return out;
-}
+import { healReconcileOrdersFromSpApi } from "@/lib/amazon-reconcile-sp-heal";
 
 function sortFifo(a: { id: number; created_at: string | null }, b: { id: number; created_at: string | null }): number {
   const ta = a.created_at ? Date.parse(a.created_at) : 0;
@@ -58,7 +38,11 @@ async function updateAmazonOrderReconciliation(
 
 async function unlinkInboundFromOrder(inboundIds: number[], amazonOrderId: string): Promise<void> {
   if (inboundIds.length === 0) return;
-  await supabase.from("inbound_items").update({ order_id: null }).in("id", inboundIds).eq("order_id", amazonOrderId);
+  await supabase
+    .from("inbound_items")
+    .update({ order_id: null, settled_at: null })
+    .in("id", inboundIds)
+    .eq("order_id", amazonOrderId);
 }
 
 function filterAvailableByOrderId<T extends { order_id: string | null }>(
@@ -79,8 +63,12 @@ async function finalizeReconciledInboundIds(
   janForRow: string
 ): Promise<void> {
   const linked: number[] = [];
+  const settledAt = new Date().toISOString();
   for (const id of inboundIds) {
-    const { error: uErr } = await supabase.from("inbound_items").update({ order_id: amazonOrderId }).eq("id", id);
+    const { error: uErr } = await supabase
+      .from("inbound_items")
+      .update({ order_id: amazonOrderId, settled_at: settledAt })
+      .eq("id", id);
     if (uErr) {
       await unlinkInboundFromOrder(linked, amazonOrderId);
       throw new Error(uErr.message);
@@ -96,117 +84,39 @@ async function finalizeReconciledInboundIds(
 
 export async function POST() {
   try {
-    const { data: pendingForJanFill, error: janFetchErr } = await supabase
+    const { data: healTargets, error: healFetchErr } = await supabase
       .from("amazon_orders")
-      .select("id, amazon_order_id, sku, asin, jan_code, condition_id")
+      .select("id, amazon_order_id, sku, condition_id, quantity, jan_code, asin")
       .eq("reconciliation_status", AMAZON_ORDER_STATUS_PENDING)
-      .order("created_at", { ascending: true });
+      .or("jan_code.is.null,condition_id.is.null")
+      .order("created_at", { ascending: true })
+      .limit(20);
 
-    if (janFetchErr) throw janFetchErr;
+    if (healFetchErr) throw healFetchErr;
+    await healReconcileOrdersFromSpApi(supabase, healTargets ?? []);
 
-    if (!pendingForJanFill?.length) {
+    const { data: pendingOrders, error: fetchError } = await supabase
+      .from("amazon_orders")
+      .select("id, amazon_order_id, sku, condition_id, quantity, jan_code, asin")
+      .eq("reconciliation_status", AMAZON_ORDER_STATUS_PENDING)
+      .order("created_at", { ascending: true })
+      .limit(20);
+
+    if (fetchError) throw fetchError;
+    if (!pendingOrders?.length) {
       return NextResponse.json({
         ok: true,
         message: "対象のpending注文がありません。",
         processed: 0,
-        processedCount: 0,
-        hasMore: false,
         completed: 0,
         manual_required: 0,
-      });
-    }
-
-    const needJan = pendingForJanFill.filter((r) => !String(r.jan_code ?? "").trim());
-    if (needJan.length > 0) {
-      const spClient = tryCreateSpClient();
-
-      const uniqueOrderIds = [
-        ...new Set(
-          needJan
-            .map((r) => String(r.amazon_order_id ?? "").trim())
-            .filter(Boolean)
-        ),
-      ];
-      const orderSkuToCondition = await buildAmazonOrderSkuToConditionMap(spClient, uniqueOrderIds);
-
-      const uniqueAsins = new Set<string>();
-      for (const row of needJan) {
-        const sku = String(row.sku ?? "").trim();
-        if (is13DigitJan(sku)) continue;
-        const asin = row.asin != null ? String(row.asin).trim() : "";
-        if (asin.length >= 10) uniqueAsins.add(asin);
-      }
-
-      const asinToJan =
-        uniqueAsins.size > 0 ? await buildAsinToJanMap(supabase, spClient, [...uniqueAsins]) : new Map<string, string>();
-
-      type Patch = { jan: string | null; condition: string };
-      const groupKey = (p: Patch) => `${p.jan ?? ""}\t${p.condition}`;
-      const patches = new Map<string, Patch & { ids: number[] }>();
-
-      for (const row of needJan) {
-        const sku = String(row.sku ?? "").trim();
-        const orderId = String(row.amazon_order_id ?? "").trim();
-        const condKey = `${orderId}\t${sku}`;
-        const prevCond = String(row.condition_id ?? "").trim() || "New";
-        const condition = orderSkuToCondition.get(condKey) ?? prevCond;
-
-        let jan: string | null = null;
-        if (is13DigitJan(sku)) jan = sku;
-        else {
-          const asin = row.asin != null ? String(row.asin).trim() : "";
-          if (asin.length >= 10) jan = asinToJan.get(asin) ?? null;
-        }
-
-        const patch: Patch = { jan, condition };
-        const k = groupKey(patch);
-        let g = patches.get(k);
-        if (!g) {
-          g = { jan, condition, ids: [] };
-          patches.set(k, g);
-        }
-        g.ids.push(row.id);
-      }
-
-      const nowJanIso = new Date().toISOString();
-      for (const { jan, condition, ids } of patches.values()) {
-        for (const idChunk of chunkIds(ids, 200)) {
-          const { error: upErr } = await supabase
-            .from("amazon_orders")
-            .update({
-              jan_code: jan,
-              condition_id: condition,
-              updated_at: nowJanIso,
-            })
-            .in("id", idChunk);
-          if (upErr) throw upErr;
-        }
-      }
-    }
-
-    const { data: pendingOrders, error: fetchError } = await supabase
-      .from("amazon_orders")
-      .select("id, amazon_order_id, sku, condition_id, quantity, jan_code")
-      .eq("reconciliation_status", AMAZON_ORDER_STATUS_PENDING)
-      .order("created_at", { ascending: true })
-      .limit(RECONCILE_MATCH_BATCH_SIZE);
-
-    if (fetchError) throw fetchError;
-    if (!pendingOrders?.length) {
-      const remainingAfter = await countPendingAmazonOrders();
-      return NextResponse.json({
-        ok: true,
-        message: "マッチング対象のpending注文はありません（JAN補完のみ実施した可能性があります）。",
-        processed: 0,
-        processedCount: 0,
-        hasMore: remainingAfter > 0,
-        completed: 0,
-        manual_required: 0,
+        skipped_used_safety: 0,
       });
     }
 
     let completed = 0;
     let manualRequired = 0;
+    let skippedUsedSafety = 0;
 
     for (const order of pendingOrders) {
       const orderId = order.amazon_order_id;
@@ -240,9 +150,14 @@ export async function POST() {
         mapList.length > 0 && (mapList.length > 1 || (Number(mapList[0].quantity) || 1) > 1);
 
       if (isSetProduct) {
+        if (orderCond === "used" && orderQty >= 2) {
+          skippedUsedSafety++;
+          continue;
+        }
         try {
           const collectedIds: number[] = [];
           let setOk = true;
+          let usedSafetyAbortSet = false;
           for (const m of mapList) {
             const need = (Number(m.quantity) || 1) * orderQty;
             const { data: stockRows, error: stockErr } = await supabase
@@ -259,7 +174,16 @@ export async function POST() {
               setOk = false;
               break;
             }
+            if (orderCond === "used" && matching.length > need) {
+              setOk = false;
+              usedSafetyAbortSet = true;
+              break;
+            }
             collectedIds.push(...matching.slice(0, need).map((r) => r.id));
+          }
+          if (usedSafetyAbortSet) {
+            skippedUsedSafety++;
+            continue;
           }
           if (setOk && collectedIds.length > 0) {
             const janForRow =
@@ -332,17 +256,14 @@ export async function POST() {
         }
 
         if (matching.length >= 2) {
-          const { error } = await updateAmazonOrderReconciliation(order.id, AMAZON_ORDER_STATUS_MANUAL_REQUIRED, jan);
-          if (error) throw error;
-          manualRequired++;
+          skippedUsedSafety++;
           continue;
         }
         if (matching.length === 1 && orderQty === 1) {
           await finalizeReconciled(matching);
         } else {
-          const { error } = await updateAmazonOrderReconciliation(order.id, AMAZON_ORDER_STATUS_MANUAL_REQUIRED, jan);
-          if (error) throw error;
-          manualRequired++;
+          skippedUsedSafety++;
+          continue;
         }
       } catch (e) {
         console.error("[amazon/reconcile] order row id=%s rollback or failure:", order.id, e);
@@ -352,17 +273,13 @@ export async function POST() {
       }
     }
 
-    const processedCount = pendingOrders.length;
-    const remainingPending = await countPendingAmazonOrders();
-
     return NextResponse.json({
       ok: true,
       message: "消込処理を実行しました。",
-      processed: processedCount,
-      processedCount,
-      hasMore: remainingPending > 0,
+      processed: pendingOrders.length,
       completed,
       manual_required: manualRequired,
+      skipped_used_safety: skippedUsedSafety,
     });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "消込処理に失敗しました。";

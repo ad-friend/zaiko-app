@@ -1,87 +1,73 @@
 /**
- * Amazon Orders API v0: getOrderItems から明細行の ConditionId 等を取得する。
- * CSV インポートで欠落したコンディションを SP-API で補完する用途。
+ * Orders API: getOrderItems の取得（ページング対応）。
+ * カタログ API は含まない。
  */
-import { sleep } from "@/lib/amazon-sp-try-client";
-
-export type SpClientLike = {
-  callAPI: (params: Record<string, unknown>) => Promise<unknown>;
-};
-
-/** SP-API OrderItems の 1 行（必要フィールドのみ） */
-export type AmazonOrderItemLine = {
-  ASIN?: string;
+export type OrderItemLite = {
   SellerSKU?: string;
-  QuantityOrdered?: number;
+  ASIN?: string;
   ConditionId?: string;
 };
 
-type GetOrderItemsResponse = {
-  OrderItems?: AmazonOrderItemLine[];
-  NextToken?: string;
+export type SpClientInstance = {
+  callAPI: (req: Record<string, unknown>) => Promise<unknown>;
 };
 
-/**
- * OrderItem の ConditionId（New / Used / UsedLikeNew 等）を DB 保存用に New | Used に寄せる。
- * fetch-orders の normalizeConditionId と同じ前提。
- */
+export function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+export function tryCreateAmazonSpClient(): SpClientInstance | null {
+  const clientId = process.env.SP_API_CLIENT_ID;
+  const clientSecret = process.env.SP_API_CLIENT_SECRET;
+  const refreshToken = process.env.SP_API_REFRESH_TOKEN;
+  const accessKey = process.env.SP_API_AWS_ACCESS_KEY;
+  const secretKey = process.env.SP_API_AWS_SECRET_KEY;
+  if (!clientId || !clientSecret || !refreshToken || !accessKey || !secretKey) return null;
+  try {
+    const SellingPartnerAPI = require("amazon-sp-api") as new (opts: unknown) => SpClientInstance;
+    return new SellingPartnerAPI({
+      region: "fe",
+      refresh_token: refreshToken,
+      credentials: {
+        SELLING_PARTNER_APP_CLIENT_ID: clientId,
+        SELLING_PARTNER_APP_CLIENT_SECRET: clientSecret,
+        AWS_ACCESS_KEY_ID: accessKey,
+        AWS_SECRET_ACCESS_KEY: secretKey,
+        AWS_SELLING_PARTNER_ROLE: "",
+      },
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** fetch-orders と同じ New/Used 正規化（OrderItems.ConditionId 用） */
 export function normalizeOrderItemConditionId(conditionId: string | null | undefined): "New" | "Used" {
   const c = String(conditionId ?? "").trim().toLowerCase();
   if (c === "new" || c === "newitem" || c === "new_item") return "New";
   return "Used";
 }
 
-async function fetchAllOrderItemLines(spClient: SpClientLike, amazonOrderId: string): Promise<AmazonOrderItemLine[]> {
-  const out: AmazonOrderItemLine[] = [];
+export async function fetchAllOrderItems(sp: SpClientInstance, amazonOrderId: string): Promise<OrderItemLite[]> {
+  const out: OrderItemLite[] = [];
   let nextToken: string | undefined;
-  const oid = String(amazonOrderId ?? "").trim();
-  if (!oid) return out;
-
-  do {
+  for (let guard = 0; guard < 20; guard++) {
     const query: Record<string, string> = {};
     if (nextToken) query.NextToken = nextToken;
-
-    const res = (await spClient.callAPI({
+    const res = (await sp.callAPI({
       operation: "getOrderItems",
       endpoint: "orders",
-      path: { orderId: oid },
-      query,
-    })) as GetOrderItemsResponse;
-
-    out.push(...(res.OrderItems ?? []));
-    nextToken = res.NextToken?.trim() || undefined;
-  } while (nextToken);
-
+      path: { orderId: amazonOrderId },
+      ...(Object.keys(query).length ? { query } : {}),
+    })) as { OrderItems?: OrderItemLite[]; NextToken?: string };
+    out.push(...(res?.OrderItems ?? []));
+    nextToken = res?.NextToken;
+    if (!nextToken) break;
+    await sleep(350);
+  }
   return out;
 }
 
-/**
- * 注文 ID ごとに getOrderItems を 1 回（ページネーション込み）、
- * キー `amazon_order_id + '\t' + seller_sku` → condition_id（New|Used）の Map を構築する。
- */
-export async function buildAmazonOrderSkuToConditionMap(
-  spClient: SpClientLike | null,
-  uniqueAmazonOrderIds: string[],
-  sleepMs = 250
-): Promise<Map<string, string>> {
-  const map = new Map<string, string>();
-  if (!spClient || uniqueAmazonOrderIds.length === 0) return map;
-
-  const seen = [...new Set(uniqueAmazonOrderIds.map((id) => String(id ?? "").trim()).filter(Boolean))];
-
-  for (const orderId of seen) {
-    try {
-      const lines = await fetchAllOrderItemLines(spClient, orderId);
-      for (const item of lines) {
-        const sku = String(item.SellerSKU ?? "").trim() || "UNKNOWN";
-        const key = `${orderId}\t${sku}`;
-        map.set(key, normalizeOrderItemConditionId(item.ConditionId));
-      }
-    } catch (e) {
-      console.warn(`[amazon-sp-order-items] getOrderItems failed orderId=${orderId}`, e);
-    }
-    await sleep(sleepMs);
-  }
-
-  return map;
+export function skuMatchesOrderLine(orderSku: string, itemSku: string): boolean {
+  return String(orderSku).trim().toLowerCase() === String(itemSku ?? "").trim().toLowerCase();
 }

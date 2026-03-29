@@ -31,16 +31,12 @@ export default function AmazonReconcileManager() {
   const [manualOrders, setManualOrders] = useState<AmazonOrder[]>([]);
   const [loading, setLoading] = useState(true);
   
-  const RECONCILE_MAX_LOOPS = 10;
-
   // 自動消込用のState
   const [reconciling, setReconciling] = useState(false);
-  const [reconcileLoopStep, setReconcileLoopStep] = useState(0);
   const [reconcileResult, setReconcileResult] = useState<{
     message: string;
     completed?: number;
     manual_required?: number;
-    rounds?: number;
   } | null>(null);
   
   // STEP 1: 注文データ取得用のState
@@ -187,48 +183,24 @@ export default function AmazonReconcileManager() {
   };
 
   const runReconcile = async () => {
-    if (!confirm("自動消込を実行しますか？（未処理が残る場合は最大10回まで続けて呼び出します）")) return;
+    if (!confirm("自動消込を実行しますか？")) return;
     setReconciling(true);
-    setReconcileLoopStep(0);
     setReconcileResult(null);
     setError(null);
-    let totalCompleted = 0;
-    let totalManual = 0;
-    let rounds = 0;
     try {
-      for (let i = 0; i < RECONCILE_MAX_LOOPS; i++) {
-        setReconcileLoopStep(i + 1);
-        const res = await fetch("/api/amazon/reconcile", { method: "POST" });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error ?? "消込に失敗しました");
-
-        totalCompleted += Number(data.completed) || 0;
-        totalManual += Number(data.manual_required) || 0;
-        rounds += 1;
-
-        const processedCount = Number(data.processedCount ?? data.processed) || 0;
-        const hasMore = data.hasMore === true;
-
-        if (!hasMore || processedCount === 0) {
-          break;
-        }
-      }
-
+      const res = await fetch("/api/amazon/reconcile", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "消込に失敗しました");
       setReconcileResult({
-        message:
-          rounds > 0
-            ? `${rounds}回のバッチで消込しました。${rounds < RECONCILE_MAX_LOOPS ? "（未処理は解消済み、または処理対象がなくなりました）" : "（最大回数に達しました。残りがある場合は再度実行してください。）"}`
-            : "消込を実行しました。",
-        completed: totalCompleted,
-        manual_required: totalManual,
-        rounds,
+        message: data.message ?? "完了しました",
+        completed: data.completed,
+        manual_required: data.manual_required,
       });
       await fetchManualOrders();
     } catch (e) {
       setError(e instanceof Error ? e.message : "消込処理に失敗しました");
     } finally {
       setReconciling(false);
-      setReconcileLoopStep(0);
     }
   };
 
@@ -316,7 +288,7 @@ export default function AmazonReconcileManager() {
               {reconciling ? (
                 <span className="flex items-center gap-2">
                   <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                  自動消込実行中… ({reconcileLoopStep}/{RECONCILE_MAX_LOOPS}回目)
+                  消込処理を実行中...
                 </span>
               ) : (
                 "消込処理を開始する"
@@ -325,14 +297,11 @@ export default function AmazonReconcileManager() {
             {reconcileResult && (
               <div className="mt-4 rounded-lg bg-emerald-50 border border-emerald-200 p-4 text-sm text-emerald-800">
                 <p className="font-medium">{reconcileResult.message}</p>
-                {reconcileResult.rounds != null && reconcileResult.rounds > 0 && (
-                  <p className="mt-1 text-emerald-700/90">API 呼び出し回数: {reconcileResult.rounds} 回</p>
-                )}
                 {reconcileResult.completed != null && (
-                  <p className="mt-1">自動消込完了（累計）: {reconcileResult.completed} 件</p>
+                  <p className="mt-1">自動消込完了: {reconcileResult.completed} 件</p>
                 )}
                 {reconcileResult.manual_required != null && reconcileResult.manual_required > 0 && (
-                  <p className="mt-1">手動確認に回した注文（累計）: {reconcileResult.manual_required} 件</p>
+                  <p className="mt-1">手動確認に回した注文: {reconcileResult.manual_required} 件</p>
                 )}
               </div>
             )}
