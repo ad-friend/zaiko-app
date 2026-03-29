@@ -54,6 +54,29 @@ function orderStableKey(o: AmazonOrder): string {
   return `amz:${encodeURIComponent(o.amazon_order_id)}|sku:${encodeURIComponent(o.sku)}`;
 }
 
+function stringifyPayload(obj: Record<string, unknown>): string {
+  return JSON.stringify(obj, (_k, v) => (typeof v === "bigint" ? v.toString() : v));
+}
+
+async function readJsonSafe(res: Response): Promise<{ ok: boolean; status: number; data: Record<string, unknown> }> {
+  const text = await res.text();
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return { ok: res.ok, status: res.status, data: {} };
+  }
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    const data = typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+    return { ok: res.ok, status: res.status, data };
+  } catch {
+    return {
+      ok: false,
+      status: res.status,
+      data: { error: `サーバーが JSON 以外を返しました (${res.status})`, raw: trimmed.slice(0, 300) },
+    };
+  }
+}
+
 const buttonClass =
   "inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 h-10 px-6 py-2 shadow-sm active:scale-[0.98] duration-100";
 
@@ -705,28 +728,36 @@ function ManualOrderCard({
         payload.order_row_id = orderDbId;
       }
 
-      console.log("📦 Final Payload:", JSON.stringify(payload));
+      const payloadJson = stringifyPayload(payload);
+      console.log("📦 Final Payload:", payloadJson);
 
       const res = await fetch("/api/amazon/orders/condition", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: payloadJson,
       });
-      const data = (await res.json()) as { error?: string; condition_id?: string; id?: number };
-      if (!res.ok) {
+      const { ok: httpOk, data } = await readJsonSafe(res);
+      const errMsg = typeof data.error === "string" ? data.error : undefined;
+      const condRaw = data.condition_id;
+      const idRaw = data.id;
+
+      if (!httpOk) {
         const errorResponse = {
           httpStatus: res.status,
           httpStatusText: res.statusText,
-          message: data.error,
+          message: errMsg,
           body: data,
         };
         console.error("❌ APIエラー詳細:", errorResponse);
-        throw new Error(data.error ?? "コンディションの更新に失敗しました");
+        throw new Error(errMsg ?? "コンディションの更新に失敗しました");
       }
-      const saved = (data.condition_id === "New" || data.condition_id === "Used" ? data.condition_id : next) as
-        | "New"
-        | "Used";
-      const serverRowId = typeof data.id === "number" && data.id > 0 ? data.id : orderDbId;
+      const saved = (condRaw === "New" || condRaw === "Used" ? condRaw : next) as "New" | "Used";
+      const serverRowId =
+        typeof idRaw === "number" && idRaw > 0
+          ? idRaw
+          : typeof idRaw === "string" && /^\d+$/.test(idRaw)
+            ? Number.parseInt(idRaw, 10)
+            : orderDbId;
       setConditionId(saved);
       setSelectedId(null);
       onConditionUpdated?.(serverRowId, saved, order.amazon_order_id, order.sku);
@@ -814,7 +845,9 @@ function ManualOrderCard({
               <button
                 type="button"
                 disabled={conditionSaving}
-                onClick={() => patchCondition("New")}
+                onClick={() => {
+                  void patchCondition("New").catch((err) => console.error("[patchCondition]", err));
+                }}
                 className="rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-medium text-emerald-900 hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {conditionSaving ? "更新中..." : "新品（New）に設定"}
@@ -822,7 +855,9 @@ function ManualOrderCard({
               <button
                 type="button"
                 disabled={conditionSaving}
-                onClick={() => patchCondition("Used")}
+                onClick={() => {
+                  void patchCondition("Used").catch((err) => console.error("[patchCondition]", err));
+                }}
                 className="rounded-md border border-violet-200 bg-violet-50 px-2.5 py-1 text-[11px] font-medium text-violet-800 hover:bg-violet-100 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {conditionSaving ? "更新中..." : "中古（Used）に設定"}
@@ -832,7 +867,9 @@ function ManualOrderCard({
             <button
               type="button"
               disabled={conditionSaving}
-              onClick={() => patchCondition("New")}
+              onClick={() => {
+                void patchCondition("New").catch((err) => console.error("[patchCondition]", err));
+              }}
               className="rounded-md border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {conditionSaving ? "更新中..." : "新品（New）に変更"}
@@ -841,7 +878,9 @@ function ManualOrderCard({
             <button
               type="button"
               disabled={conditionSaving}
-              onClick={() => patchCondition("Used")}
+              onClick={() => {
+                void patchCondition("Used").catch((err) => console.error("[patchCondition]", err));
+              }}
               className="rounded-md border border-violet-200 bg-violet-50 px-2.5 py-1 text-[11px] font-medium text-violet-800 hover:bg-violet-100 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {conditionSaving ? "更新中..." : "中古（Used）に変更"}

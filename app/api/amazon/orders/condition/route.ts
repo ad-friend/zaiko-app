@@ -45,13 +45,24 @@ async function resolveOrderRowId(body: Record<string, unknown>): Promise<{ id: n
     if (sku) {
       q = q.eq("sku", sku);
     }
-    const { data, error } = await q.maybeSingle();
+    // maybeSingle は同一注文の複数行で PostgREST エラーになるため配列で受ける
+    const { data: rows, error } = await q;
     if (error) {
       console.error("[amazon/orders/condition] resolve by order_id:", error.message);
       return { id: null, reason: "query_error" };
     }
-    const rid = data?.id;
-    const n = toStrippedInt(rid ?? null);
+    const list = rows ?? [];
+    if (list.length === 0) {
+      return { id: null, reason: "not_found" };
+    }
+    if (list.length > 1) {
+      console.error("[amazon/orders/condition] multiple manual_required rows", { amz, sku, count: list.length });
+      return {
+        id: null,
+        reason: sku ? "ambiguous_multiple_lines" : "multiple_rows_need_sku",
+      };
+    }
+    const n = toStrippedInt(list[0].id);
     return Number.isFinite(n) && n > 0 ? { id: n, reason: "order_id_fallback" } : { id: null, reason: "not_found" };
   }
 
@@ -104,10 +115,13 @@ export async function PATCH(request: NextRequest) {
         condition_raw: body.condition_id,
         condition_normalized: condition_id,
       });
-      return NextResponse.json(
-        { error: "注文を特定できませんでした（id または order_id / amazon_order_id を確認してください）。" },
-        { status: 400 }
-      );
+      const message =
+        reason === "multiple_rows_need_sku"
+          ? "同一Amazon注文に複数の手動確認行があります。SKUで行を特定してください。"
+          : reason === "ambiguous_multiple_lines"
+            ? "条件に一致する行が複数あります。データを確認してください。"
+            : "注文を特定できませんでした（id または order_id / amazon_order_id を確認してください）。";
+      return NextResponse.json({ error: message }, { status: 400 });
     }
 
     if (reason === "not_manual_required") {
