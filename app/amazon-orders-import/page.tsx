@@ -312,7 +312,7 @@ export default function AmazonOrdersImportPage() {
           <p className="text-sm text-slate-600 mb-4">
             必須ヘッダー: <span className="font-mono">amazonOrderId / purchaseDate / sku</span>
             <br />
-            コンディションは SP-API（注文明細）から取得します。JAN は自社マスタ照合のみです（30件ずつ分割送信）。
+            コンディション・JAN は自社 DB（sku_mappings / products 等）照合のみです。API 通信は行いません（30件ずつ分割送信）。
           </p>
 
           <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">

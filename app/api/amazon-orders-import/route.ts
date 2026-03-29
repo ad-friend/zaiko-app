@@ -2,14 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { applyPreservedReconciliationStatusForUpsert } from "@/lib/amazon-order-reconciliation-status";
 import { buildLocalJanLookupMaps, resolveJanFromLocalMaps } from "@/lib/amazon-order-local-jan";
-import {
-  fetchAllOrderItems,
-  normalizeOrderItemConditionId,
-  skuMatchesOrderLine,
-  sleep,
-  tryCreateAmazonSpClient,
-  type OrderItemLite,
-} from "@/lib/amazon-sp-order-items";
+import { buildSkuToConditionMap } from "@/lib/amazon-order-import-condition";
 
 type AmazonOrdersImportRow = {
   amazonOrderId: string;
@@ -27,7 +20,6 @@ type ImportError =
 
 /** フロントが1リクエストあたり送る最大件数 */
 const MAX_ROWS_PER_REQUEST = 30;
-const ORDER_FETCH_SLEEP_MS = 450;
 
 function toTrimmedString(v: unknown): string {
   return v == null ? "" : String(v).trim();
@@ -46,28 +38,6 @@ function parseToIsoDateMaybe(raw: string): string | null {
   const d = new Date(s);
   if (Number.isNaN(d.getTime())) return null;
   return d.toISOString();
-}
-
-/**
- * SP-API は ConditionId（＋明細の ASIN）取得のみ。カタログ API は使わない。
- * 注文IDごとに getOrderItems → 各呼び出しのあと Rate Limit 対策で sleep。
- */
-async function buildOrderIdToItemsMap(orderIds: string[]): Promise<Map<string, OrderItemLite[]>> {
-  const map = new Map<string, OrderItemLite[]>();
-  const sp = tryCreateAmazonSpClient();
-  if (!sp || orderIds.length === 0) return map;
-
-  for (const oid of orderIds) {
-    try {
-      const items = await fetchAllOrderItems(sp, oid);
-      map.set(oid, items);
-    } catch (e) {
-      console.warn(`[amazon-orders-import] getOrderItems failed ${oid}:`, e);
-      map.set(oid, []);
-    }
-    await sleep(ORDER_FETCH_SLEEP_MS);
-  }
-  return map;
 }
 
 export async function POST(request: NextRequest) {
@@ -137,28 +107,16 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ ok: false, upserted: 0, skipped, errors }, { status: 400 });
     }
 
-    const uniqueOrderIds = [...new Set(validRows.map((r) => String(r.amazon_order_id)))];
-    const orderItemsMap = await buildOrderIdToItemsMap(uniqueOrderIds);
-
+    const skuList = validRows.map((r) => String(r.sku));
+    const skuToCondition = await buildSkuToConditionMap(supabase, skuList);
     for (const r of validRows) {
-      const oid = String(r.amazon_order_id);
-      const sku = String(r.sku);
-      const items = orderItemsMap.get(oid) ?? [];
-      const line = items.find((it) => skuMatchesOrderLine(sku, String(it.SellerSKU ?? "")));
-      if (line?.ConditionId != null && String(line.ConditionId).trim()) {
-        r.condition_id = normalizeOrderItemConditionId(line.ConditionId);
-      }
-      if (line?.ASIN && String(line.ASIN).trim()) {
-        r.asin = String(line.ASIN).trim();
-      }
+      r.condition_id = skuToCondition.get(String(r.sku)) ?? "New";
     }
 
     const asinList = validRows.map((r) => r.asin).filter((a): a is string => Boolean(a));
-    const skuList = validRows.map((r) => String(r.sku));
     const { asinToJan, skuToJan } = await buildLocalJanLookupMaps(supabase, asinList, skuList);
     for (const r of validRows) {
-      const resolved = resolveJanFromLocalMaps(String(r.sku), r.asin as string | null, asinToJan, skuToJan);
-      r.jan_code = resolved;
+      r.jan_code = resolveJanFromLocalMaps(String(r.sku), r.asin as string | null, asinToJan, skuToJan);
     }
 
     const chunkOrderIds = [...new Set(validRows.map((r) => String(r.amazon_order_id)))];
