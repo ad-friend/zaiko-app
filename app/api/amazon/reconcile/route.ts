@@ -45,6 +45,18 @@ async function unlinkInboundFromOrder(inboundIds: number[], amazonOrderId: strin
     .eq("order_id", amazonOrderId);
 }
 
+/** sku_mappings から JAN が一意に定まるときだけ返す（複数構成のセットは null） */
+function uniqueJanFromSkuMappings(mapList: Array<{ jan_code: unknown }>): string | null {
+  const jans = new Set<string>();
+  for (const m of mapList) {
+    const j = String(m.jan_code ?? "").trim();
+    if (j) jans.add(j);
+  }
+  if (jans.size !== 1) return null;
+  const [only] = [...jans];
+  return only ?? null;
+}
+
 function filterAvailableByOrderId<T extends { order_id: string | null }>(
   rows: T[],
   amazonOrderId: string
@@ -188,6 +200,7 @@ export async function POST() {
           if (setOk && collectedIds.length > 0) {
             const janForRow =
               String(order.jan_code ?? "").trim() ||
+              uniqueJanFromSkuMappings(mapList) ||
               String(mapList[0]?.jan_code ?? "").trim() ||
               null;
             if (!janForRow) {
@@ -206,8 +219,9 @@ export async function POST() {
       }
 
       let jan = String(order.jan_code ?? "").trim();
-      if (!jan && mapList.length === 1 && !isSetProduct) {
-        jan = String(mapList[0].jan_code ?? "").trim();
+      if (!jan) {
+        const fromMaps = uniqueJanFromSkuMappings(mapList);
+        if (fromMaps) jan = fromMaps;
       }
       if (!jan) {
         console.log("❌ jan_code が空のため手動確認");
@@ -245,6 +259,9 @@ export async function POST() {
 
       try {
         if (orderCond === "new") {
+          console.log(
+            `📦 引当テスト: 注文ID=[${order.id}], 注文Cond=[${orderCond}], 必要数=[${orderQty}], 利用可能在庫数=[${available.length}], 条件一致在庫数=[${matching.length}], 検索JAN=[${jan}]`
+          );
           if (matching.length >= orderQty) {
             await finalizeReconciled(matching.slice(0, orderQty));
           } else {
