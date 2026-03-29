@@ -345,18 +345,18 @@ export default function AmazonReconcileManager() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-10">
-        {/* 左カラム（7）: 在庫の仮消込 */}
-        <div className="flex flex-col gap-6 lg:col-span-7">
-          <h2 className="text-base font-bold text-slate-700 border-b border-slate-200 pb-2">
+      <div className="grid grid-cols-1 gap-8 xl:grid-cols-12">
+        {/* 左カラム: 在庫の仮消込（ワイド画面で広く） */}
+        <div className="flex flex-col gap-8 xl:col-span-8">
+          <h2 className="text-lg font-bold tracking-tight text-slate-800 border-b border-slate-200 pb-3">
             在庫の仮消込
           </h2>
 
           {/* STEP 1: 注文データの取り込み */}
-          <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm relative overflow-hidden">
-            <div className="absolute top-0 left-0 w-1 h-full bg-blue-500" />
-            <h3 className="text-lg font-bold text-slate-800 mb-2">STEP 1: Amazonから注文データを取得</h3>
-            <p className="text-sm text-slate-500 mb-4">
+          <div className="rounded-xl border border-slate-200 bg-white p-7 lg:p-8 shadow-sm relative overflow-hidden">
+            <div className="absolute top-0 left-0 w-1.5 h-full bg-blue-500" />
+            <h3 className="text-lg lg:text-xl font-bold text-slate-800 mb-2">STEP 1: Amazonから注文データを取得</h3>
+            <p className="text-sm text-slate-500 mb-5 leading-relaxed">
               指定した期間の注文データをAmazonから取得し、システムに取り込みます。（未指定の場合は直近3日～現在）
             </p>
             <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
@@ -406,10 +406,10 @@ export default function AmazonReconcileManager() {
           </div>
 
           {/* STEP 2: 自動消込の実行 */}
-          <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm relative overflow-hidden">
-            <div className="absolute top-0 left-0 w-1 h-full bg-primary" />
-            <h3 className="text-lg font-bold text-slate-800 mb-2">STEP 2: 自動消込の実行</h3>
-            <p className="text-sm text-slate-500 mb-4">
+          <div className="rounded-xl border border-slate-200 bg-white p-7 lg:p-8 shadow-sm relative overflow-hidden">
+            <div className="absolute top-0 left-0 w-1.5 h-full bg-primary" />
+            <h3 className="text-lg lg:text-xl font-bold text-slate-800 mb-2">STEP 2: 自動消込の実行</h3>
+            <p className="text-sm text-slate-500 mb-5 leading-relaxed">
               取り込んだ未処理注文に対して、新品・セット・中古（1件のみ候補）の自動消込を行います。1回のAPIは最大20件まで処理するため、pending がなくなるまで自動で繰り返し呼び出します。
             </p>
             <button
@@ -458,13 +458,13 @@ export default function AmazonReconcileManager() {
           </div>
 
           {/* STEP 3: 未処理注文（手動確認） */}
-          <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm relative overflow-hidden">
-            <div className="absolute top-0 left-0 w-1 h-full bg-amber-500" />
-            <h3 className="text-lg font-bold text-slate-800 mb-2">STEP 3: 未処理注文（手動確認）</h3>
-            <p className="text-sm text-slate-500 mb-4">
+          <div className="rounded-xl border border-slate-200 bg-white p-7 lg:p-8 shadow-sm relative overflow-hidden">
+            <div className="absolute top-0 left-0 w-1.5 h-full bg-amber-500" />
+            <h3 className="text-lg lg:text-xl font-bold text-slate-800 mb-2">STEP 3: 未処理注文（手動確認）</h3>
+            <p className="text-sm text-slate-500 mb-6 leading-relaxed max-w-4xl">
               中古在庫候補が複数あるなど、手動で確認が必要な注文です。正しい在庫候補を選んで確定してください。在庫なしの注文も表示されます。
             </p>
-            <div className="flex flex-wrap items-center gap-3 mb-4">
+            <div className="flex flex-wrap items-center gap-4 mb-6">
               <label className="inline-flex items-center gap-2 cursor-pointer">
                 <input
                   type="checkbox"
@@ -489,7 +489,7 @@ export default function AmazonReconcileManager() {
                 {showOnlyNoStock ? "在庫なしの注文はありません（候補の読み込みが完了すると反映されます）。" : "表示する注文がありません。"}
               </p>
             ) : (
-              <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3">
+              <div className="grid grid-cols-1 gap-6 lg:gap-8 xl:grid-cols-2 min-w-0">
                 {filteredManualOrders.map((order) => (
                   <ManualOrderCard
                     key={order.id}
@@ -506,10 +506,10 @@ export default function AmazonReconcileManager() {
           </div>
         </div>
 
-        {/* 右カラム（3）: 売上とお金の確定（本消込） */}
-        <div className="flex flex-col gap-6 lg:col-span-3 lg:min-h-0">
-          <div className="rounded-xl border border-slate-200 bg-slate-100/60 p-4 lg:sticky lg:top-24">
-            <h2 className="text-base font-bold text-slate-700 border-b border-slate-300 pb-2 mb-4">
+        {/* 右カラム: 売上とお金の確定（本消込） */}
+        <div className="flex flex-col gap-8 xl:col-span-4 xl:min-h-0">
+          <div className="rounded-xl border border-slate-200 bg-slate-100/60 p-5 lg:p-6 lg:sticky lg:top-24">
+            <h2 className="text-lg font-bold tracking-tight text-slate-800 border-b border-slate-300 pb-3 mb-5">
               売上とお金の確定（本消込）
             </h2>
             <div className="space-y-6">
@@ -870,25 +870,46 @@ function ManualOrderCard({
 
   const noCandidates = !loadingCandidates && candidates.length === 0;
 
+  const createdLabel =
+    order.created_at != null && String(order.created_at).trim() !== ""
+      ? (() => {
+          try {
+            const d = new Date(order.created_at);
+            return Number.isNaN(d.getTime()) ? null : d.toLocaleString("ja-JP", { dateStyle: "medium", timeStyle: "short" });
+          } catch {
+            return null;
+          }
+        })()
+      : null;
+
+  const condToggleClass =
+    "inline-flex items-center justify-center rounded-lg border px-4 py-2.5 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:opacity-45 disabled:cursor-not-allowed min-h-[44px]";
+
   return (
     <div
-      className={`rounded-lg border p-4 shadow-sm transition-shadow ${
+      className={`min-w-0 w-full rounded-xl border-2 p-6 lg:p-7 shadow-sm transition-shadow ${
         noCandidates
-          ? "border-red-200 bg-red-50 hover:shadow-md"
-          : "border-slate-200 bg-slate-50/50 hover:shadow-md"
+          ? "border-red-200/90 bg-red-50/40 hover:shadow-md"
+          : "border-slate-200/90 bg-white hover:shadow-md hover:border-slate-300"
       }`}
     >
-      <div className="mb-3">
-        <div className="flex items-start justify-between gap-2">
-          <a
-            href={`https://sellercentral.amazon.co.jp/orders-v3/order/${order.amazon_order_id}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="min-w-0 text-sm font-mono font-bold text-amber-600 hover:underline break-all"
-          >
-            {order.amazon_order_id}
-          </a>
-          <div className="flex shrink-0 items-center gap-1">
+      <div className="space-y-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0 flex-1 space-y-2">
+            <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">注文番号（Amazon）</p>
+            <div className="-mx-1 max-w-full overflow-x-auto px-1 pb-0.5 [scrollbar-width:thin]">
+              <a
+                href={`https://sellercentral.amazon.co.jp/orders-v3/order/${order.amazon_order_id}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={order.amazon_order_id}
+                className="inline-block whitespace-nowrap font-mono text-base font-semibold text-amber-700 hover:text-amber-800 hover:underline sm:text-lg"
+              >
+                {order.amazon_order_id}
+              </a>
+            </div>
+          </div>
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-slate-100 pt-3 lg:border-t-0 lg:pt-0">
             <button
               type="button"
               title="キャンセル・除外（在庫を解放）"
@@ -897,148 +918,183 @@ function ManualOrderCard({
               onClick={() => {
                 void runCancellationExclude().catch((err) => console.error("[runCancellationExclude]", err));
               }}
-              className="inline-flex items-center gap-1 rounded-md border border-amber-300 bg-white px-2 py-1 text-[10px] font-medium text-amber-900 hover:bg-amber-50 disabled:opacity-40 disabled:cursor-not-allowed"
+              className="inline-flex items-center gap-2 rounded-lg border-2 border-amber-400/80 bg-amber-50/90 px-3 py-2 text-xs font-semibold text-amber-950 hover:bg-amber-100 disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              <Ban className="h-3.5 w-3.5 shrink-0" aria-hidden />
+              <Ban className="h-4 w-4 shrink-0" aria-hidden />
               キャンセル・除外
             </button>
             <button
               type="button"
-              title="削除（キャンセル注文）"
+              title="DBから行を削除（キャンセル注文の整理）"
               aria-label="削除（キャンセル注文）"
               disabled={deleting || cancelling || submitting || conditionSaving}
               onClick={() => {
                 void deleteCancelledOrderRow().catch((err) => console.error("[deleteCancelledOrderRow]", err));
               }}
-              className="rounded-md border border-red-200 bg-white p-1.5 text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed"
+              className="inline-flex items-center gap-1.5 rounded-lg border-2 border-red-200 bg-white px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              <Trash2 className="h-4 w-4" aria-hidden />
+              <Trash2 className="h-4 w-4 shrink-0" aria-hidden />
+              削除
             </button>
           </div>
         </div>
-        <p className="text-xs text-slate-500 mt-1">
-          SKU: {order.sku} / 数量: {order.quantity}
-        </p>
-        <div className="mt-2 flex flex-wrap items-center gap-2">
-          <span
-            className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold ${
-              orderCondNorm == null
-                ? "bg-amber-100 text-amber-900"
-                : isUsedDisplay
-                  ? "bg-violet-100 text-violet-800"
-                  : "bg-emerald-100 text-emerald-800"
-            }`}
-          >
-            コンディション:{" "}
-            {orderCondNorm == null
-              ? `未判定（${conditionId || "—"}）`
-              : isUsedDisplay
-                ? "中古（Used）"
-                : "新品（New）"}
-          </span>
-          {orderCondNorm == null ? (
-            <div className="flex flex-wrap gap-1.5">
-              <button
-                type="button"
-                disabled={conditionSaving}
-                onClick={() => {
-                  void patchCondition("New").catch((err) => console.error("[patchCondition]", err));
-                }}
-                className="rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-medium text-emerald-900 hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {conditionSaving ? "更新中..." : "新品（New）に設定"}
-              </button>
-              <button
-                type="button"
-                disabled={conditionSaving}
-                onClick={() => {
-                  void patchCondition("Used").catch((err) => console.error("[patchCondition]", err));
-                }}
-                className="rounded-md border border-violet-200 bg-violet-50 px-2.5 py-1 text-[11px] font-medium text-violet-800 hover:bg-violet-100 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {conditionSaving ? "更新中..." : "中古（Used）に設定"}
-              </button>
-            </div>
-          ) : isUsedDisplay ? (
-            <button
-              type="button"
-              disabled={conditionSaving}
-              onClick={() => {
-                void patchCondition("New").catch((err) => console.error("[patchCondition]", err));
-              }}
-              className="rounded-md border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {conditionSaving ? "更新中..." : "新品（New）に変更"}
-            </button>
-          ) : (
-            <button
-              type="button"
-              disabled={conditionSaving}
-              onClick={() => {
-                void patchCondition("Used").catch((err) => console.error("[patchCondition]", err));
-              }}
-              className="rounded-md border border-violet-200 bg-violet-50 px-2.5 py-1 text-[11px] font-medium text-violet-800 hover:bg-violet-100 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {conditionSaving ? "更新中..." : "中古（Used）に変更"}
-            </button>
-          )}
+
+        <div className="grid grid-cols-1 gap-4 border-t border-slate-100 pt-5 sm:grid-cols-2">
+          <div>
+            <p className="text-xs font-medium text-slate-400">SKU</p>
+            <p className="mt-1 break-all font-mono text-base font-semibold text-slate-900">{order.sku}</p>
+          </div>
+          <div>
+            <p className="text-xs font-medium text-slate-400">数量</p>
+            <p className="mt-1 text-base font-semibold tabular-nums text-slate-900">{order.quantity}</p>
+          </div>
         </div>
-        {conditionMessage && (
-          <p
-            className={`mt-1.5 text-[11px] ${conditionMessage.type === "ok" ? "text-emerald-700" : "text-red-600"}`}
-            role="status"
-          >
-            {conditionMessage.type === "ok" ? "✓ " : ""}
-            {conditionMessage.text}
+
+        {createdLabel && (
+          <p className="text-xs text-slate-400">
+            <span className="font-medium text-slate-500">登録日時</span>{" "}
+            <span className="tabular-nums">{createdLabel}</span>
           </p>
         )}
-        {order.jan_code && <p className="text-xs text-slate-500 font-medium mt-1">JAN: {order.jan_code}</p>}
-        {order.asin && <p className="text-xs text-slate-500 font-medium">ASIN: {order.asin}</p>}
-      </div>
-      {loadingCandidates ? (
-        <p className="text-xs text-slate-500">在庫候補を取得中...</p>
-      ) : noCandidates ? (
-        <div className="space-y-2">
-          <p className="text-xs font-medium text-red-700 flex items-center gap-1">
-            <span className="shrink-0" aria-hidden>⚠</span>
-            紐付け可能な在庫が登録されていません。JAN/ASINを確認して在庫を登録してください。
-          </p>
-          <button
-            type="button"
-            disabled
-            className={`${buttonClass} w-full bg-slate-300 text-slate-500 cursor-not-allowed text-sm`}
-          >
-            手動で紐付け（在庫なしのため選択不可）
-          </button>
+
+        {(order.jan_code || order.asin) && (
+          <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-500">
+            {order.jan_code && (
+              <span>
+                <span className="font-medium text-slate-600">JAN</span> {order.jan_code}
+              </span>
+            )}
+            {order.asin && (
+              <span>
+                <span className="font-medium text-slate-600">ASIN</span> {order.asin}
+              </span>
+            )}
+          </div>
+        )}
+
+        <div className="rounded-xl border border-slate-200 bg-slate-50/90 p-4 lg:p-5 space-y-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+            <span
+              className={`inline-flex w-fit items-center rounded-full px-3 py-1 text-sm font-bold ${
+                orderCondNorm == null
+                  ? "bg-amber-200/80 text-amber-950"
+                  : isUsedDisplay
+                    ? "bg-violet-200/80 text-violet-950"
+                    : "bg-emerald-200/80 text-emerald-950"
+              }`}
+            >
+              {orderCondNorm == null
+                ? `コンディション未判定（${conditionId || "—"}）`
+                : isUsedDisplay
+                  ? "コンディション: 中古（Used）"
+                  : "コンディション: 新品（New）"}
+            </span>
+            <div className="flex flex-wrap gap-2">
+              {orderCondNorm == null ? (
+                <>
+                  <button
+                    type="button"
+                    disabled={conditionSaving}
+                    onClick={() => {
+                      void patchCondition("New").catch((err) => console.error("[patchCondition]", err));
+                    }}
+                    className={`${condToggleClass} border-emerald-300 bg-emerald-50 text-emerald-900 hover:bg-emerald-100 focus-visible:ring-emerald-500`}
+                  >
+                    {conditionSaving ? "更新中…" : "新品（New）に設定"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={conditionSaving}
+                    onClick={() => {
+                      void patchCondition("Used").catch((err) => console.error("[patchCondition]", err));
+                    }}
+                    className={`${condToggleClass} border-violet-300 bg-violet-50 text-violet-900 hover:bg-violet-100 focus-visible:ring-violet-500`}
+                  >
+                    {conditionSaving ? "更新中…" : "中古（Used）に設定"}
+                  </button>
+                </>
+              ) : isUsedDisplay ? (
+                <button
+                  type="button"
+                  disabled={conditionSaving}
+                  onClick={() => {
+                    void patchCondition("New").catch((err) => console.error("[patchCondition]", err));
+                  }}
+                  className={`${condToggleClass} border-slate-300 bg-white text-slate-800 hover:bg-slate-50 focus-visible:ring-slate-400`}
+                >
+                  {conditionSaving ? "更新中…" : "新品（New）に変更"}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={conditionSaving}
+                  onClick={() => {
+                    void patchCondition("Used").catch((err) => console.error("[patchCondition]", err));
+                  }}
+                  className={`${condToggleClass} border-violet-300 bg-violet-50 text-violet-900 hover:bg-violet-100 focus-visible:ring-violet-500`}
+                >
+                  {conditionSaving ? "更新中…" : "中古（Used）に変更"}
+                </button>
+              )}
+            </div>
+          </div>
+          {conditionMessage && (
+            <p
+              className={`text-sm ${conditionMessage.type === "ok" ? "font-medium text-emerald-800" : "font-medium text-red-700"}`}
+              role="status"
+            >
+              {conditionMessage.type === "ok" ? "✓ " : ""}
+              {conditionMessage.text}
+            </p>
+          )}
         </div>
-      ) : (
-        <>
-          <label className="block text-xs font-semibold text-slate-600 mb-1">在庫候補を選択</label>
-          <select
-            value={selectedId ?? ""}
-            onChange={(e) => setSelectedId(e.target.value ? Number(e.target.value) : null)}
-            className="mb-3 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/50"
-          >
-            <option value="">選択してください</option>
-            {candidates.map((c) => (
-              <option key={c.id} value={c.id}>
-                ID:{c.id} {c.product_name ?? ""} ({c.created_at?.slice(0, 10)})
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            onClick={confirmSelection}
-            disabled={selectedId == null || submitting || conditionSaving}
-            className={`${buttonClass} w-full bg-amber-500 text-white hover:bg-amber-600 disabled:bg-slate-300 text-sm`}
-          >
-            {submitting ? "確定中..." : "この在庫で確定"}
-          </button>
-        </>
-      )}
-      {error && (
-        <p className="mt-2 text-xs text-red-600">{error}</p>
-      )}
+
+        {loadingCandidates ? (
+          <p className="text-sm font-medium text-slate-500">在庫候補を取得中…</p>
+        ) : noCandidates ? (
+          <div className="space-y-3 rounded-xl border border-red-100 bg-red-50/50 p-4">
+            <p className="text-sm font-semibold text-red-800 flex items-start gap-2">
+              <span className="shrink-0" aria-hidden>
+                ⚠
+              </span>
+              紐付け可能な在庫がありません。JAN / ASIN を確認し在庫を登録してください。
+            </p>
+            <button
+              type="button"
+              disabled
+              className={`${buttonClass} h-11 w-full cursor-not-allowed bg-slate-200 text-slate-500 text-sm`}
+            >
+              手動で紐付け（在庫なしのため選択不可）
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-3 border-t border-slate-100 pt-5">
+            <label className="block text-sm font-bold text-slate-700">在庫候補を選択</label>
+            <select
+              value={selectedId ?? ""}
+              onChange={(e) => setSelectedId(e.target.value ? Number(e.target.value) : null)}
+              className="w-full rounded-lg border-2 border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-800 focus:border-amber-400 focus:outline-none focus:ring-2 focus:ring-amber-400/30"
+            >
+              <option value="">選択してください</option>
+              {candidates.map((c) => (
+                <option key={c.id} value={c.id}>
+                  ID:{c.id} {c.product_name ?? ""} ({c.created_at?.slice(0, 10)})
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={confirmSelection}
+              disabled={selectedId == null || submitting || conditionSaving}
+              className={`${buttonClass} h-12 w-full bg-amber-600 text-base font-bold text-white shadow-sm hover:bg-amber-700 disabled:bg-slate-300 disabled:text-slate-500`}
+            >
+              {submitting ? "確定中…" : "この在庫で仮消込を確定"}
+            </button>
+          </div>
+        )}
+
+        {error && <p className="text-sm font-medium text-red-700">{error}</p>}
+      </div>
     </div>
   );
 }

@@ -6,7 +6,7 @@ import { PackageCheck, FileSpreadsheet } from "lucide-react";
 
 export default function AmazonReconcilePage() {
   return (
-    <main className="flex-1 py-8 w-full max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
+    <main className="flex-1 py-8 w-full max-w-[1800px] mx-auto px-4 sm:px-6 lg:px-10">
       <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-8">
         <div className="flex items-center gap-3">
           <div className="rounded-xl bg-primary/10 p-3 text-primary">
