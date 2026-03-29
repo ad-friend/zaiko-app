@@ -4,14 +4,34 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 
-const ALLOWED = new Set(["New", "Used"]);
+function parseOrderRowId(body: Record<string, unknown>): number | null {
+  const raw = body.id ?? body.amazon_order_db_id ?? body.amazonOrderDbId;
+  if (raw == null || raw === "") return null;
+  if (typeof raw === "number" && Number.isFinite(raw)) return Math.trunc(raw);
+  const s = String(raw).trim();
+  if (!s) return null;
+  const n = Number.parseInt(s, 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** フロントの揺れ（new / NEW / Used / used）を DB 用 New | Used に統一 */
+function normalizeConditionIdInput(raw: unknown): "New" | "Used" | null {
+  const s = String(raw ?? "")
+    .trim()
+    .replace(/\u3000/g, " ")
+    .toLowerCase();
+  if (!s) return null;
+  if (s === "new" || s.startsWith("new")) return "New";
+  if (s === "used" || s.startsWith("used")) return "Used";
+  return null;
+}
 
 export async function PATCH(request: NextRequest) {
   try {
-    const body = await request.json();
-    const id = Number(body.id);
-    const condition_id = String(body.condition_id ?? "").trim();
-    if (!Number.isFinite(id) || id <= 0 || !ALLOWED.has(condition_id)) {
+    const body = (await request.json()) as Record<string, unknown>;
+    const id = parseOrderRowId(body);
+    const condition_id = normalizeConditionIdInput(body.condition_id);
+    if (id == null || condition_id == null) {
       return NextResponse.json(
         { error: "有効な id と condition_id（New または Used）が必要です。" },
         { status: 400 }

@@ -5,7 +5,8 @@ import ManualFinanceProcessModal, { type PendingFinanceGroupData } from "@/compo
 import { normalizeOrderCondition } from "@/lib/amazon-condition-match";
 
 type AmazonOrder = {
-  id: number;
+  /** Supabase の bigint は JSON で string になることがある */
+  id: number | string;
   amazon_order_id: string;
   sku: string;
   condition_id: string;
@@ -24,6 +25,16 @@ type InboundCandidate = {
   created_at: string;
   order_id: string | null;
 };
+
+function toNumericOrderId(id: number | string): number {
+  if (typeof id === "number" && Number.isFinite(id)) return Math.trunc(id);
+  const n = Number.parseInt(String(id).trim(), 10);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function orderIdMapKey(id: number | string): string {
+  return String(toNumericOrderId(id));
+}
 
 const buttonClass =
   "inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 h-10 px-6 py-2 shadow-sm active:scale-[0.98] duration-100";
@@ -77,7 +88,7 @@ export default function AmazonReconcileManager() {
 
   const [error, setError] = useState<string | null>(null);
   const [showOnlyNoStock, setShowOnlyNoStock] = useState(false);
-  const [candidateCountByOrderId, setCandidateCountByOrderId] = useState<Record<number, number>>({});
+  const [candidateCountByOrderId, setCandidateCountByOrderId] = useState<Record<string, number>>({});
 
   const fetchManualOrders = useCallback(async () => {
     setLoading(true);
@@ -100,17 +111,23 @@ export default function AmazonReconcileManager() {
   }, [fetchManualOrders]);
 
   const handleCandidatesLoaded = useCallback((orderId: number, count: number) => {
-    setCandidateCountByOrderId((prev) => ({ ...prev, [orderId]: count }));
+    setCandidateCountByOrderId((prev) => ({ ...prev, [String(orderId)]: count }));
   }, []);
 
   const handleOrderConditionUpdated = useCallback((orderId: number, condition_id: string) => {
-    setManualOrders((prev) => prev.map((o) => (o.id === orderId ? { ...o, condition_id } : o)));
+    setManualOrders((prev) =>
+      prev.map((o) => {
+        const oid =
+          typeof o.id === "number" && Number.isFinite(o.id) ? Math.trunc(o.id) : Number.parseInt(String(o.id), 10);
+        return oid === orderId ? { ...o, condition_id } : o;
+      })
+    );
   }, []);
 
   const filteredManualOrders = showOnlyNoStock
-    ? manualOrders.filter((o) => (candidateCountByOrderId[o.id] ?? -1) === 0)
+    ? manualOrders.filter((o) => (candidateCountByOrderId[orderIdMapKey(o.id)] ?? -1) === 0)
     : manualOrders;
-  const noStockCount = manualOrders.filter((o) => (candidateCountByOrderId[o.id] ?? -1) === 0).length;
+  const noStockCount = manualOrders.filter((o) => (candidateCountByOrderId[orderIdMapKey(o.id)] ?? -1) === 0).length;
 
   const fetchPendingFinances = useCallback(async () => {
     setIsLoadingPendingFinances(true);
@@ -615,13 +632,13 @@ function ManualOrderCard({
         const list = Array.isArray(data) ? data : [];
         if (!cancelled) {
           setCandidates(list);
-          onCandidatesLoaded?.(order.id, list.length);
+          onCandidatesLoaded?.(toNumericOrderId(order.id), list.length);
         }
       })
       .catch(() => {
         if (!cancelled) {
           setError("候補の取得に失敗しました");
-          onCandidatesLoaded?.(order.id, 0);
+          onCandidatesLoaded?.(toNumericOrderId(order.id), 0);
         }
       })
       .finally(() => {
@@ -638,22 +655,40 @@ function ManualOrderCard({
     const nextNorm = next === "Used" ? "used" : "new";
     if (currentNorm === nextNorm) return;
 
+    const orderDbId = toNumericOrderId(order.id);
+    if (!Number.isFinite(orderDbId) || orderDbId < 1) {
+      setConditionMessage({
+        type: "err",
+        text: "注文IDが無効です。一覧を再読み込みしてください。",
+      });
+      return;
+    }
+
     setConditionSaving(true);
     setConditionMessage(null);
+    setError(null);
     try {
       const res = await fetch("/api/amazon/orders/condition", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: order.id, condition_id: next }),
+        body: JSON.stringify({
+          id: orderDbId,
+          condition_id: next,
+        }),
       });
       const data = (await res.json()) as { error?: string; condition_id?: string };
       if (!res.ok) throw new Error(data.error ?? "コンディションの更新に失敗しました");
-      const saved = data.condition_id ?? next;
+      const saved = (data.condition_id === "New" || data.condition_id === "Used" ? data.condition_id : next) as
+        | "New"
+        | "Used";
       setConditionId(saved);
       setSelectedId(null);
-      onConditionUpdated?.(order.id, saved);
+      onConditionUpdated?.(orderDbId, saved);
       setCandidatesRefreshKey((k) => k + 1);
-      setConditionMessage({ type: "ok", text: `コンディションを「${next === "Used" ? "中古（Used）" : "新品（New）"}」に更新しました。` });
+      setConditionMessage({
+        type: "ok",
+        text: `コンディションを「${saved === "Used" ? "中古（Used）" : "新品（New）"}」に更新しました。`,
+      });
     } catch (e) {
       setConditionMessage({
         type: "err",
