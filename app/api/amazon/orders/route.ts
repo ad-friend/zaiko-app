@@ -25,7 +25,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(
       rows.map((row) => ({
         ...row,
-        /** `id` と同一。amazon_orders の主キー（bigint）を明示（フロントの取り違え防止） */
+        /** `id` と同一。amazon_orders の主キー（UUID）を明示（フロントの取り違え防止） */
         order_row_id: row.id,
       }))
     );

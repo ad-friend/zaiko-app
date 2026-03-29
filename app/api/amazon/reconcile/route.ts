@@ -13,15 +13,15 @@ import {
 import { normalizeOrderCondition, normalizeStockCondition } from "@/lib/amazon-condition-match";
 import { healReconcileOrdersFromSpApi } from "@/lib/amazon-reconcile-sp-heal";
 
-function sortFifo(a: { id: number; created_at: string | null }, b: { id: number; created_at: string | null }): number {
+function sortFifo(a: { id: string; created_at: string | null }, b: { id: string; created_at: string | null }): number {
   const ta = a.created_at ? Date.parse(a.created_at) : 0;
   const tb = b.created_at ? Date.parse(b.created_at) : 0;
   if (ta !== tb) return ta - tb;
-  return a.id - b.id;
+  return a.id.localeCompare(b.id);
 }
 
 async function updateAmazonOrderReconciliation(
-  orderDbId: number,
+  orderRowId: string,
   status: typeof AMAZON_ORDER_STATUS_RECONCILED | typeof AMAZON_ORDER_STATUS_MANUAL_REQUIRED,
   jan: string | null
 ): Promise<{ error: Error | null }> {
@@ -32,7 +32,7 @@ async function updateAmazonOrderReconciliation(
       jan_code: jan,
       updated_at: new Date().toISOString(),
     })
-    .eq("id", orderDbId);
+    .eq("id", orderRowId);
   return { error: error ? new Error(error.message) : null };
 }
 
@@ -71,7 +71,7 @@ function filterAvailableByOrderId<T extends { order_id: string | null }>(
 async function finalizeReconciledInboundIds(
   inboundIds: number[],
   amazonOrderId: string,
-  orderDbId: number,
+  orderRowId: string,
   janForRow: string
 ): Promise<void> {
   const linked: number[] = [];
@@ -87,7 +87,7 @@ async function finalizeReconciledInboundIds(
     }
     linked.push(id);
   }
-  const { error: oErr } = await updateAmazonOrderReconciliation(orderDbId, AMAZON_ORDER_STATUS_RECONCILED, janForRow);
+  const { error: oErr } = await updateAmazonOrderReconciliation(orderRowId, AMAZON_ORDER_STATUS_RECONCILED, janForRow);
   if (oErr) {
     await unlinkInboundFromOrder(inboundIds, amazonOrderId);
     throw oErr;

@@ -17,7 +17,7 @@ import {
 const MARKETPLACE_ID_JP = "A1VC38T7YXB528";
 
 export type ReconcileHealOrderRow = {
-  id: number;
+  id: string;
   amazon_order_id: string;
   sku: string;
   condition_id: string | null;

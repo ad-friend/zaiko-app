@@ -1,37 +1,80 @@
 /**
  * 手動確認中の注文のコンディションをインライン更新（amazon_orders.condition_id）
- * ボディは緩く受け取り、内部で数値化・コンディション正規化・Amazon注文番号フォールバックを行う。
+ * amazon_orders.id は UUID。主キーは body.id_string / body.id のみ厳格に受理（数値化なし）。
  */
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 
-/** 数字以外を除去して parseInt（型・表記の揺れを吸収） */
-function toStrippedInt(raw: unknown): number {
-  const n = Number.parseInt(String(raw ?? "").replace(/\D/g, ""), 10);
-  return Number.isFinite(n) ? n : Number.NaN;
+/** RFC 4122 形式の UUID（大文字小文字許容） */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isStrictConditionId(raw: unknown): raw is "New" | "Used" {
+  return raw === "New" || raw === "Used";
 }
 
-function normalizeConditionRobust(raw: unknown): "New" | "Used" {
-  const s = String(raw ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/\u3000/g, " ");
-  return s.includes("new") ? "New" : "Used";
+type PrimaryIdParse =
+  | { kind: "ok"; id: string }
+  | { kind: "absent" }
+  | { kind: "reject"; message: string };
+
+/**
+ * body.id_string または body.id のみを厳格に検証（typeof string・trim 非空・UUID 形式）。
+ * amazon_order_db_id 等はここでは使わない。
+ */
+function parseStrictPrimaryRowId(body: Record<string, unknown>): PrimaryIdParse {
+  const idStringField = body.id_string;
+  const idField = body.id;
+
+  if (typeof idStringField === "string") {
+    const t = idStringField.trim();
+    if (t.length === 0) {
+      return { kind: "reject", message: "id_string が空です。" };
+    }
+    if (!UUID_RE.test(t)) {
+      return { kind: "reject", message: "id_string は有効な UUID 形式である必要があります。" };
+    }
+    if (typeof idField === "string" && idField.trim().length > 0 && idField.trim() !== t) {
+      return { kind: "reject", message: "id と id_string が一致しません。" };
+    }
+    if (idField !== undefined && idField !== null && typeof idField !== "string") {
+      return { kind: "reject", message: "id は文字列である必要があります。" };
+    }
+    return { kind: "ok", id: t };
+  }
+
+  if (idStringField !== undefined && idStringField !== null) {
+    return { kind: "reject", message: "id_string は文字列である必要があります。" };
+  }
+
+  if (typeof idField === "string") {
+    const t = idField.trim();
+    if (t.length === 0) {
+      return { kind: "reject", message: "id が空です。" };
+    }
+    if (!UUID_RE.test(t)) {
+      return { kind: "reject", message: "id は有効な UUID 形式である必要があります。" };
+    }
+    return { kind: "ok", id: t };
+  }
+
+  if (idField !== undefined && idField !== null) {
+    return { kind: "reject", message: "id は文字列である必要があります。" };
+  }
+
+  return { kind: "absent" };
 }
 
-async function resolveOrderRowId(body: Record<string, unknown>): Promise<{ id: number | null; reason: string }> {
-  const rawForPk =
-    body.id ??
-    body.id_numeric ??
-    body.order_row_id ??
-    body.amazon_order_db_id ??
-    body.amazonOrderDbId ??
-    body.id_string;
+function rowIdFromDb(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const t = value.trim();
+  return t.length > 0 ? t : null;
+}
 
-  const numericId = toStrippedInt(rawForPk);
-  const numericOk = Number.isFinite(numericId) && numericId > 0;
-
-  async function byAmazonOrder(): Promise<{ id: number | null; reason: string }> {
+async function resolveOrderRowId(
+  body: Record<string, unknown>,
+  strictPk: string | null
+): Promise<{ id: string | null; reason: string }> {
+  async function byAmazonOrder(): Promise<{ id: string | null; reason: string }> {
     const amz = String(body.amazon_order_id ?? body.order_id ?? "").trim();
     const sku = String(body.sku ?? "").trim();
     if (!amz) {
@@ -45,7 +88,6 @@ async function resolveOrderRowId(body: Record<string, unknown>): Promise<{ id: n
     if (sku) {
       q = q.eq("sku", sku);
     }
-    // maybeSingle は同一注文の複数行で PostgREST エラーになるため配列で受ける
     const { data: rows, error } = await q;
     if (error) {
       console.error("[amazon/orders/condition] resolve by order_id:", error.message);
@@ -62,29 +104,29 @@ async function resolveOrderRowId(body: Record<string, unknown>): Promise<{ id: n
         reason: sku ? "ambiguous_multiple_lines" : "multiple_rows_need_sku",
       };
     }
-    const n = toStrippedInt(list[0].id);
-    return Number.isFinite(n) && n > 0 ? { id: n, reason: "order_id_fallback" } : { id: null, reason: "not_found" };
+    const sid = rowIdFromDb(list[0].id);
+    return sid ? { id: sid, reason: "order_id_fallback" } : { id: null, reason: "not_found" };
   }
 
-  if (!numericOk) {
+  if (strictPk == null) {
     return byAmazonOrder();
   }
 
   const { data: hit, error } = await supabase
     .from("amazon_orders")
     .select("id, reconciliation_status")
-    .eq("id", numericId)
+    .eq("id", strictPk)
     .maybeSingle();
 
   if (error) {
-    console.error("[amazon/orders/condition] resolve by stripped id:", error.message);
+    console.error("[amazon/orders/condition] resolve by id (uuid):", error.message);
     return byAmazonOrder();
   }
   if (hit?.reconciliation_status === "manual_required") {
-    return { id: numericId, reason: "stripped_numeric_id" };
+    return { id: strictPk, reason: "row_uuid" };
   }
   if (hit) {
-    return { id: numericId, reason: "not_manual_required" };
+    return { id: strictPk, reason: "not_manual_required" };
   }
 
   return byAmazonOrder();
@@ -96,31 +138,43 @@ export async function PATCH(request: NextRequest) {
     body = (await request.json()) as Record<string, unknown>;
     console.log("📥 受信データ:", body);
 
-    const condition_id = normalizeConditionRobust(body.condition_id);
+    if (!isStrictConditionId(body.condition_id)) {
+      console.error("[amazon/orders/condition] 400 condition_id:", {
+        condition_id: body.condition_id,
+        conditionType: typeof body.condition_id,
+      });
+      return NextResponse.json(
+        { error: 'condition_id は "New" または "Used" を完全一致で指定してください。' },
+        { status: 400 }
+      );
+    }
+    const condition_id = body.condition_id;
 
-    const { id, reason } = await resolveOrderRowId(body);
+    const primary = parseStrictPrimaryRowId(body);
+    if (primary.kind === "reject") {
+      return NextResponse.json({ error: primary.message }, { status: 400 });
+    }
+    const strictPk = primary.kind === "ok" ? primary.id : null;
+
+    const { id, reason } = await resolveOrderRowId(body, strictPk);
 
     if (id == null) {
       console.error("[amazon/orders/condition] 400 詳細:", {
         reason,
         bodyKeys: Object.keys(body),
-        rawId: body.id,
-        rawIdType: typeof body.id,
-        id_numeric: body.id_numeric,
         id_string: body.id_string,
-        order_row_id: body.order_row_id,
+        id: body.id,
         order_id: body.order_id,
         amazon_order_id: body.amazon_order_id,
         sku: body.sku,
-        condition_raw: body.condition_id,
-        condition_normalized: condition_id,
+        condition_id,
       });
       const message =
         reason === "multiple_rows_need_sku"
           ? "同一Amazon注文に複数の手動確認行があります。SKUで行を特定してください。"
           : reason === "ambiguous_multiple_lines"
             ? "条件に一致する行が複数あります。データを確認してください。"
-            : "注文を特定できませんでした（id または order_id / amazon_order_id を確認してください）。";
+            : "注文を特定できませんでした（有効な id / id_string、または order_id / amazon_order_id を確認してください）。";
       return NextResponse.json({ error: message }, { status: 400 });
     }
 

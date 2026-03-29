@@ -1,6 +1,6 @@
 /**
  * 手動消込確定
- * POST: body { amazon_order_id, inbound_item_id, amazon_order_db_id?（推奨: amazon_orders.id） }
+ * POST: body { amazon_order_id, inbound_item_id, amazon_order_db_id?（推奨: amazon_orders.id = UUID） }
  * 在庫に注文番号を書き込み、該当注文行を reconciled にする。
  */
 import { NextRequest, NextResponse } from "next/server";
@@ -11,14 +11,25 @@ import {
   AMAZON_ORDER_STATUS_RECONCILED,
 } from "@/lib/amazon-order-reconciliation-status";
 
+const AMAZON_ORDER_ROW_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function parseAmazonOrderRowUuid(body: Record<string, unknown>): string | null {
+  const candidates = [body.amazon_order_db_id, body.id];
+  for (const raw of candidates) {
+    if (typeof raw !== "string") continue;
+    const t = raw.trim();
+    if (t.length > 0 && AMAZON_ORDER_ROW_UUID_RE.test(t)) return t;
+  }
+  return null;
+}
+
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
+    const body = (await request.json()) as Record<string, unknown>;
     const amazonOrderId = body.amazon_order_id != null ? String(body.amazon_order_id).trim() : "";
     const inboundItemId = body.inbound_item_id != null ? Number(body.inbound_item_id) : NaN;
-    const orderDbIdRaw = body.amazon_order_db_id ?? body.order_id;
-    const orderDbId = orderDbIdRaw != null ? Number(orderDbIdRaw) : NaN;
     const skuFromBody = body.sku != null ? String(body.sku).trim() : "";
+    const rowUuid = parseAmazonOrderRowUuid(body);
 
     if (!amazonOrderId) {
       return NextResponse.json({ error: "amazon_order_id を指定してください。" }, { status: 400 });
@@ -27,13 +38,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "有効な inbound_item_id を指定してください。" }, { status: 400 });
     }
 
-    let orderRow: { id: number; reconciliation_status: string; amazon_order_id: string } | null = null;
+    let orderRow: { id: string; reconciliation_status: string; amazon_order_id: string } | null = null;
 
-    if (Number.isFinite(orderDbId) && orderDbId > 0) {
+    if (rowUuid) {
       const { data, error } = await supabase
         .from("amazon_orders")
         .select("id, reconciliation_status, amazon_order_id")
-        .eq("id", orderDbId)
+        .eq("id", rowUuid)
         .single();
       if (error || !data) {
         return NextResponse.json({ error: "該当するAmazon注文が見つかりません。" }, { status: 404 });
@@ -51,7 +62,7 @@ export async function POST(request: NextRequest) {
       const { data, error } = await q.maybeSingle();
       if (error || !data) {
         return NextResponse.json(
-          { error: "該当するAmazon注文が見つかりません。複数明細がある場合は amazon_order_db_id を送ってください。" },
+          { error: "該当するAmazon注文が見つかりません。複数明細がある場合は amazon_order_db_id（UUID）を送ってください。" },
           { status: 404 }
         );
       }

@@ -5,13 +5,10 @@ import ManualFinanceProcessModal, { type PendingFinanceGroupData } from "@/compo
 import { normalizeOrderCondition } from "@/lib/amazon-condition-match";
 
 type AmazonOrder = {
-  /**
-   * amazon_orders の主キー（bigint）。JSON では string になることがある。
-   * 数字のみの文字列のみ有効（503-xxx 形式の Amazon 注文番号が入っていてはならない）。
-   */
-  id: number | string;
+  /** amazon_orders の主キー（UUID 文字列） */
+  id: string;
   /** GET /api/amazon/orders が付与。`id` と同じ DB 主キー */
-  order_row_id?: number | string;
+  order_row_id?: string;
   amazon_order_id: string;
   sku: string;
   condition_id: string;
@@ -31,26 +28,20 @@ type InboundCandidate = {
   order_id: string | null;
 };
 
-/** DB 主キー amazon_orders.id のみ（数字のみの文字列）。ハイフン付き注文番号は 0 扱い */
-function resolveOrderRowPk(o: Pick<AmazonOrder, "id" | "order_row_id">): number {
+/** DB 主キー amazon_orders.id（UUID 文字列） */
+function resolveOrderRowIdString(o: Pick<AmazonOrder, "id" | "order_row_id">): string | null {
   const candidates = [o.order_row_id, o.id];
   for (const raw of candidates) {
-    if (raw == null || raw === "") continue;
-    if (typeof raw === "number" && Number.isFinite(raw) && raw > 0 && raw === Math.trunc(raw)) {
-      return Math.trunc(raw);
-    }
-    const s = String(raw).trim();
-    if (/^\d+$/.test(s)) {
-      const n = Number.parseInt(s, 10);
-      if (n > 0) return n;
-    }
+    if (raw == null) continue;
+    const s = typeof raw === "string" ? raw.trim() : String(raw).trim();
+    if (s.length > 0) return s;
   }
-  return 0;
+  return null;
 }
 
 function orderStableKey(o: AmazonOrder): string {
-  const pk = resolveOrderRowPk(o);
-  if (pk > 0) return `pk:${pk}`;
+  const rowId = resolveOrderRowIdString(o);
+  if (rowId) return `pk:${rowId}`;
   return `amz:${encodeURIComponent(o.amazon_order_id)}|sku:${encodeURIComponent(o.sku)}`;
 }
 
@@ -156,10 +147,11 @@ export default function AmazonReconcileManager() {
   }, []);
 
   const handleOrderConditionUpdated = useCallback(
-    (rowId: number, condition_id: string, amazon_order_id: string, sku: string) => {
+    (rowId: string, condition_id: string, amazon_order_id: string, sku: string) => {
       setManualOrders((prev) =>
         prev.map((o) => {
-          const samePk = rowId > 0 && resolveOrderRowPk(o) === rowId;
+          const oid = resolveOrderRowIdString(o);
+          const samePk = rowId.length > 0 && oid != null && oid === rowId;
           const sameBiz =
             String(o.amazon_order_id).trim() === String(amazon_order_id).trim() &&
             String(o.sku).trim() === String(sku).trim();
@@ -647,7 +639,7 @@ function ManualOrderCard({
   order: AmazonOrder;
   onConfirmed: () => void;
   onCandidatesLoaded?: (orderKey: string, candidateCount: number) => void;
-  onConditionUpdated?: (rowId: number, condition_id: string, amazon_order_id: string, sku: string) => void;
+  onConditionUpdated?: (rowId: string, condition_id: string, amazon_order_id: string, sku: string) => void;
 }) {
   const [candidates, setCandidates] = useState<InboundCandidate[]>([]);
   const [loadingCandidates, setLoadingCandidates] = useState(false);
@@ -706,8 +698,7 @@ function ManualOrderCard({
       return;
     }
 
-    const orderDbId = resolveOrderRowPk(order);
-    const rawId = order.order_row_id ?? order.id;
+    const rowUuid = resolveOrderRowIdString(order);
 
     setConditionSaving(true);
     setConditionMessage(null);
@@ -718,14 +709,11 @@ function ManualOrderCard({
         amazon_order_id: order.amazon_order_id,
         order_id: order.amazon_order_id,
         sku: order.sku,
-        id: Number(rawId),
-        id_numeric: Number(rawId),
-        id_string: String(rawId ?? ""),
       };
-      if (orderDbId > 0) {
-        payload.id = orderDbId;
-        payload.id_numeric = orderDbId;
-        payload.order_row_id = orderDbId;
+      if (rowUuid) {
+        payload.id = rowUuid;
+        payload.id_string = rowUuid;
+        payload.amazon_order_db_id = rowUuid;
       }
 
       const payloadJson = stringifyPayload(payload);
@@ -753,11 +741,9 @@ function ManualOrderCard({
       }
       const saved = (condRaw === "New" || condRaw === "Used" ? condRaw : next) as "New" | "Used";
       const serverRowId =
-        typeof idRaw === "number" && idRaw > 0
-          ? idRaw
-          : typeof idRaw === "string" && /^\d+$/.test(idRaw)
-            ? Number.parseInt(idRaw, 10)
-            : orderDbId;
+        typeof idRaw === "string" && idRaw.trim().length > 0
+          ? idRaw.trim()
+          : rowUuid ?? "";
       setConditionId(saved);
       setSelectedId(null);
       onConditionUpdated?.(serverRowId, saved, order.amazon_order_id, order.sku);
