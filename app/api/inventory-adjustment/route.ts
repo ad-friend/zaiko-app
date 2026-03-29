@@ -1,6 +1,7 @@
 /** 在庫調整（破損・紛失・社内使用・接待）: 古い在庫から exit_type を付与 */
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
+import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
 
 const CONDITIONS = new Set(["new", "used"]);
 const REASONS = new Set(["damaged", "lost", "internal_use", "entertainment"]);
@@ -36,6 +37,7 @@ export async function POST(request: NextRequest) {
       .eq("condition_type", condition)
       .is("settled_at", null)
       .is("exit_type", null)
+      .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
       .order("created_at", { ascending: true })
       .limit(quantity);
 

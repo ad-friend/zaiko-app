@@ -12,6 +12,7 @@ import {
 } from "@/lib/amazon-order-reconciliation-status";
 import { normalizeOrderCondition, normalizeStockCondition } from "@/lib/amazon-condition-match";
 import { healReconcileOrdersFromSpApi } from "@/lib/amazon-reconcile-sp-heal";
+import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
 
 function sortFifo(a: { id: string; created_at: string | null }, b: { id: string; created_at: string | null }): number {
   const ta = a.created_at ? Date.parse(a.created_at) : 0;
@@ -176,7 +177,8 @@ export async function POST() {
               .from("inbound_items")
               .select("id, condition_type, created_at, order_id")
               .eq("jan_code", m.jan_code)
-              .is("settled_at", null);
+              .is("settled_at", null)
+              .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION);
             if (stockErr) throw stockErr;
             const available = filterAvailableByOrderId(stockRows ?? [], orderId);
             const matching = available
@@ -235,7 +237,8 @@ export async function POST() {
         .from("inbound_items")
         .select("id, condition_type, created_at, order_id")
         .eq("jan_code", jan)
-        .is("settled_at", null);
+        .is("settled_at", null)
+        .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION);
 
       if (stockErr) throw stockErr;
 

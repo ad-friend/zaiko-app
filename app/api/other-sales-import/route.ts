@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createHash } from "crypto";
 import { supabase } from "@/lib/supabase";
+import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
 
 type ParsedOtherSalesRow = {
   orderId: string;
@@ -180,6 +181,7 @@ export async function POST(request: NextRequest) {
             .select("id,effective_unit_price")
             .eq("jan_code", mappedJanCode)
             .is("settled_at", null)
+            .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
             .order("created_at", { ascending: true })
             .limit(1);
 
@@ -198,6 +200,7 @@ export async function POST(request: NextRequest) {
             .select("id,effective_unit_price")
             .eq("jan_code", janCode)
             .is("settled_at", null)
+            .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
             .order("created_at", { ascending: true })
             .limit(1);
 

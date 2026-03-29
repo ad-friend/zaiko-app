@@ -68,3 +68,7 @@ ALTER TABLE inbound_items
 -- 在庫調整理由（破損・紛失・社内使用・接待）
 ALTER TABLE inbound_items
   ADD COLUMN IF NOT EXISTS exit_type TEXT;
+
+-- Amazon 返品の検品待ち（引当除外用）。詳細は docs/migration_inbound_items_stock_status.sql
+ALTER TABLE inbound_items
+  ADD COLUMN IF NOT EXISTS stock_status TEXT;

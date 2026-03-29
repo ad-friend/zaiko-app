@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Ban, Trash2 } from "lucide-react";
 import ManualFinanceProcessModal, { type PendingFinanceGroupData } from "@/components/ManualFinanceProcessModal";
+import ReturnInspectionQueueSection from "@/components/ReturnInspectionQueueSection";
 import { normalizeOrderCondition } from "@/lib/amazon-condition-match";
 
 type AmazonOrder = {
@@ -504,6 +505,8 @@ export default function AmazonReconcileManager() {
               </div>
             )}
           </div>
+
+          <ReturnInspectionQueueSection />
         </div>
 
         {/* 右カラム: 売上とお金の確定（本消込） */}

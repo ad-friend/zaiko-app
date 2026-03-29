@@ -6,6 +6,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
+import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
 
 export async function GET(request: NextRequest) {
   try {
@@ -48,6 +49,7 @@ export async function GET(request: NextRequest) {
         .select("id, jan_code, condition_type, effective_unit_price, order_id, product_name, created_at")
         .eq("order_id", amazonOrderId)
         .is("settled_at", null)
+        .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
         .order("created_at", { ascending: true });
 
       if (!errA && linked?.length) {
@@ -100,6 +102,7 @@ export async function GET(request: NextRequest) {
           .from("inbound_items")
           .select("id, jan_code, condition_type, effective_unit_price, order_id, product_name, created_at")
           .is("settled_at", null)
+          .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
           .or('order_id.is.null,order_id.eq.""')
           .eq("jan_code", janFromMaster)
           .order("created_at", { ascending: true });
@@ -119,6 +122,7 @@ export async function GET(request: NextRequest) {
           .from("inbound_items")
           .select("id, jan_code, condition_type, effective_unit_price, order_id, product_name, created_at")
           .is("settled_at", null)
+          .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
           .or('order_id.is.null,order_id.eq.""')
           .eq("asin", orderAsin)
           .order("created_at", { ascending: true });

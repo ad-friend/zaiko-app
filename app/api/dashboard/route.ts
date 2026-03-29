@@ -4,6 +4,7 @@
  */
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
+import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
 import type { DashboardPayload, DashboardPeriod } from "@/lib/dashboard-types";
 
 const PAGE = 1000;
@@ -46,6 +47,7 @@ async function aggregateCurrentInventory(): Promise<{ count: number; totalAmount
       .select("effective_unit_price")
       .is("settled_at", null)
       .is("exit_type", null)
+      .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
       .order("id", { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) throw error;

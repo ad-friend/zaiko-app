@@ -1,6 +1,7 @@
 /** 商品マスター */
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
+import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
 
 export type ProductRow = {
   jan_code: string;
@@ -23,6 +24,7 @@ async function countActiveStockByJan(): Promise<Map<string, number>> {
       .select("jan_code")
       .is("settled_at", null)
       .is("exit_type", null)
+      .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
       .order("id", { ascending: true })
       .range(from, from + pageSize - 1);
     if (error) throw error;
@@ -44,7 +46,8 @@ async function countActiveStockForJan(jan: string): Promise<number> {
     .select("*", { count: "exact", head: true })
     .eq("jan_code", jan)
     .is("settled_at", null)
-    .is("exit_type", null);
+    .is("exit_type", null)
+    .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION);
   if (error) throw error;
   return count ?? 0;
 }

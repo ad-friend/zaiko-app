@@ -2,9 +2,8 @@
  * Amazon 返品レポート取り込み: 在庫解放 + amazon_orders を returned に更新（終端状態以外の行のみ）。
  *
  * TODO(disposition): Amazon の disposition（例: Sellable / Customer Damaged / Defective 等）に応じて分岐する。
- * - Sellable: 現状どおり販売可能在庫として解放（inbound_items を未引当に戻す）でよい想定。
- * - Defective / 不良系: 別ロケーション・別 condition の inbound 行を生成する、または専用ステータスへ送る等、
- *   会計・在庫ポリシーに合わせて実装する。
+ * - Sellable: 在庫は order から外し、stock_status=return_inspection（検品待ち）へ。人手で New/Used 確定後に available。
+ * - Defective / 不良系: 専用ステータス・別 inbound 行生成など会計ポリシーに合わせて拡張する。
  */
 import { supabase } from "@/lib/supabase";
 import { AMAZON_ORDER_STATUS_RETURNED } from "@/lib/amazon-order-reconciliation-status";
@@ -61,7 +60,7 @@ export async function handleOrderReturn(
     return { ok: true, outcome: "all_terminal_skipped" };
   }
 
-  const rel = await releaseInboundItemsForAmazonOrder(oid);
+  const rel = await releaseInboundItemsForAmazonOrder(oid, "return");
   if (!rel.ok) {
     return { ok: false, message: rel.message };
   }
