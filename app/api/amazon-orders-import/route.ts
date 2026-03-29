@@ -18,9 +18,6 @@ type ImportError =
   | { type: "invalid_row"; index: number; error: string; row: unknown }
   | { type: "upsert_error"; error: string; details?: unknown; chunk: { start: number; end: number } };
 
-/** フロントが1リクエストあたり送る最大件数 */
-const MAX_ROWS_PER_REQUEST = 30;
-
 function toTrimmedString(v: unknown): string {
   return v == null ? "" : String(v).trim();
 }
@@ -51,12 +48,6 @@ export async function POST(request: NextRequest) {
 
     if (!inputs.length) {
       return NextResponse.json({ error: "注文データの配列を送ってください。" }, { status: 400 });
-    }
-    if (inputs.length > MAX_ROWS_PER_REQUEST) {
-      return NextResponse.json(
-        { error: `1リクエストあたり最大${MAX_ROWS_PER_REQUEST}件までです（受信: ${inputs.length}件）。` },
-        { status: 400 }
-      );
     }
 
     const nowIso = new Date().toISOString();

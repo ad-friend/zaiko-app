@@ -31,12 +31,16 @@ export default function AmazonReconcileManager() {
   const [manualOrders, setManualOrders] = useState<AmazonOrder[]>([]);
   const [loading, setLoading] = useState(true);
   
-  // 自動消込用のState
+  // 自動消込用のState（バックエンドは1回最大20件のため、フロントで連続呼び出し）
   const [reconciling, setReconciling] = useState(false);
+  const [reconcileLoopRound, setReconcileLoopRound] = useState(0);
   const [reconcileResult, setReconcileResult] = useState<{
     message: string;
     completed?: number;
     manual_required?: number;
+    skipped_used_safety?: number;
+    rounds?: number;
+    allComplete?: boolean;
   } | null>(null);
   
   // STEP 1: 注文データ取得用のState
@@ -182,25 +186,79 @@ export default function AmazonReconcileManager() {
     }
   };
 
+  const RECONCILE_MAX_ROUNDS = 300;
+
   const runReconcile = async () => {
-    if (!confirm("自動消込を実行しますか？")) return;
+    if (!confirm("自動消込を実行しますか？（pending がなくなるまで最大繰り返し実行されます）")) return;
     setReconciling(true);
+    setReconcileLoopRound(0);
     setReconcileResult(null);
     setError(null);
+
+    let round = 0;
+    let totalCompleted = 0;
+    let totalManual = 0;
+    let totalSkippedUsed = 0;
+
     try {
-      const res = await fetch("/api/amazon/reconcile", { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "消込に失敗しました");
-      setReconcileResult({
-        message: data.message ?? "完了しました",
-        completed: data.completed,
-        manual_required: data.manual_required,
-      });
-      await fetchManualOrders();
+      for (;;) {
+        round += 1;
+        setReconcileLoopRound(round);
+
+        const res = await fetch("/api/amazon/reconcile", { method: "POST" });
+        const data = (await res.json()) as {
+          error?: string;
+          processed?: number;
+          completed?: number;
+          manual_required?: number;
+          skipped_used_safety?: number;
+          message?: string;
+        };
+
+        if (!res.ok) {
+          throw new Error(data.error ?? "消込に失敗しました");
+        }
+
+        const processed = Number(data.processed ?? 0);
+        totalCompleted += Number(data.completed ?? 0);
+        totalManual += Number(data.manual_required ?? 0);
+        totalSkippedUsed += Number(data.skipped_used_safety ?? 0);
+
+        if (processed === 0) {
+          setReconcileResult({
+            message: "🎉 全ての自動消込が完了しました！",
+            completed: totalCompleted,
+            manual_required: totalManual,
+            skipped_used_safety: totalSkippedUsed,
+            rounds: round,
+            allComplete: true,
+          });
+          await fetchManualOrders();
+          return;
+        }
+
+        if (round >= RECONCILE_MAX_ROUNDS) {
+          setError(
+            `安全のため ${RECONCILE_MAX_ROUNDS} 回でループを打ち切りました。pending が残る場合は再度「自動消込を開始する」を押してください。`
+          );
+          setReconcileResult({
+            message: "一部のみ実行されました（ループ上限に達しました）。",
+            completed: totalCompleted,
+            manual_required: totalManual,
+            skipped_used_safety: totalSkippedUsed,
+            rounds: round,
+            allComplete: false,
+          });
+          await fetchManualOrders();
+          return;
+        }
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "消込処理に失敗しました");
+      await fetchManualOrders();
     } finally {
       setReconciling(false);
+      setReconcileLoopRound(0);
     }
   };
 
@@ -277,7 +335,7 @@ export default function AmazonReconcileManager() {
             <div className="absolute top-0 left-0 w-1 h-full bg-primary" />
             <h3 className="text-lg font-bold text-slate-800 mb-2">STEP 2: 自動消込の実行</h3>
             <p className="text-sm text-slate-500 mb-4">
-              取り込んだ未処理注文に対して、新品・セット・中古（1件のみ候補）の自動消込を行います。
+              取り込んだ未処理注文に対して、新品・セット・中古（1件のみ候補）の自動消込を行います。1回のAPIは最大20件まで処理するため、pending がなくなるまで自動で繰り返し呼び出します。
             </p>
             <button
               type="button"
@@ -288,20 +346,37 @@ export default function AmazonReconcileManager() {
               {reconciling ? (
                 <span className="flex items-center gap-2">
                   <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                  消込処理を実行中...
+                  自動消込を実行中...
                 </span>
               ) : (
-                "消込処理を開始する"
+                "自動消込を開始する"
               )}
             </button>
+            {reconciling && reconcileLoopRound > 0 && (
+              <p className="mt-2 text-sm font-medium text-slate-600" aria-live="polite">
+                自動消込を実行中...（{reconcileLoopRound}回目）
+              </p>
+            )}
             {reconcileResult && (
-              <div className="mt-4 rounded-lg bg-emerald-50 border border-emerald-200 p-4 text-sm text-emerald-800">
-                <p className="font-medium">{reconcileResult.message}</p>
+              <div
+                className={`mt-4 rounded-lg border p-4 text-sm ${
+                  reconcileResult.allComplete
+                    ? "bg-emerald-50 border-emerald-300 text-emerald-900"
+                    : "bg-amber-50/80 border-amber-200 text-amber-900"
+                }`}
+              >
+                <p className="font-semibold text-base leading-snug">{reconcileResult.message}</p>
+                {reconcileResult.rounds != null && (
+                  <p className="mt-1 text-xs opacity-90">API 呼び出し回数: {reconcileResult.rounds} 回</p>
+                )}
                 {reconcileResult.completed != null && (
-                  <p className="mt-1">自動消込完了: {reconcileResult.completed} 件</p>
+                  <p className="mt-2">このセッションで自動消込完了: {reconcileResult.completed} 件</p>
                 )}
                 {reconcileResult.manual_required != null && reconcileResult.manual_required > 0 && (
                   <p className="mt-1">手動確認に回した注文: {reconcileResult.manual_required} 件</p>
+                )}
+                {reconcileResult.skipped_used_safety != null && reconcileResult.skipped_used_safety > 0 && (
+                  <p className="mt-1">中古安全装置でスキップ（pending のまま）: {reconcileResult.skipped_used_safety} 件</p>
                 )}
               </div>
             )}

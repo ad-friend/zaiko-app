@@ -23,15 +23,6 @@ type ParseResult = {
 const buttonClass =
   "inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 h-10 px-6 py-2 shadow-sm active:scale-[0.98] duration-100";
 
-/** API の上限と一致（amazon-orders-import / MAX_ROWS_PER_REQUEST） */
-const IMPORT_CHUNK_SIZE = 30;
-
-function chunkArray<T>(arr: T[], size: number): T[][] {
-  const out: T[][] = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
-}
-
 function normalizeHeaderKey(s: string): string {
   return s
     .toLowerCase()
@@ -191,8 +182,6 @@ export default function AmazonOrdersImportPage() {
     previewErrors: number;
     mapping: ParseResult["headerMapping"];
   } | null>(null);
-  const [chunkProgress, setChunkProgress] = useState<{ current: number; total: number } | null>(null);
-
   const parsedSummary = useMemo(() => {
     if (!parsePreview) return null;
     return `有効行: ${parsePreview.previewRows}件 / パース警告: ${parsePreview.previewErrors}件`;
@@ -204,7 +193,6 @@ export default function AmazonOrdersImportPage() {
 
     setError(null);
     setResult(null);
-    setChunkProgress(null);
     setSelectedFileName(file.name);
     setAutoRunning(true);
 
@@ -223,55 +211,39 @@ export default function AmazonOrdersImportPage() {
         return;
       }
 
-      const chunks = chunkArray(parsed.rows, IMPORT_CHUNK_SIZE);
-      let sumReceived = 0;
-      let sumUpserted = 0;
-      let sumSkipped = 0;
-      const mergedRawErrors: unknown[] = [];
+      const res = await fetch("/api/amazon-orders-import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsed.rows),
+      });
 
-      for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i];
-        setChunkProgress({ current: i + 1, total: chunks.length });
+      const data = (await res.json()) as {
+        error?: string;
+        received?: number;
+        upserted?: number;
+        skipped?: number;
+        errors?: unknown[];
+      };
 
-        const res = await fetch("/api/amazon-orders-import", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(chunk),
+      if (!res.ok) {
+        setError(data?.error ?? "インポートに失敗しました");
+        setResult({
+          ok: false,
+          received: data?.received ?? parsed.rows.length,
+          upserted: data?.upserted ?? 0,
+          skipped: data?.skipped ?? 0,
+          errors: parsed.rowErrors,
+          rawErrors: data?.errors ?? [],
         });
-
-        const data = (await res.json()) as {
-          error?: string;
-          received?: number;
-          upserted?: number;
-          skipped?: number;
-          errors?: unknown[];
-        };
-
-        if (!res.ok) {
-          setError(data?.error ?? "インポートに失敗しました");
-          setResult({
-            ok: false,
-            received: sumReceived + (data?.received ?? chunk.length),
-            upserted: sumUpserted + (data?.upserted ?? 0),
-            skipped: sumSkipped + (data?.skipped ?? 0),
-            errors: parsed.rowErrors,
-            rawErrors: [...mergedRawErrors, ...(data?.errors ?? [])],
-          });
-          return;
-        }
-
-        sumReceived += data.received ?? chunk.length;
-        sumUpserted += data.upserted ?? 0;
-        sumSkipped += data.skipped ?? 0;
-        if (Array.isArray(data.errors)) mergedRawErrors.push(...data.errors);
+        return;
       }
 
-      const rawErrors = mergedRawErrors;
+      const rawErrors = (data.errors ?? []) as unknown[];
       setResult({
         ok: true,
-        received: sumReceived,
-        upserted: sumUpserted,
-        skipped: sumSkipped,
+        received: data.received ?? parsed.rows.length,
+        upserted: data.upserted ?? 0,
+        skipped: data.skipped ?? 0,
         rawErrors,
         errors: [
           ...parsed.rowErrors,
@@ -289,7 +261,6 @@ export default function AmazonOrdersImportPage() {
       setError(e2 instanceof Error ? e2.message : "インポートに失敗しました");
     } finally {
       setAutoRunning(false);
-      setChunkProgress(null);
       e.target.value = "";
     }
   };
@@ -312,7 +283,7 @@ export default function AmazonOrdersImportPage() {
           <p className="text-sm text-slate-600 mb-4">
             必須ヘッダー: <span className="font-mono">amazonOrderId / purchaseDate / sku</span>
             <br />
-            コンディション・JAN は自社 DB（sku_mappings / products 等）照合のみです。API 通信は行いません（30件ずつ分割送信）。
+            コンディション・JAN は自社 DB（sku_mappings / products 等）照合のみです。外部 SP-API は呼び出しません。
           </p>
 
           <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
@@ -333,18 +304,14 @@ export default function AmazonOrdersImportPage() {
                 className={`${buttonClass} bg-slate-100 text-slate-400 border border-slate-200`}
                 title="ファイル選択後、自動で実行します"
               >
-                {autoRunning
-                  ? chunkProgress
-                    ? `インポート中… (${chunkProgress.current}/${chunkProgress.total} 分割)`
-                    : "処理中..."
-                  : "自動実行"}
+                {autoRunning ? "インポートを実行中..." : "自動実行"}
               </button>
             </div>
           </div>
 
-          {autoRunning && chunkProgress && (
+          {autoRunning && (
             <p className="mt-3 text-sm font-medium text-primary" aria-live="polite">
-              インポート中… ({chunkProgress.current}/{chunkProgress.total} 分割)
+              インポートを実行中...
             </p>
           )}
 
