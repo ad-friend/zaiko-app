@@ -25,10 +25,9 @@ type ImportError =
   | { type: "invalid_row"; index: number; error: string; row: unknown }
   | { type: "upsert_error"; error: string; details?: unknown; chunk: { start: number; end: number } };
 
-const ORDER_FETCH_CHUNK = 50;
+/** フロントが1リクエストあたり送る最大件数 */
+const MAX_ROWS_PER_REQUEST = 30;
 const ORDER_FETCH_SLEEP_MS = 450;
-const CHUNK_SLEEP_BETWEEN_GROUPS_MS = 1000;
-const DB_UPSERT_CHUNK = 50;
 
 function toTrimmedString(v: unknown): string {
   return v == null ? "" : String(v).trim();
@@ -51,26 +50,22 @@ function parseToIsoDateMaybe(raw: string): string | null {
 
 /**
  * SP-API は ConditionId（＋明細の ASIN）取得のみ。カタログ API は使わない。
- * 注文IDを50件単位で区切り、呼び出し間に sleep。
+ * 注文IDごとに getOrderItems → 各呼び出しのあと Rate Limit 対策で sleep。
  */
 async function buildOrderIdToItemsMap(orderIds: string[]): Promise<Map<string, OrderItemLite[]>> {
   const map = new Map<string, OrderItemLite[]>();
   const sp = tryCreateAmazonSpClient();
   if (!sp || orderIds.length === 0) return map;
 
-  for (let g = 0; g < orderIds.length; g += ORDER_FETCH_CHUNK) {
-    const group = orderIds.slice(g, g + ORDER_FETCH_CHUNK);
-    for (const oid of group) {
-      try {
-        const items = await fetchAllOrderItems(sp, oid);
-        map.set(oid, items);
-      } catch (e) {
-        console.warn(`[amazon-orders-import] getOrderItems failed ${oid}:`, e);
-        map.set(oid, []);
-      }
-      await sleep(ORDER_FETCH_SLEEP_MS);
+  for (const oid of orderIds) {
+    try {
+      const items = await fetchAllOrderItems(sp, oid);
+      map.set(oid, items);
+    } catch (e) {
+      console.warn(`[amazon-orders-import] getOrderItems failed ${oid}:`, e);
+      map.set(oid, []);
     }
-    if (g + ORDER_FETCH_CHUNK < orderIds.length) await sleep(CHUNK_SLEEP_BETWEEN_GROUPS_MS);
+    await sleep(ORDER_FETCH_SLEEP_MS);
   }
   return map;
 }
@@ -86,6 +81,12 @@ export async function POST(request: NextRequest) {
 
     if (!inputs.length) {
       return NextResponse.json({ error: "注文データの配列を送ってください。" }, { status: 400 });
+    }
+    if (inputs.length > MAX_ROWS_PER_REQUEST) {
+      return NextResponse.json(
+        { error: `1リクエストあたり最大${MAX_ROWS_PER_REQUEST}件までです（受信: ${inputs.length}件）。` },
+        { status: 400 }
+      );
     }
 
     const nowIso = new Date().toISOString();
@@ -160,47 +161,40 @@ export async function POST(request: NextRequest) {
       r.jan_code = resolved;
     }
 
-    let upserted = 0;
+    const chunkOrderIds = [...new Set(validRows.map((r) => String(r.amazon_order_id)))];
+    const { data: existingStatuses } = await supabase
+      .from("amazon_orders")
+      .select("amazon_order_id, sku, reconciliation_status")
+      .in("amazon_order_id", chunkOrderIds);
+    applyPreservedReconciliationStatusForUpsert(
+      validRows as Array<{ amazon_order_id: string; sku: string; reconciliation_status?: string }>,
+      existingStatuses ?? []
+    );
 
-    for (let start = 0; start < validRows.length; start += DB_UPSERT_CHUNK) {
-      const end = Math.min(start + DB_UPSERT_CHUNK, validRows.length);
-      const chunk = validRows.slice(start, end);
+    const { data, error } = await supabase
+      .from("amazon_orders")
+      .upsert(validRows, { onConflict: "amazon_order_id,sku" })
+      .select("id");
 
-      const chunkOrderIds = [...new Set(chunk.map((r) => String(r.amazon_order_id)))];
-      const { data: existingStatuses } = await supabase
-        .from("amazon_orders")
-        .select("amazon_order_id, sku, reconciliation_status")
-        .in("amazon_order_id", chunkOrderIds);
-      applyPreservedReconciliationStatusForUpsert(
-        chunk as Array<{ amazon_order_id: string; sku: string; reconciliation_status?: string }>,
-        existingStatuses ?? []
-      );
-
-      const { data, error } = await supabase
-        .from("amazon_orders")
-        .upsert(chunk, { onConflict: "amazon_order_id,sku" })
-        .select("id");
-
-      if (error) {
-        errors.push({
-          type: "upsert_error",
+    if (error) {
+      errors.push({
+        type: "upsert_error",
+        error: error.message,
+        details: error,
+        chunk: { start: 0, end: validRows.length },
+      });
+      return NextResponse.json(
+        {
           error: error.message,
-          details: error,
-          chunk: { start, end },
-        });
-        return NextResponse.json(
-          {
-            error: error.message,
-            upserted,
-            skipped,
-            errors,
-          },
-          { status: 500 }
-        );
-      }
-
-      upserted += Array.isArray(data) ? data.length : 0;
+          upserted: 0,
+          skipped,
+          errors,
+        },
+        { status: 500 }
+      );
     }
+
+    const upserted = Array.isArray(data) ? data.length : 0;
 
     return NextResponse.json({
       ok: true,
