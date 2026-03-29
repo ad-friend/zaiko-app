@@ -6,6 +6,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { applyPreservedReconciliationStatusForUpsert } from "@/lib/amazon-order-reconciliation-status";
+import { handleOrderCancellation } from "@/lib/amazon-cancellation";
 import { buildLocalJanLookupMaps, resolveJanFromLocalMaps } from "@/lib/amazon-order-local-jan";
 
 const MARKETPLACE_ID_JP = "A1VC38T7YXB528";
@@ -116,20 +117,8 @@ export async function GET(request: NextRequest) {
 
       // 発送前キャンセル（Canceled）: 引き当てを巻き戻す
       if (order.OrderStatus === "Canceled") {
-        const { error: rollbackErr } = await supabase
-          .from("inbound_items")
-          .update({ settled_at: null, order_id: null })
-          .eq("order_id", amazonOrderId);
-
-        if (rollbackErr) throw rollbackErr;
-
-        // キャンセルを amazon_orders に反映して後続処理対象から外す
-        const { error: cancelStatusErr } = await supabase
-          .from("amazon_orders")
-          .update({ reconciliation_status: "canceled", updated_at: new Date().toISOString() })
-          .eq("amazon_order_id", amazonOrderId);
-
-        if (cancelStatusErr) throw cancelStatusErr;
+        const cancelRes = await handleOrderCancellation(amazonOrderId);
+        if (!cancelRes.ok) throw new Error(cancelRes.message);
         continue;
       }
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { Ban, Trash2 } from "lucide-react";
 import ManualFinanceProcessModal, { type PendingFinanceGroupData } from "@/components/ManualFinanceProcessModal";
 import { normalizeOrderCondition } from "@/lib/amazon-condition-match";
 
@@ -161,6 +162,20 @@ export default function AmazonReconcileManager() {
     },
     []
   );
+
+  const handleOrderDeleted = useCallback((removedId: string) => {
+    setManualOrders((prev) => prev.filter((o) => o.id !== removedId));
+    setCandidateCountByOrderId((prev) => {
+      const next = { ...prev };
+      delete next[`pk:${removedId}`];
+      return next;
+    });
+  }, []);
+
+  const handleOrderCancellationExcluded = useCallback((amazonOrderId: string) => {
+    const want = String(amazonOrderId).trim();
+    setManualOrders((prev) => prev.filter((o) => String(o.amazon_order_id).trim() !== want));
+  }, []);
 
   const filteredManualOrders = showOnlyNoStock
     ? manualOrders.filter((o) => (candidateCountByOrderId[orderStableKey(o)] ?? -1) === 0)
@@ -482,6 +497,8 @@ export default function AmazonReconcileManager() {
                     onConfirmed={fetchManualOrders}
                     onCandidatesLoaded={handleCandidatesLoaded}
                     onConditionUpdated={handleOrderConditionUpdated}
+                    onDeleted={handleOrderDeleted}
+                    onCancellationExcluded={handleOrderCancellationExcluded}
                   />
                 ))}
               </div>
@@ -635,11 +652,15 @@ function ManualOrderCard({
   onConfirmed,
   onCandidatesLoaded,
   onConditionUpdated,
+  onDeleted,
+  onCancellationExcluded,
 }: {
   order: AmazonOrder;
   onConfirmed: () => void;
   onCandidatesLoaded?: (orderKey: string, candidateCount: number) => void;
   onConditionUpdated?: (rowId: string, condition_id: string, amazon_order_id: string, sku: string) => void;
+  onDeleted?: (rowId: string) => void;
+  onCancellationExcluded?: (amazon_order_id: string) => void;
 }) {
   const [candidates, setCandidates] = useState<InboundCandidate[]>([]);
   const [loadingCandidates, setLoadingCandidates] = useState(false);
@@ -650,6 +671,8 @@ function ManualOrderCard({
   const [conditionSaving, setConditionSaving] = useState(false);
   const [conditionMessage, setConditionMessage] = useState<{ type: "ok" | "err"; text: string } | null>(null);
   const [candidatesRefreshKey, setCandidatesRefreshKey] = useState(0);
+  const [deleting, setDeleting] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
 
   useEffect(() => {
     setConditionId(order.condition_id);
@@ -762,6 +785,64 @@ function ManualOrderCard({
     }
   };
 
+  const runCancellationExclude = async () => {
+    const oid = String(order.amazon_order_id ?? "").trim();
+    if (!oid) {
+      setError("Amazon注文番号がありません。");
+      return;
+    }
+    if (
+      !window.confirm(
+        `この注文（${oid}）をキャンセル扱いにし、紐付いた在庫の引き当てを解除しますか？\n同一注文のほかの明細行もまとめて処理されます。`
+      )
+    ) {
+      return;
+    }
+    setCancelling(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/amazon/orders/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ amazon_order_id: oid }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) throw new Error(data.error ?? "キャンセル処理に失敗しました");
+      onCancellationExcluded?.(oid);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "キャンセル処理に失敗しました");
+    } finally {
+      setCancelling(false);
+    }
+  };
+
+  const deleteCancelledOrderRow = async () => {
+    const rowId = resolveOrderRowIdString(order);
+    if (!rowId) {
+      setError("行IDが取得できません。一覧を再読み込みしてください。");
+      return;
+    }
+    if (
+      !window.confirm(
+        `この注文行（${order.amazon_order_id} / SKU: ${order.sku}）をデータベースから削除しますか？\nキャンセル注文などの整理用です。取り消しはできません。`
+      )
+    ) {
+      return;
+    }
+    setDeleting(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/amazon/orders/${encodeURIComponent(rowId)}`, { method: "DELETE" });
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) throw new Error(data.error ?? "削除に失敗しました");
+      onDeleted?.(rowId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "削除に失敗しました");
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   const confirmSelection = async () => {
     if (selectedId == null) return;
     setSubmitting(true);
@@ -798,14 +879,43 @@ function ManualOrderCard({
       }`}
     >
       <div className="mb-3">
-        <a
-          href={`https://sellercentral.amazon.co.jp/orders-v3/order/${order.amazon_order_id}`}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-sm font-mono font-bold text-amber-600 hover:underline"
-        >
-          {order.amazon_order_id}
-        </a>
+        <div className="flex items-start justify-between gap-2">
+          <a
+            href={`https://sellercentral.amazon.co.jp/orders-v3/order/${order.amazon_order_id}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="min-w-0 text-sm font-mono font-bold text-amber-600 hover:underline break-all"
+          >
+            {order.amazon_order_id}
+          </a>
+          <div className="flex shrink-0 items-center gap-1">
+            <button
+              type="button"
+              title="キャンセル・除外（在庫を解放）"
+              aria-label="キャンセル・除外（在庫を解放）"
+              disabled={cancelling || deleting || submitting || conditionSaving}
+              onClick={() => {
+                void runCancellationExclude().catch((err) => console.error("[runCancellationExclude]", err));
+              }}
+              className="inline-flex items-center gap-1 rounded-md border border-amber-300 bg-white px-2 py-1 text-[10px] font-medium text-amber-900 hover:bg-amber-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <Ban className="h-3.5 w-3.5 shrink-0" aria-hidden />
+              キャンセル・除外
+            </button>
+            <button
+              type="button"
+              title="削除（キャンセル注文）"
+              aria-label="削除（キャンセル注文）"
+              disabled={deleting || cancelling || submitting || conditionSaving}
+              onClick={() => {
+                void deleteCancelledOrderRow().catch((err) => console.error("[deleteCancelledOrderRow]", err));
+              }}
+              className="rounded-md border border-red-200 bg-white p-1.5 text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <Trash2 className="h-4 w-4" aria-hidden />
+            </button>
+          </div>
+        </div>
         <p className="text-xs text-slate-500 mt-1">
           SKU: {order.sku} / 数量: {order.quantity}
         </p>

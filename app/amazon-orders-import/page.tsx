@@ -12,6 +12,7 @@ type AmazonOrdersImportRow = {
   itemPrice?: number;
   quantity?: number;
   orderStatus?: string;
+  itemStatus?: string;
 };
 
 type ParseResult = {
@@ -113,7 +114,22 @@ function buildMappingAndRows(text: string, fileName: string): ParseResult {
   const asinHeader = pickHeaderKey(headers, ["asin", "ASIN", "商品ASIN"]);
   const itemPriceHeader = pickHeaderKey(headers, ["item-price", "item price", "itemprice", "price", "単価", "商品価格"]);
   const quantityHeader = pickHeaderKey(headers, ["quantity", "qty", "数量", "item-quantity", "item quantity", "数量(個)"]);
-  const orderStatusHeader = pickHeaderKey(headers, ["order-status", "order status", "status", "注文ステータス", "出荷ステータス"]);
+  const orderStatusHeader = pickHeaderKey(headers, [
+    "order-status",
+    "order status",
+    "orderstatus",
+    "注文ステータス",
+    "注文のステータス",
+    "status",
+    "出荷ステータス",
+  ]);
+  const itemStatusHeader = pickHeaderKey(headers, [
+    "item-status",
+    "item status",
+    "itemstatus",
+    "明細ステータス",
+    "商品ステータス",
+  ]);
 
   if (amazonOrderIdHeader) headerMapping.amazonOrderId = amazonOrderIdHeader;
   if (purchaseDateHeader) headerMapping.purchaseDate = purchaseDateHeader;
@@ -122,6 +138,7 @@ function buildMappingAndRows(text: string, fileName: string): ParseResult {
   if (itemPriceHeader) headerMapping.itemPrice = itemPriceHeader;
   if (quantityHeader) headerMapping.quantity = quantityHeader;
   if (orderStatusHeader) headerMapping.orderStatus = orderStatusHeader;
+  if (itemStatusHeader) headerMapping.itemStatus = itemStatusHeader;
 
   const rowErrors: string[] = [];
   const rows: AmazonOrdersImportRow[] = [];
@@ -145,6 +162,7 @@ function buildMappingAndRows(text: string, fileName: string): ParseResult {
     const quantity =
       quantityHeader != null ? parseMoneyToNumber(toTrimmedString(r[quantityHeader])) ?? undefined : undefined;
     const orderStatus = orderStatusHeader ? toTrimmedString(r[orderStatusHeader]) : "";
+    const itemStatus = itemStatusHeader ? toTrimmedString(r[itemStatusHeader]) : "";
 
     if (!amazonOrderId || !purchaseDate || !sku) {
       rowErrors.push(`行 ${i + 2}: amazonOrderId/purchaseDate/sku のいずれかが空です。`);
@@ -159,6 +177,7 @@ function buildMappingAndRows(text: string, fileName: string): ParseResult {
       itemPrice: itemPrice != null ? itemPrice : undefined,
       quantity: quantity != null ? quantity : undefined,
       orderStatus: orderStatus ? orderStatus : undefined,
+      itemStatus: itemStatus ? itemStatus : undefined,
     });
   }
 
@@ -173,6 +192,9 @@ export default function AmazonOrdersImportPage() {
     received: number;
     upserted: number;
     skipped: number;
+    skipped_cancelled?: number;
+    skipped_cancelled_new?: number;
+    cancellation_rollbacks?: number;
     errors?: string[];
     rawErrors?: unknown[];
   } | null>(null);
@@ -207,7 +229,7 @@ export default function AmazonOrdersImportPage() {
       });
 
       if (!parsed.rows.length) {
-        setResult({ ok: true, received: 0, upserted: 0, skipped: 0, errors: parsed.rowErrors });
+        setResult({ ok: true, received: 0, upserted: 0, skipped: 0, skipped_cancelled: 0, errors: parsed.rowErrors });
         return;
       }
 
@@ -222,6 +244,9 @@ export default function AmazonOrdersImportPage() {
         received?: number;
         upserted?: number;
         skipped?: number;
+        skipped_cancelled?: number;
+        skipped_cancelled_new?: number;
+        cancellation_rollbacks?: number;
         errors?: unknown[];
       };
 
@@ -232,6 +257,9 @@ export default function AmazonOrdersImportPage() {
           received: data?.received ?? parsed.rows.length,
           upserted: data?.upserted ?? 0,
           skipped: data?.skipped ?? 0,
+          skipped_cancelled: data?.skipped_cancelled,
+          skipped_cancelled_new: data?.skipped_cancelled_new,
+          cancellation_rollbacks: data?.cancellation_rollbacks,
           errors: parsed.rowErrors,
           rawErrors: data?.errors ?? [],
         });
@@ -244,6 +272,9 @@ export default function AmazonOrdersImportPage() {
         received: data.received ?? parsed.rows.length,
         upserted: data.upserted ?? 0,
         skipped: data.skipped ?? 0,
+        skipped_cancelled: data.skipped_cancelled,
+        skipped_cancelled_new: data.skipped_cancelled_new,
+        cancellation_rollbacks: data.cancellation_rollbacks,
         rawErrors,
         errors: [
           ...parsed.rowErrors,
@@ -348,6 +379,12 @@ export default function AmazonOrdersImportPage() {
                 <span>受信: {result.received}件</span>
                 <span>登録: {result.upserted}件</span>
                 <span>スキップ: {result.skipped}件</span>
+                {(result.skipped_cancelled ?? 0) > 0 || (result.cancellation_rollbacks ?? 0) > 0 ? (
+                  <span className="text-emerald-800/90">
+                    キャンセル行 {result.skipped_cancelled ?? 0}件（うちDB未登録で破棄: {result.skipped_cancelled_new ?? 0}件） / 在庫巻き戻しした注文:{" "}
+                    {result.cancellation_rollbacks ?? 0}件
+                  </span>
+                ) : null}
               </div>
               {result.errors && result.errors.length > 0 && (
                 <div className="mt-3 text-xs text-emerald-900/80">
@@ -367,6 +404,11 @@ export default function AmazonOrdersImportPage() {
                 <span>受信: {result.received}件</span>
                 <span>登録: {result.upserted}件</span>
                 <span>スキップ: {result.skipped}件</span>
+                {(result.skipped_cancelled ?? 0) > 0 || (result.cancellation_rollbacks ?? 0) > 0 ? (
+                  <span>
+                    キャンセル行 {result.skipped_cancelled ?? 0}件 / 巻き戻し {result.cancellation_rollbacks ?? 0}件
+                  </span>
+                ) : null}
               </div>
               {result.rawErrors?.length ? (
                 <pre className="mt-3 text-xs overflow-auto rounded border border-red-200 bg-white p-2 text-red-800">

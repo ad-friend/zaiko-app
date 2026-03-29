@@ -15,6 +15,9 @@ export const AMAZON_ORDER_STATUS_RECONCILED = "reconciled";
 /** 手動確認待ち */
 export const AMAZON_ORDER_STATUS_MANUAL_REQUIRED = "manual_required";
 
+/** キャンセル済み（インポート / SP 同期 / 手動） */
+export const AMAZON_ORDER_STATUS_CANCELED = "canceled";
+
 /** 注文同期 upsert 時、上書きしてはいけない（消込状態を維持） */
 export function shouldPreserveReconciliationStatusOnSync(status: string | null | undefined): boolean {
   const s = String(status ?? "").trim();
@@ -22,7 +25,8 @@ export function shouldPreserveReconciliationStatusOnSync(status: string | null |
     s === AMAZON_ORDER_STATUS_RECONCILED ||
     s === "completed" ||
     s === AMAZON_ORDER_STATUS_MANUAL_REQUIRED ||
-    s === "canceled"
+    s === AMAZON_ORDER_STATUS_CANCELED ||
+    s === "cancelled"
   );
 }
 

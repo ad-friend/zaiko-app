@@ -3,6 +3,7 @@ import { supabase } from "@/lib/supabase";
 import { applyPreservedReconciliationStatusForUpsert } from "@/lib/amazon-order-reconciliation-status";
 import { buildLocalJanLookupMaps, resolveJanFromLocalMaps } from "@/lib/amazon-order-local-jan";
 import { buildSkuToConditionMap } from "@/lib/amazon-order-import-condition";
+import { handleOrderCancellation } from "@/lib/amazon-cancellation";
 
 type AmazonOrdersImportRow = {
   amazonOrderId: string;
@@ -12,6 +13,7 @@ type AmazonOrdersImportRow = {
   itemPrice?: number;
   quantity?: number;
   orderStatus?: string;
+  itemStatus?: string;
 };
 
 type ImportError =
@@ -37,6 +39,32 @@ function parseToIsoDateMaybe(raw: string): string | null {
   return d.toISOString();
 }
 
+/** 注文・明細ステータスがキャンセル系か（大文字小文字無視。日本語はそのまま部分一致） */
+function statusTextImpliesCancelled(raw: unknown): boolean {
+  if (raw == null) return false;
+  const s = String(raw).trim();
+  if (!s) return false;
+  const lower = s.toLowerCase();
+  if (lower.includes("cancel")) return true;
+  if (s.includes("キャンセル")) return true;
+  return false;
+}
+
+function importRowIndicatesCancelled(row: AmazonOrdersImportRow & Record<string, unknown>): boolean {
+  const extras: unknown[] = [
+    row.orderStatus,
+    row.itemStatus,
+    row["order-status"],
+    row["item-status"],
+    row["order_status"],
+    row["item_status"],
+  ];
+  for (const v of extras) {
+    if (statusTextImpliesCancelled(v)) return true;
+  }
+  return false;
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -53,9 +81,13 @@ export async function POST(request: NextRequest) {
     const nowIso = new Date().toISOString();
     const validRows: Array<Record<string, unknown>> = [];
     const errors: ImportError[] = [];
+    let skippedCancelledNew = 0;
+    let skippedCancelledLines = 0;
+    let cancellationRollbacks = 0;
+    const rolledBackAmazonOrderIds = new Set<string>();
 
     for (let i = 0; i < inputs.length; i++) {
-      const row = inputs[i] as AmazonOrdersImportRow;
+      const row = inputs[i] as AmazonOrdersImportRow & Record<string, unknown>;
 
       const amazonOrderId = toTrimmedString(row.amazonOrderId);
       const purchaseDate = toTrimmedString(row.purchaseDate);
@@ -71,6 +103,33 @@ export async function POST(request: NextRequest) {
       }
       if (!sku) {
         errors.push({ type: "invalid_row", index: i, error: "sku が必須です。", row });
+        continue;
+      }
+
+      if (importRowIndicatesCancelled(row)) {
+        skippedCancelledLines += 1;
+        const { data: existingRows, error: existErr } = await supabase
+          .from("amazon_orders")
+          .select("id")
+          .eq("amazon_order_id", amazonOrderId)
+          .limit(1);
+        if (existErr) {
+          errors.push({ type: "invalid_row", index: i, error: `キャンセル行の確認に失敗: ${existErr.message}`, row });
+          continue;
+        }
+        if (!existingRows?.length) {
+          skippedCancelledNew += 1;
+          continue;
+        }
+        if (!rolledBackAmazonOrderIds.has(amazonOrderId)) {
+          const cancelRes = await handleOrderCancellation(amazonOrderId);
+          if (!cancelRes.ok) {
+            errors.push({ type: "invalid_row", index: i, error: `キャンセル巻き戻し失敗: ${cancelRes.message}`, row });
+            continue;
+          }
+          rolledBackAmazonOrderIds.add(amazonOrderId);
+          cancellationRollbacks += 1;
+        }
         continue;
       }
 
@@ -95,7 +154,30 @@ export async function POST(request: NextRequest) {
 
     const skipped = inputs.length - validRows.length;
     if (!validRows.length) {
-      return NextResponse.json({ ok: false, upserted: 0, skipped, errors }, { status: 400 });
+      if (errors.length === 0) {
+        return NextResponse.json({
+          ok: true,
+          received: inputs.length,
+          upserted: 0,
+          skipped,
+          skipped_cancelled: skippedCancelledLines,
+          skipped_cancelled_new: skippedCancelledNew,
+          cancellation_rollbacks: cancellationRollbacks,
+          errors,
+        });
+      }
+      return NextResponse.json(
+        {
+          ok: false,
+          upserted: 0,
+          skipped,
+          skipped_cancelled: skippedCancelledLines,
+          skipped_cancelled_new: skippedCancelledNew,
+          cancellation_rollbacks: cancellationRollbacks,
+          errors,
+        },
+        { status: 400 }
+      );
     }
 
     const skuList = validRows.map((r) => String(r.sku));
@@ -137,6 +219,9 @@ export async function POST(request: NextRequest) {
           error: error.message,
           upserted: 0,
           skipped,
+          skipped_cancelled: skippedCancelledLines,
+          skipped_cancelled_new: skippedCancelledNew,
+          cancellation_rollbacks: cancellationRollbacks,
           errors,
         },
         { status: 500 }
@@ -150,6 +235,9 @@ export async function POST(request: NextRequest) {
       received: inputs.length,
       upserted,
       skipped,
+      skipped_cancelled: skippedCancelledLines,
+      skipped_cancelled_new: skippedCancelledNew,
+      cancellation_rollbacks: cancellationRollbacks,
       errors,
     });
   } catch (e: unknown) {
