@@ -14,11 +14,19 @@ import { normalizeOrderCondition, normalizeStockCondition } from "@/lib/amazon-c
 import { healReconcileOrdersFromSpApi } from "@/lib/amazon-reconcile-sp-heal";
 import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
 
-function sortFifo(a: { id: string; created_at: string | null }, b: { id: string; created_at: string | null }): number {
+/** inbound_items.id は PostgREST 経由で number になることが多く、string 前提の localeCompare は落ちる */
+function compareInboundRowId(a: unknown, b: unknown): number {
+  const na = typeof a === "number" ? a : Number(a);
+  const nb = typeof b === "number" ? b : Number(b);
+  if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+  return String(a ?? "").localeCompare(String(b ?? ""));
+}
+
+function sortFifo(a: { id: unknown; created_at: string | null }, b: { id: unknown; created_at: string | null }): number {
   const ta = a.created_at ? Date.parse(a.created_at) : 0;
   const tb = b.created_at ? Date.parse(b.created_at) : 0;
   if (ta !== tb) return ta - tb;
-  return a.id.localeCompare(b.id);
+  return compareInboundRowId(a.id, b.id);
 }
 
 async function updateAmazonOrderReconciliation(
