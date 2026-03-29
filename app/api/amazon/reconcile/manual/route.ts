@@ -9,6 +9,7 @@ import {
   AMAZON_ORDER_STATUS_MANUAL_REQUIRED,
   AMAZON_ORDER_STATUS_PENDING,
   AMAZON_ORDER_STATUS_RECONCILED,
+  AMAZON_ORDER_STATUS_RETURNED,
 } from "@/lib/amazon-order-reconciliation-status";
 
 const AMAZON_ORDER_ROW_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -70,8 +71,11 @@ export async function POST(request: NextRequest) {
     }
 
     const st = orderRow.reconciliation_status;
-    if (st === "canceled") {
+    if (st === "canceled" || st === "cancelled") {
       return NextResponse.json({ error: "この注文はキャンセル済みのため消込できません。" }, { status: 400 });
+    }
+    if (st === AMAZON_ORDER_STATUS_RETURNED) {
+      return NextResponse.json({ error: "この注文は返品処理済みのため消込できません。" }, { status: 400 });
     }
     if (st === AMAZON_ORDER_STATUS_RECONCILED || st === "completed") {
       return NextResponse.json({ error: "この注文はすでに仮消込済みです。" }, { status: 400 });

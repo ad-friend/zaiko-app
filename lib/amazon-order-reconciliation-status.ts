@@ -4,6 +4,7 @@
  * - reconciled: 在庫紐付け完了（旧 completed もDBに残り得る）
  * - manual_required: 手動確認
  * - canceled: キャンセル等
+ * - returned: 返品レポート等で在庫巻き戻し済み
  */
 
 /** 新規・再処理対象（自動消込APIが拾う） */
@@ -18,6 +19,9 @@ export const AMAZON_ORDER_STATUS_MANUAL_REQUIRED = "manual_required";
 /** キャンセル済み（インポート / SP 同期 / 手動） */
 export const AMAZON_ORDER_STATUS_CANCELED = "canceled";
 
+/** 返品レポート等で処理済み（在庫解放 + ステータス確定） */
+export const AMAZON_ORDER_STATUS_RETURNED = "returned";
+
 /** 注文同期 upsert 時、上書きしてはいけない（消込状態を維持） */
 export function shouldPreserveReconciliationStatusOnSync(status: string | null | undefined): boolean {
   const s = String(status ?? "").trim();
@@ -26,7 +30,8 @@ export function shouldPreserveReconciliationStatusOnSync(status: string | null |
     s === "completed" ||
     s === AMAZON_ORDER_STATUS_MANUAL_REQUIRED ||
     s === AMAZON_ORDER_STATUS_CANCELED ||
-    s === "cancelled"
+    s === "cancelled" ||
+    s === AMAZON_ORDER_STATUS_RETURNED
   );
 }
 

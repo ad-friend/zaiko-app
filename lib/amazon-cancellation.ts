@@ -3,6 +3,7 @@
  */
 import { supabase } from "@/lib/supabase";
 import { AMAZON_ORDER_STATUS_CANCELED } from "@/lib/amazon-order-reconciliation-status";
+import { releaseInboundItemsForAmazonOrder } from "@/lib/amazon-order-inventory-release";
 
 export type HandleOrderCancellationResult = { ok: true } | { ok: false; message: string };
 
@@ -17,13 +18,9 @@ export async function handleOrderCancellation(amazon_order_id: string): Promise<
 
   const nowIso = new Date().toISOString();
 
-  const { error: invErr } = await supabase
-    .from("inbound_items")
-    .update({ order_id: null, settled_at: null })
-    .eq("order_id", oid);
-
-  if (invErr) {
-    return { ok: false, message: invErr.message };
+  const rel = await releaseInboundItemsForAmazonOrder(oid);
+  if (!rel.ok) {
+    return rel;
   }
 
   const { error: ordErr } = await supabase
