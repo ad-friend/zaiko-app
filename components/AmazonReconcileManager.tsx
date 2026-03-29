@@ -505,8 +505,6 @@ export default function AmazonReconcileManager() {
               </div>
             )}
           </div>
-
-          <ReturnInspectionQueueSection />
         </div>
 
         {/* 右カラム: 売上とお金の確定（本消込） */}
@@ -632,6 +630,8 @@ export default function AmazonReconcileManager() {
                   </ul>
                 )}
               </div>
+
+              <ReturnInspectionQueueSection />
             </div>
           </div>
         </div>
