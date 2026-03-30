@@ -124,6 +124,50 @@ function isRefundLikeRow(r: Pick<TxRow, "transaction_type" | "amount_type" | "am
   return isRefundTxType(tt) || isRefundTxType(at) || isRefundTxType(ad) || (toNumber(r.amount) < 0 && isRefundTxType(ad));
 }
 
+/** 相殺判定用: プラス売上（Charge/Principal 等）。経費ラベルは除外。 */
+function isPositiveSaleLikeRow(r: Pick<TxRow, "transaction_type" | "amount_type" | "amount_description" | "amount">): boolean {
+  if (toNumber(r.amount) <= 0) return false;
+  if (isRefundLikeRow(r)) return false;
+  if (
+    isExpenseSkipTx({
+      amount_type: r.amount_type,
+      transaction_type: r.transaction_type,
+      amount_description: r.amount_description,
+    })
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * 返品・返金運用: 親売上も stock_id が取れないが、同一注文に「プラス売上」と「返金」が揃ったら相殺済み扱い。
+ * stock_id は触らず status のみ reconciled（未消込リストから除外）。
+ */
+async function applyOffsetReconciliation(rows: TxRow[]): Promise<number> {
+  if (!rows.length) return 0;
+  const byOrder = new Map<string, TxRow[]>();
+  for (const r of rows) {
+    const oid = String(r.amazon_order_id ?? "").trim();
+    if (!oid) continue;
+    if (!byOrder.has(oid)) byOrder.set(oid, []);
+    byOrder.get(oid)!.push(r);
+  }
+
+  let offsetOrderCount = 0;
+  for (const [, group] of byOrder) {
+    const hasRefund = group.some((r) => isRefundLikeRow(r));
+    const hasPositiveSale = group.some((r) => isPositiveSaleLikeRow(r));
+    // 返金が無いグループ（Charge+Feeだけ浮いている等）は触らない（将来 Refund 取り込み後に相殺）
+    if (!hasRefund || !hasPositiveSale) continue;
+
+    const ids = group.map((r) => r.id);
+    await markSalesTxReconciled(ids);
+    offsetOrderCount += 1;
+  }
+  return offsetOrderCount;
+}
+
 async function fetchUnlinkedSalesTxRows(): Promise<TxRow[]> {
   // status カラムが存在する場合は reconciled を除外する（存在しないDBでも動くようにする）
   {
@@ -274,9 +318,14 @@ export async function POST() {
       healedRefundCount += 1;
     }
 
+    // === 相殺（Offset）: 同一注文にプラス売上と返金が揃い、在庫に紐づけられない行を status のみ完結 ===
+    let typedForMain = await fetchUnlinkedSalesTxRows();
+    const offsetOrderCount = await applyOffsetReconciliation(typedForMain);
+    typedForMain = await fetchUnlinkedSalesTxRows();
+
     /** order_id ごとにグループ化 */
     const byOrder = new Map<string, TxRow[]>();
-    for (const r of typed) {
+    for (const r of typedForMain) {
       // Refund は上の自己修復で処理済み（またはスキップ）なので、通常の在庫紐づけ対象には含めない
       if (isRefundLikeRow(r)) continue;
       const oid = String(r.amazon_order_id ?? "").trim();
@@ -429,7 +478,7 @@ export async function POST() {
       ok: true,
       reconciledCount,
       skippedCount,
-      message: `本消込: ${reconciledCount}注文を処理しました (保留: ${skippedCount}件) / 自己修復: 手数料 ${healedFeeCount}件, 返金 ${healedRefundCount}件`,
+      message: `本消込: ${reconciledCount}注文を処理しました (保留: ${skippedCount}件) / 自己修復: 手数料 ${healedFeeCount}件, 返金 ${healedRefundCount}件 / 相殺: ${offsetOrderCount}注文`,
     });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "本消込処理に失敗しました。";
