@@ -1,7 +1,7 @@
 /**
  * Amazon注文 自動消込エンジン（API）
  * - pending かつ (jan_code IS NULL OR condition_id IS NULL) を最大20件取得し、SP で JAN・condition・ASIN を補完（products は既存 JAN の asin のみ UPDATE）
- * - 続けて pending を最大20件マッチング（sku_mappings セット・コンディション正規化・Used 安全装置・引き当て時は order_id + settled_at）
+ * - 続けて pending を最大20件マッチング（sku_mappings セット・コンディション正規化・Used 安全装置・引き当て時は order_id のみ。settled_at は本消込まで NULL）
  */
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
@@ -84,11 +84,10 @@ async function finalizeReconciledInboundIds(
   janForRow: string
 ): Promise<void> {
   const linked: number[] = [];
-  const settledAt = new Date().toISOString();
   for (const id of inboundIds) {
     const { error: uErr } = await supabase
       .from("inbound_items")
-      .update({ order_id: amazonOrderId, settled_at: settledAt })
+      .update({ order_id: amazonOrderId })
       .eq("id", id);
     if (uErr) {
       await unlinkInboundFromOrder(linked, amazonOrderId);

@@ -267,6 +267,8 @@ export default function HistoryPage() {
       list = list.filter((r) => {
         const condRaw = (r.condition_type ?? "").toLowerCase();
         const condLabel = statusLabel(r.condition_type).toLowerCase();
+        const oid = (r.order_id ?? "").toLowerCase();
+        const asin = (r.asin ?? "").toLowerCase();
         return (
           String(r.id).includes(term) ||
           (r.jan_code ?? "").toLowerCase().includes(term) ||
@@ -276,7 +278,9 @@ export default function HistoryPage() {
           getSupplierName(r.header?.supplier).toLowerCase().includes(term) ||
           (r.header?.supplier ?? "").toLowerCase().includes(term) ||
           condRaw.includes(term) ||
-          condLabel.includes(term)
+          condLabel.includes(term) ||
+          oid.includes(term) ||
+          asin.includes(term)
         );
       });
     }
@@ -957,7 +961,7 @@ export default function HistoryPage() {
 
   return (
     <div className="flex-1 flex flex-col">
-      <main className="flex-1 w-full max-w-[1900px] mx-auto px-4 sm:px-6 lg:px-8 py-6">
+      <main className="flex-1 w-full max-w-[min(100%,1600px)] mx-auto px-3 sm:px-4 lg:px-6 py-6">
         <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
           <div className="bg-slate-50/80 px-6 py-4 border-b border-slate-100 backdrop-blur shrink-0 flex flex-wrap items-center justify-between gap-3">
             <h2 className="text-base font-bold text-slate-800 flex items-center gap-2">
@@ -996,7 +1000,7 @@ export default function HistoryPage() {
                     type="text"
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
-                    placeholder="ID・JAN・商品名・仕入先・新品/中古・new/used などで検索..."
+                    placeholder="ID・JAN・ASIN・注文番号・商品名・仕入先・コンディションで検索..."
                     className={`${inputClass} pl-10 rounded-lg border-0 focus-visible:ring-0`}
                   />
                 </div>
@@ -1113,13 +1117,30 @@ export default function HistoryPage() {
               </div>
             )}
             {!loading && !error && rows.length > 0 && (
-              <div className="relative w-full max-h-[calc(100vh-280px)] overflow-y-auto border border-slate-200 rounded-md">
-                <div className="w-full min-w-0 overflow-x-auto">
-                  <table className="w-full min-w-[1160px] border-collapse text-sm text-left">
-                    <thead className="sticky top-0 z-10 bg-white border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold tracking-wider shadow-sm">
+              <div className="relative w-full max-h-[calc(100vh-280px)] overflow-y-auto overflow-x-hidden border border-slate-200 rounded-md">
+                <table className="w-full table-fixed border-collapse text-left text-[11px] leading-snug sm:text-xs">
+                    <colgroup>
+                      <col style={{ width: "1.5%" }} />
+                      <col style={{ width: "2%" }} />
+                      <col style={{ width: "4%" }} />
+                      <col style={{ width: "4%" }} />
+                      <col style={{ width: "8%" }} />
+                      <col style={{ width: "5%" }} />
+                      <col style={{ width: "6%" }} />
+                      <col style={{ width: "3%" }} />
+                      <col style={{ width: "29.5%" }} />
+                      <col style={{ width: "4.5%" }} />
+                      <col style={{ width: "4.5%" }} />
+                      <col style={{ width: "4%" }} />
+                      <col style={{ width: "4%" }} />
+                      <col style={{ width: "8%" }} />
+                      <col style={{ width: "8%" }} />
+                      <col style={{ width: "4%" }} />
+                    </colgroup>
+                    <thead className="sticky top-0 z-10 bg-white border-b border-slate-200 text-[10px] uppercase text-slate-500 font-semibold tracking-wider shadow-sm sm:text-xs">
                     <tr>
-                      <th className="w-10 px-1 py-3 text-center align-middle whitespace-nowrap"></th>
-                      <th className="px-0.5 py-3 text-center font-mono text-xs align-middle whitespace-nowrap">
+                      <th className="px-0.5 py-2 text-center align-middle"></th>
+                      <th className="px-0.5 py-2 text-center font-mono text-[10px] align-middle sm:text-xs">
                         <button
                           type="button"
                           onClick={() => requestSort("id")}
@@ -1137,43 +1158,45 @@ export default function HistoryPage() {
                           )}
                         </button>
                       </th>
-                      <th className="px-1.5 py-3 align-middle whitespace-nowrap">
-                        <button type="button" onClick={() => requestSort("created_at")} className="inline-flex items-center gap-1 whitespace-nowrap hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
+                      <th className="px-1 py-2 align-middle">
+                        <button type="button" onClick={() => requestSort("created_at")} className="inline-flex max-w-full items-center gap-0.5 truncate hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           仕入日
                           {sortConfig.key === "created_at" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5 shrink-0" /> : <ArrowDown className="h-3.5 w-3.5 shrink-0" />) : <ArrowUpDown className="h-3.5 w-3.5 shrink-0 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-1.5 py-3 align-middle whitespace-nowrap">
-                        <button type="button" onClick={() => requestSort("registered_at")} className="inline-flex items-center gap-1 whitespace-nowrap hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
+                      <th className="px-1 py-2 align-middle">
+                        <button type="button" onClick={() => requestSort("registered_at")} className="inline-flex max-w-full items-center gap-0.5 truncate hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           登録日
                           {sortConfig.key === "registered_at" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5 shrink-0" /> : <ArrowDown className="h-3.5 w-3.5 shrink-0" />) : <ArrowUpDown className="h-3.5 w-3.5 shrink-0 opacity-50" />}
                         </button>
                       </th>
-                      <th className="min-w-0 max-w-[200px] px-1.5 py-3 align-middle">
-                        <button type="button" onClick={() => requestSort("supplier")} className="inline-flex w-full min-w-0 items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
-                          <span className="min-w-0 max-w-[200px] truncate">仕入先</span>
+                      <th className="min-w-0 px-1 py-2 align-middle">
+                        <button type="button" onClick={() => requestSort("supplier")} className="inline-flex w-full min-w-0 max-w-full items-center gap-0.5 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
+                          <span className="min-w-0 truncate">仕入先</span>
                           {sortConfig.key === "supplier" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5 shrink-0" /> : <ArrowDown className="h-3.5 w-3.5 shrink-0" />) : <ArrowUpDown className="h-3.5 w-3.5 shrink-0 opacity-50" />}
                         </button>
                       </th>
-                      <th className="min-w-0 max-w-[200px] px-1.5 py-3 align-middle">
-                        <button type="button" onClick={() => requestSort("genre")} className="inline-flex w-full min-w-0 items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
-                          <span className="min-w-0 max-w-[200px] truncate">ジャンル</span>
+                      <th className="min-w-0 px-1 py-2 align-middle">
+                        <button type="button" onClick={() => requestSort("genre")} className="inline-flex w-full min-w-0 max-w-full items-center gap-0.5 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
+                          <span className="min-w-0 truncate">ジャンル</span>
                           {sortConfig.key === "genre" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5 shrink-0" /> : <ArrowDown className="h-3.5 w-3.5 shrink-0" />) : <ArrowUpDown className="h-3.5 w-3.5 shrink-0 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-1.5 py-3 align-middle whitespace-nowrap">
-                        <button type="button" onClick={() => requestSort("jan_code")} className="inline-flex items-center gap-1 whitespace-nowrap hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
+                      <th className="px-1 py-2 align-middle">
+                        <button type="button" onClick={() => requestSort("jan_code")} className="inline-flex items-center gap-0.5 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
                           JAN
                           {sortConfig.key === "jan_code" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5 shrink-0" /> : <ArrowDown className="h-3.5 w-3.5 shrink-0" />) : <ArrowUpDown className="h-3.5 w-3.5 shrink-0 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-1.5 py-3 align-middle whitespace-nowrap">
+                      <th className="px-0.5 py-2 align-middle text-center">
                         <button
                           type="button"
                           onClick={() => requestSort("condition_type")}
-                          className="inline-flex items-center gap-1 whitespace-nowrap hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded"
+                          className="inline-flex w-full min-w-0 flex-col items-center gap-0.5 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded sm:flex-row sm:justify-center"
                         >
-                          コンディション
+                          <abbr title="コンディション" className="cursor-help no-underline">
+                            状態
+                          </abbr>
                           {sortConfig.key === "condition_type" ? (
                             sortConfig.direction === "asc" ? (
                               <ArrowUp className="h-3.5 w-3.5 shrink-0" />
@@ -1185,43 +1208,49 @@ export default function HistoryPage() {
                           )}
                         </button>
                       </th>
-                      <th className="min-w-0 max-w-[200px] px-1.5 py-3 align-middle">
-                        <button type="button" onClick={() => requestSort("product_name")} className="inline-flex w-full min-w-0 items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
-                          <span className="min-w-0 max-w-[200px] truncate">商品名</span>
+                      <th className="min-w-0 px-1 py-2 align-middle">
+                        <button type="button" onClick={() => requestSort("product_name")} className="inline-flex w-full min-w-0 max-w-full items-center gap-0.5 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
+                          <span className="min-w-0 truncate">商品名</span>
                           {sortConfig.key === "product_name" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5 shrink-0" /> : <ArrowDown className="h-3.5 w-3.5 shrink-0" />) : <ArrowUpDown className="h-3.5 w-3.5 shrink-0 opacity-50" />}
                         </button>
                       </th>
-                      <th className="min-w-0 max-w-[200px] px-1.5 py-3 align-middle">
-                        <button type="button" onClick={() => requestSort("brand")} className="inline-flex w-full min-w-0 items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
-                          <span className="min-w-0 max-w-[200px] truncate">ブランド</span>
+                      <th className="min-w-0 px-1 py-2 align-middle">
+                        <button type="button" onClick={() => requestSort("brand")} className="inline-flex w-full min-w-0 max-w-full items-center gap-0.5 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
+                          <span className="min-w-0 max-w-[160px] truncate sm:max-w-full">ブランド</span>
                           {sortConfig.key === "brand" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5 shrink-0" /> : <ArrowDown className="h-3.5 w-3.5 shrink-0" />) : <ArrowUpDown className="h-3.5 w-3.5 shrink-0 opacity-50" />}
                         </button>
                       </th>
-                      <th className="min-w-0 max-w-[200px] px-1.5 py-3 align-middle">
-                        <button type="button" onClick={() => requestSort("model_number")} className="inline-flex w-full min-w-0 items-center gap-1 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
-                          <span className="min-w-0 max-w-[200px] truncate">型番</span>
+                      <th className="min-w-0 px-1 py-2 align-middle">
+                        <button type="button" onClick={() => requestSort("model_number")} className="inline-flex w-full min-w-0 max-w-full items-center gap-0.5 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
+                          <span className="min-w-0 max-w-[160px] truncate sm:max-w-full">型番</span>
                           {sortConfig.key === "model_number" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5 shrink-0" /> : <ArrowDown className="h-3.5 w-3.5 shrink-0" />) : <ArrowUpDown className="h-3.5 w-3.5 shrink-0 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-1 py-3 text-right align-middle whitespace-nowrap">
-                        <button type="button" onClick={() => requestSort("base_price")} className="inline-flex items-center justify-end gap-1 whitespace-nowrap hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded ml-auto w-full">
-                          基準価格
+                      <th className="px-0.5 py-2 text-right align-middle">
+                        <button type="button" onClick={() => requestSort("base_price")} className="inline-flex w-full items-center justify-end gap-0.5 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
+                          <span className="truncate">基準</span>
                           {sortConfig.key === "base_price" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5 shrink-0" /> : <ArrowDown className="h-3.5 w-3.5 shrink-0" />) : <ArrowUpDown className="h-3.5 w-3.5 shrink-0 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-1 py-3 text-right align-middle whitespace-nowrap">
-                        <button type="button" onClick={() => requestSort("effective_unit_price")} className="inline-flex items-center justify-end gap-1 whitespace-nowrap hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded ml-auto w-full">
-                          実質単価
+                      <th className="px-0.5 py-2 text-right align-middle">
+                        <button type="button" onClick={() => requestSort("effective_unit_price")} className="inline-flex w-full items-center justify-end gap-0.5 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded">
+                          <span className="truncate" title="実質単価">
+                            実質
+                          </span>
                           {sortConfig.key === "effective_unit_price" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5 shrink-0" /> : <ArrowDown className="h-3.5 w-3.5 shrink-0" />) : <ArrowUpDown className="h-3.5 w-3.5 shrink-0 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-1.5 py-3 text-left text-slate-500 font-semibold align-middle whitespace-nowrap">
+                      <th className="px-0.5 py-2 text-left align-middle text-slate-500">
                         進捗
                       </th>
-                      <th className="px-1 py-3 text-center text-slate-500 font-semibold align-middle whitespace-nowrap">
-                        注文番号
+                      <th className="px-0.5 py-2 text-center align-middle text-slate-500">
+                        <abbr title="Amazon注文番号" className="cursor-help no-underline">
+                          注文
+                        </abbr>
                       </th>
-                      <th className="px-1 py-3 text-center align-middle whitespace-nowrap">操作</th>
+                      <th className="bg-white px-0.5 py-2 text-center align-middle text-slate-500 shadow-[-6px_0_10px_-4px_rgba(15,23,42,0.1)]">
+                        操作
+                      </th>
                     </tr>
 
                   </thead>
@@ -1239,7 +1268,7 @@ export default function HistoryPage() {
 
                       return (
                         <tr key={row.id} className="hover:bg-slate-50/50 transition-colors">
-                          <td className="w-10 px-1 py-3 text-center align-middle whitespace-nowrap">
+                          <td className="px-0.5 py-2 text-center align-middle">
                             <input
                               type="checkbox"
                               checked={selectedIds.has(row.id)}
@@ -1251,10 +1280,10 @@ export default function HistoryPage() {
                               className="rounded border-slate-300 text-primary focus:ring-primary"
                             />
                           </td>
-                          <td className="min-w-0 px-0.5 py-3 text-center font-mono text-xs text-slate-600 align-middle tabular-nums whitespace-nowrap">
+                          <td className="min-w-0 px-0.5 py-2 text-center font-mono text-[10px] text-slate-600 align-middle tabular-nums sm:text-[11px]">
                             {row.id}
                           </td>
-                          <td className="min-w-0 px-1.5 py-3 text-slate-600 align-middle whitespace-nowrap">
+                          <td className="min-w-0 px-1 py-2 text-slate-600 align-middle text-[11px] tabular-nums">
                             {isEditMode ? (
                               <div className="flex min-w-0 w-full max-w-full flex-nowrap items-center gap-1">
                                 <input
@@ -1315,7 +1344,7 @@ export default function HistoryPage() {
                               displayDate
                             )}
                           </td>
-                          <td className="min-w-0 px-1.5 py-3 text-slate-600 align-middle whitespace-nowrap">
+                          <td className="min-w-0 px-1 py-2 text-slate-600 align-middle text-[11px] tabular-nums">
   {isEditMode ? (
     <div className="flex min-w-0 w-full max-w-full flex-nowrap items-center gap-1">
       <input
@@ -1376,7 +1405,7 @@ export default function HistoryPage() {
     formatDate(row.registered_at ?? row.created_at)
   )}
 </td>
-                          <td className="min-w-0 max-w-[200px] px-1.5 py-3 text-slate-700 align-middle">
+                          <td className="min-w-0 px-1 py-2 text-slate-700 align-middle">
                              {isEditMode ? (
                                 <input
                                     value={isIndividualEdit && editDraft ? editDraft.supplier : row.header?.supplier ?? ""}
@@ -1399,14 +1428,14 @@ export default function HistoryPage() {
                                 />
                              ) : (
                                 <span
-                                  className="block min-w-0 max-w-[200px] truncate"
+                                  className="block min-w-0 truncate"
                                   title={getSupplierName(row.header?.supplier)}
                                 >
                                   {getSupplierName(row.header?.supplier)}
                                 </span>
                              )}
                           </td>
-                          <td className="min-w-0 max-w-[200px] px-1.5 py-3 text-slate-600 align-middle">
+                          <td className="min-w-0 px-1 py-2 text-slate-600 align-middle">
                              {isEditMode ? (
                                 <input
                                     value={isIndividualEdit && editDraft ? editDraft.genre : row.header?.genre ?? ""}
@@ -1420,17 +1449,19 @@ export default function HistoryPage() {
                                 />
                              ) : (
                                 <span
-                                  className="block min-w-0 max-w-[200px] truncate"
+                                  className="block min-w-0 truncate"
                                   title={row.header?.genre ?? undefined}
                                 >
                                   {row.header?.genre ?? "—"}
                                 </span>
                              )}
                           </td>
-                          <td className="min-w-0 px-1.5 py-3 font-mono text-xs align-middle whitespace-nowrap">
-                            {row.jan_code ?? "—"}
+                          <td className="min-w-0 px-1 py-2 align-middle font-mono text-[10px] sm:text-[11px]">
+                            <span className="block truncate" title={row.jan_code ?? undefined}>
+                              {row.jan_code ?? "—"}
+                            </span>
                           </td>
-                          <td className="min-w-0 px-1.5 py-3 align-middle whitespace-nowrap text-slate-700">
+                          <td className="min-w-0 px-0.5 py-2 align-middle text-slate-700">
                             <span
                               className={
                                 row.condition_type === "new"
@@ -1444,7 +1475,7 @@ export default function HistoryPage() {
                               {statusLabel(row.condition_type) || "—"}
                             </span>
                           </td>
-                          <td className="min-w-0 max-w-[200px] px-1.5 py-3 font-medium text-slate-900 align-middle">
+                          <td className="min-w-0 px-1 py-2 align-middle font-medium text-slate-900">
                             {isEditMode ? (
                               <input
                                 value={isIndividualEdit && editDraft ? editDraft.product_name : row.product_name ?? ""}
@@ -1458,12 +1489,12 @@ export default function HistoryPage() {
                                 placeholder="商品名"
                               />
                             ) : (
-                              <span className="block min-w-0 max-w-[200px] truncate" title={row.product_name ?? undefined}>
+                              <span className="block min-w-0 truncate" title={row.product_name ?? undefined}>
                                 {row.product_name ?? "—"}
                               </span>
                             )}
                           </td>
-                          <td className="min-w-0 max-w-[200px] px-1.5 py-3 text-slate-600 align-middle">
+                          <td className="min-w-0 px-1 py-2 text-slate-600 align-middle">
                             {isEditMode ? (
                               <input
                                 value={isIndividualEdit && editDraft ? editDraft.brand : row.brand ?? ""}
@@ -1473,19 +1504,19 @@ export default function HistoryPage() {
                                     : updateRowField(row.id, "brand", e.target.value)
                                 }
                                 disabled={isBulkEditing}
-                                className={`${inputClass} h-9 min-w-0 w-full max-w-full`}
+                                className={`${inputClass} h-9 min-w-0 w-full max-w-full text-xs`}
                                 placeholder="ブランド"
                               />
                             ) : (
                               <span
-                                className="block min-w-0 max-w-[200px] truncate"
+                                className="block min-w-0 max-w-[160px] truncate sm:max-w-full"
                                 title={row.brand ?? undefined}
                               >
                                 {row.brand ?? "—"}
                               </span>
                             )}
                           </td>
-                          <td className="min-w-0 max-w-[200px] px-1.5 py-3 text-slate-600 align-middle">
+                          <td className="min-w-0 px-1 py-2 text-slate-600 align-middle">
                             {isEditMode ? (
                               <input
                                 value={isIndividualEdit && editDraft ? editDraft.model_number : row.model_number ?? ""}
@@ -1495,38 +1526,38 @@ export default function HistoryPage() {
                                     : updateRowField(row.id, "model_number", e.target.value)
                                 }
                                 disabled={isBulkEditing}
-                                className={`${inputClass} h-9 min-w-0 w-full max-w-full`}
+                                className={`${inputClass} h-9 min-w-0 w-full max-w-full text-xs`}
                                 placeholder="型番"
                               />
                             ) : (
                               <span
-                                className="block min-w-0 max-w-[200px] truncate"
+                                className="block min-w-0 max-w-[160px] truncate sm:max-w-full"
                                 title={row.model_number ?? undefined}
                               >
                                 {row.model_number ?? "—"}
                               </span>
                             )}
                           </td>
-                          <td className="min-w-0 px-1 py-3 text-right tabular-nums align-middle whitespace-nowrap">
-                            {row.base_price > 0 ? row.base_price.toLocaleString() + " 円" : "—"}
+                          <td className="min-w-0 px-0.5 py-2 text-right align-middle font-mono text-[10px] tabular-nums sm:text-[11px]">
+                            {row.base_price > 0 ? `${row.base_price.toLocaleString()}円` : "—"}
                           </td>
-                          <td className="min-w-0 px-1 py-3 text-right font-medium tabular-nums align-middle whitespace-nowrap">
-                            {row.effective_unit_price > 0 ? Math.round(row.effective_unit_price).toLocaleString() + " 円" : "—"}
+                          <td className="min-w-0 px-0.5 py-2 text-right align-middle font-mono text-[10px] font-medium tabular-nums sm:text-[11px]">
+                            {row.effective_unit_price > 0 ? `${Math.round(row.effective_unit_price).toLocaleString()}円` : "—"}
                           </td>
-                          <td className="min-w-0 px-1 py-3 align-middle whitespace-nowrap">
+                          <td className="min-w-0 px-0.5 py-2 align-middle">
                             <span
-                              className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-bold ${invStatus.badgeClassName}`}
+                              className={`inline-flex max-w-full whitespace-normal break-words rounded-full px-1.5 py-0.5 text-center text-[8px] font-bold leading-tight sm:text-[9px] ${invStatus.badgeClassName}`}
                             >
                               {invStatus.label}
                             </span>
                           </td>
-                          <td className="min-w-0 max-w-[200px] px-1 py-3 font-mono text-xs text-center align-middle">
+                          <td className="min-w-0 px-0.5 py-2 text-center align-middle font-mono text-[10px] sm:text-[11px]">
                             {row.order_id ? (
                               <a
                                 href={`https://sellercentral.amazon.co.jp/orders-v3/order/${row.order_id}`}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="inline-block max-w-[200px] truncate align-middle text-blue-500 hover:underline"
+                                className="block truncate text-blue-600 hover:underline"
                                 title={row.order_id}
                               >
                                 {row.order_id}
@@ -1535,14 +1566,14 @@ export default function HistoryPage() {
                               <span className="text-slate-300">—</span>
                             )}
                           </td>
-                          <td className="min-w-0 px-1 py-3 text-center align-middle whitespace-nowrap">
+                          <td className="min-w-0 bg-white px-0.5 py-1.5 text-center align-middle shadow-[-6px_0_10px_-4px_rgba(15,23,42,0.1)]">
                             {isIndividualEdit ? (
-                              <div className="inline-flex items-center justify-center gap-1 whitespace-nowrap">
+                              <div className="inline-flex items-center justify-center gap-0.5">
                                 <button
                                   type="button"
                                   onClick={saveIndividualEdit}
                                   disabled={saving}
-                                  className={`${buttonClass} inline-flex h-9 shrink-0 px-2 bg-primary text-white hover:bg-primary/90`}
+                                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary p-0 text-white shadow-sm transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50"
                                   title="保存"
                                 >
                                   <Save className="h-4 w-4" />
@@ -1550,7 +1581,7 @@ export default function HistoryPage() {
                                 <button
                                   type="button"
                                   onClick={cancelIndividualEdit}
-                                  className={`${buttonClass} inline-flex h-9 shrink-0 px-2 bg-white text-slate-700 border border-slate-200 hover:bg-slate-50`}
+                                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white p-0 text-slate-700 shadow-sm transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                                   title="取消"
                                 >
                                   <X className="h-4 w-4" />
@@ -1560,7 +1591,7 @@ export default function HistoryPage() {
                               <button
                                 type="button"
                                 onClick={() => startIndividualEdit(row)}
-                                className={`${buttonClass} inline-flex h-9 shrink-0 px-2 bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300`}
+                                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white p-0 text-slate-700 shadow-sm transition-colors hover:border-slate-300 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 active:scale-[0.98]"
                                 title="編集"
                               >
                                 <Pencil className="h-4 w-4" />
@@ -1572,7 +1603,6 @@ export default function HistoryPage() {
                     })}
                   </tbody>
                   </table>
-                </div>
               </div>
             )}
 

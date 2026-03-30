@@ -22,6 +22,8 @@ type AutoReconcileResult = {
     sellPrice: number;
     janCode?: string;
     sku?: string;
+    postedDate?: string;
+    orderDate?: string;
   };
   otherOrderId: string | null;
   status: "completed" | "manual_required";
@@ -34,6 +36,8 @@ type AutoReconcileResult = {
     sellPrice: number;
     janCode?: string;
     sku?: string;
+    postedDate?: string;
+    orderDate?: string;
   };
   otherOrderId: string | null;
   status: "error";
@@ -93,12 +97,25 @@ const parseOtherSalesCsv = (csvText: string) => {
   const iSell = idx("販売価格");
   const iJan = idx("JAN");
   const iSku = idx("SKU");
+  const iPosted = idx("決済日");
+  const iOrderDate = idx("注文日");
 
   if (iOrder < 0 || iPlatform < 0 || iSell < 0) {
     throw new Error("ヘッダーが不正です。注文番号/プラットフォーム/販売価格を確認してください。");
   }
+  if (iPosted < 0 && iOrderDate < 0) {
+    throw new Error("ヘッダーに「決済日」または「注文日」列が必要です（在庫の決済完了日時の記録に使用します）。");
+  }
 
-  const rows: Array<{ orderId: string; platform: string; sellPrice: number; janCode?: string; sku?: string }> = [];
+  const rows: Array<{
+    orderId: string;
+    platform: string;
+    sellPrice: number;
+    janCode?: string;
+    sku?: string;
+    postedDate?: string;
+    orderDate?: string;
+  }> = [];
   const rowErrors: string[] = [];
 
   for (let i = 1; i < lines.length; i++) {
@@ -109,14 +126,29 @@ const parseOtherSalesCsv = (csvText: string) => {
     const sellPrice = parseMoneyToNumber(sellPriceRaw);
     const janCode = iJan >= 0 ? (cols[iJan] ?? "").trim() : "";
     const sku = iSku >= 0 ? (cols[iSku] ?? "").trim() : "";
+    const postedCell = iPosted >= 0 ? (cols[iPosted] ?? "").trim() : "";
+    const orderDateCell = iOrderDate >= 0 ? (cols[iOrderDate] ?? "").trim() : "";
+    const saleDateRaw = postedCell || orderDateCell;
 
     if (!orderId || !platform) continue;
     if (!Number.isFinite(sellPrice)) {
       rowErrors.push(`行 ${i + 1}: 販売価格が数値として解釈できません`);
       continue;
     }
+    if (!saleDateRaw) {
+      rowErrors.push(`行 ${i + 1}: 決済日/注文日が空です`);
+      continue;
+    }
 
-    const item: { orderId: string; platform: string; sellPrice: number; janCode?: string; sku?: string } = {
+    const item: {
+      orderId: string;
+      platform: string;
+      sellPrice: number;
+      janCode?: string;
+      sku?: string;
+      postedDate?: string;
+      orderDate?: string;
+    } = {
       orderId,
       platform,
       sellPrice,
@@ -124,6 +156,8 @@ const parseOtherSalesCsv = (csvText: string) => {
 
     if (janCode) item.janCode = janCode;
     if (sku) item.sku = sku;
+    if (postedCell) item.postedDate = postedCell;
+    else if (orderDateCell) item.orderDate = orderDateCell;
 
     rows.push(item);
   }
@@ -241,7 +275,10 @@ export default function OtherSalesImportPage() {
         <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
           <h2 className="text-lg font-bold text-slate-800 mb-3">セクションA：CSVアップロード</h2>
           <p className="text-sm text-slate-600 mb-4">
-            CSVヘッダー要件: <span className="font-mono">注文番号, プラットフォーム, 販売価格, JAN, SKU</span>
+            CSVヘッダー要件:{" "}
+            <span className="font-mono">
+              注文番号, プラットフォーム, 販売価格, 決済日または注文日（必須・yyyy-MM-dd 推奨）, JAN, SKU
+            </span>
           </p>
 
           <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
@@ -372,6 +409,8 @@ function ManualOrderCards({
   const [cardSubmitting, setCardSubmitting] = useState<Record<string, boolean>>({});
   const [cardErrors, setCardErrors] = useState<Record<string, string | null>>({});
   const [selectedStockByOrderId, setSelectedStockByOrderId] = useState<Record<string, string>>({});
+  /** 空なら API 側で other_orders.created_at を決済日時として使用 */
+  const [postedDateByOrderId, setPostedDateByOrderId] = useState<Record<string, string>>({});
 
   useEffect(() => {
     // 初期値: other_orders に既に保存されている stock_id（ある場合）
@@ -393,10 +432,15 @@ function ManualOrderCards({
     setCardSubmitting((p) => ({ ...p, [order.id]: true }));
 
     try {
+      const postedDate = (postedDateByOrderId[order.id] ?? "").trim();
       const res = await fetch("/api/other-sales-import/manual-reconcile", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ otherOrderId: order.id, stockId }),
+        body: JSON.stringify({
+          otherOrderId: order.id,
+          stockId,
+          ...(postedDate ? { postedDate } : {}),
+        }),
       });
 
       const data = await res.json();
@@ -435,6 +479,17 @@ function ManualOrderCards({
           </div>
 
           <div className="mt-3">
+            <label className="block text-xs font-semibold text-slate-600 mb-1">
+              決済日・注文日（任意）
+            </label>
+            <input
+              type="text"
+              inputMode="numeric"
+              placeholder="空欄＝CSV取込日時を使用 / yyyy-MM-dd"
+              value={postedDateByOrderId[order.id] ?? ""}
+              onChange={(e) => setPostedDateByOrderId((p) => ({ ...p, [order.id]: e.target.value }))}
+              className="mb-2 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-mono text-slate-800"
+            />
             <label className="block text-xs font-semibold text-slate-600 mb-1">
               紐付け先の在庫ID
             </label>

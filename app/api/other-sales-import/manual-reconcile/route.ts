@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createHash } from "crypto";
 import { supabase } from "@/lib/supabase";
+import { parseFlexiblePostedDateToIso } from "@/lib/settlement-posted-date";
 
 type OtherOrderRow = {
   id: string;
@@ -10,6 +11,7 @@ type OtherOrderRow = {
   jan_code: string | null;
   stock_id: number | null;
   status: string;
+  created_at: string | null;
 };
 
 const buildTxEventHash = (payload: {
@@ -32,7 +34,7 @@ export async function POST(request: NextRequest) {
 
     const { data: orderRow, error: orderErr } = await supabase
       .from("other_orders")
-      .select("id, order_id, platform, sell_price, jan_code, stock_id, status")
+      .select("id, order_id, platform, sell_price, jan_code, stock_id, status, created_at")
       .eq("id", otherOrderId)
       .single();
 
@@ -59,10 +61,24 @@ export async function POST(request: NextRequest) {
     const unitCost = Number(stockRow.effective_unit_price ?? 0);
     const nowIso = new Date().toISOString();
 
-    // 在庫更新（settled_at + order_id）
+    const bodyPostedRaw = body?.postedDate != null ? String(body.postedDate).trim() : "";
+    const fromBody = bodyPostedRaw ? parseFlexiblePostedDateToIso(bodyPostedRaw) : null;
+    const fromRowCreated =
+      otherOrder.created_at != null && String(otherOrder.created_at).trim() !== ""
+        ? new Date(otherOrder.created_at as string).toISOString()
+        : null;
+    const settledAt = fromBody ?? fromRowCreated;
+    if (!settledAt) {
+      return NextResponse.json(
+        { error: "決済日を特定できません。postedDate（yyyy-MM-dd 等）をリクエストで送るか、other_orders.created_at を確認してください。" },
+        { status: 400 }
+      );
+    }
+
+    // 在庫更新（settled_at = 実日付、order_id）
     const { error: updateStockErr } = await supabase
       .from("inbound_items")
-      .update({ settled_at: nowIso, order_id: otherOrder.order_id })
+      .update({ settled_at: settledAt, order_id: otherOrder.order_id })
       .eq("id", stockId);
 
     if (updateStockErr) throw updateStockErr;
@@ -81,7 +97,7 @@ export async function POST(request: NextRequest) {
       amount_type: "Sell",
       amount_description: otherOrder.platform,
       amount: Number(otherOrder.sell_price),
-      posted_date: nowIso,
+      posted_date: settledAt,
       amazon_event_hash: txEventHash,
       stock_id: stockId,
       unit_cost: unitCost,

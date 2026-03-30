@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createHash } from "crypto";
 import { supabase } from "@/lib/supabase";
 import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
+import { parseFlexiblePostedDateToIso } from "@/lib/settlement-posted-date";
 
 type ParsedOtherSalesRow = {
   orderId: string;
@@ -9,6 +10,9 @@ type ParsedOtherSalesRow = {
   sellPrice: number;
   janCode?: string;
   sku?: string;
+  /** 決済日・注文日のいずれか（CSV 列）。本消込の settled_at / sales_transactions.posted_date に使用 */
+  postedDate?: string;
+  orderDate?: string;
 };
 
 type OtherOrderStatus = "pending" | "completed" | "manual_required";
@@ -104,6 +108,20 @@ export async function POST(request: NextRequest) {
           otherOrderId: null,
           status: "error",
           error: "入力データが不正です（orderId/platform/sellPrice）",
+        });
+        continue;
+      }
+
+      const dateRaw = toNullableString(input.postedDate) ?? toNullableString(input.orderDate);
+      const salePostedIso = dateRaw ? parseFlexiblePostedDateToIso(dateRaw) : null;
+      if (!salePostedIso) {
+        results.push({
+          ok: false,
+          input,
+          otherOrderId: null,
+          status: "error",
+          error:
+            "決済日（postedDate）または注文日（orderDate）が必要です。yyyy-MM-dd 等で指定するか、CSVに「決済日」「注文日」列を追加してください。",
         });
         continue;
       }
@@ -233,10 +251,10 @@ export async function POST(request: NextRequest) {
 
         const unitCost = matchedEffectiveUnitPrice != null ? matchedEffectiveUnitPrice : 0;
 
-        // 在庫更新（settled_at + order_id）
+        // 在庫更新（settled_at = 実売上日、order_id）
         const { error: updateStockErr } = await supabase
           .from("inbound_items")
-          .update({ settled_at: nowIso, order_id: orderId })
+          .update({ settled_at: salePostedIso, order_id: orderId })
           .eq("id", matchedStockId)
           .is("settled_at", null);
 
@@ -251,7 +269,7 @@ export async function POST(request: NextRequest) {
           amount_type: "Sell",
           amount_description: platform,
           amount: sellPrice,
-          posted_date: nowIso,
+          posted_date: salePostedIso,
           amazon_event_hash: txEventHash,
           stock_id: matchedStockId,
           unit_cost: unitCost,
