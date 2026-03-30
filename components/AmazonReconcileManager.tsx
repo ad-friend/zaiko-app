@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Ban, Trash2 } from "lucide-react";
 import ManualFinanceProcessModal, { type PendingFinanceGroupData } from "@/components/ManualFinanceProcessModal";
 import ReturnInspectionQueueSection from "@/components/ReturnInspectionQueueSection";
@@ -724,10 +724,10 @@ function ManualOrderCard({
   const [candidatesRefreshKey, setCandidatesRefreshKey] = useState(0);
   const [deleting, setDeleting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
-
-  // カタログ消失などの救済: JAN を手入力して在庫と紐づける
-  const [manualJanInput, setManualJanInput] = useState<string>("");
-  const [manualReconciling, setManualReconciling] = useState(false);
+  const [rescueExtra, setRescueExtra] = useState<InboundCandidate[]>([]);
+  const [rescueQuery, setRescueQuery] = useState("");
+  const [rescueLoading, setRescueLoading] = useState(false);
+  const [rescueError, setRescueError] = useState<string | null>(null);
 
   useEffect(() => {
     setConditionId(order.condition_id);
@@ -735,6 +735,23 @@ function ManualOrderCard({
 
   const orderCondNorm = normalizeOrderCondition(conditionId);
   const isUsedDisplay = orderCondNorm === "used";
+
+  const mergedCandidates = useMemo(() => {
+    const m = new Map<number, InboundCandidate>();
+    for (const c of candidates) m.set(c.id, c);
+    for (const c of rescueExtra) m.set(c.id, c);
+    return [...m.values()].sort((a, b) => a.id - b.id);
+  }, [candidates, rescueExtra]);
+
+  useEffect(() => {
+    onCandidatesLoaded?.(orderStableKey(order), mergedCandidates.length);
+  }, [mergedCandidates.length, order, onCandidatesLoaded]);
+
+  useEffect(() => {
+    setRescueExtra([]);
+    setRescueQuery("");
+    setRescueError(null);
+  }, [order.id, order.amazon_order_id, order.sku, candidatesRefreshKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -923,66 +940,53 @@ function ManualOrderCard({
     }
   };
 
-  const handleManualJanReconcile = async () => {
-    const jan = manualJanInput.trim();
-    if (!jan) {
-      setError("JANコードを入力してください。");
+  const runRescueSearch = async () => {
+    const q = rescueQuery.trim();
+    if (q.length < 1) {
+      setRescueError("検索語を入力してください");
       return;
     }
-    if (!String(order.amazon_order_id ?? "").trim()) {
-      setError("Amazonの注文番号がありません。");
-      return;
-    }
-
-    setManualReconciling(true);
-    setError(null);
+    setRescueLoading(true);
+    setRescueError(null);
     try {
-      // JAN で候補在庫を検索（在庫候補が返った最初の1件を利用）
-      const params = new URLSearchParams({
-        amazon_order_id: order.amazon_order_id,
-        search: jan,
-      });
-      const res = await fetch(`/api/amazon/candidate-stocks?${params.toString()}`);
-      const raw = await res.json().catch(() => null);
+      const params = new URLSearchParams({ search: q, amazon_order_id: order.amazon_order_id });
+      const res = await fetch(`/api/amazon/candidate-stocks?${params}`);
+      const raw: unknown = await res.json().catch(() => null);
       if (!res.ok) {
-        const msg = raw && typeof raw === "object" && "error" in raw && typeof (raw as any).error === "string" ? (raw as any).error : null;
-        throw new Error(msg ?? "在庫候補の取得に失敗しました。");
-      }
-
-      const list = Array.isArray(raw) ? raw : [];
-      const first = list[0] as unknown as { id?: unknown } | undefined;
-      const stockId = first?.id != null ? Number(first.id) : NaN;
-      if (!Number.isFinite(stockId) || stockId < 1) {
-        throw new Error("該当する在庫候補がありませんでした。");
-      }
-
-      // 在庫との手動紐づけ（注文消込）
-      const manualRes = await fetch("/api/amazon/reconcile/manual", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          amazon_order_id: order.amazon_order_id,
-          inbound_item_id: stockId,
-          amazon_order_db_id: order.id,
-          sku: order.sku,
-        }),
-      });
-
-      const manualData = await manualRes.json().catch(() => null);
-      if (!manualRes.ok) {
         const msg =
-          manualData && typeof manualData === "object" && "error" in manualData && typeof (manualData as any).error === "string"
-            ? (manualData as any).error
-            : null;
-        throw new Error(msg ?? "手動消込に失敗しました。");
+          raw &&
+          typeof raw === "object" &&
+          "error" in raw &&
+          typeof (raw as { error?: unknown }).error === "string"
+            ? (raw as { error: string }).error
+            : "検索に失敗しました";
+        throw new Error(msg);
       }
-
-      setManualJanInput("");
-      await onConfirmed();
+      const list = Array.isArray(raw) ? raw : [];
+      type ApiCand = {
+        id: number;
+        sku: string | null;
+        condition: string | null;
+        product_name: string | null;
+        created_at: string | null;
+        amazon_order_id: string | null;
+      };
+      const mapped: InboundCandidate[] = (list as ApiCand[]).map((r) => ({
+        id: r.id,
+        jan_code: r.sku,
+        product_name: r.product_name,
+        condition_type: r.condition,
+        created_at: r.created_at ?? "",
+        order_id: r.amazon_order_id,
+      }));
+      setRescueExtra(mapped);
+      if (mapped.length === 0) {
+        setRescueError("該当する在庫がありませんでした");
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "手動消込に失敗しました。");
+      setRescueError(e instanceof Error ? e.message : "検索に失敗しました");
     } finally {
-      setManualReconciling(false);
+      setRescueLoading(false);
     }
   };
 
@@ -1091,34 +1095,6 @@ function ManualOrderCard({
         )}
 
         <div className="rounded-lg border border-slate-200 bg-slate-50/90 p-3 space-y-2.5">
-          <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-            <p className="text-[11px] font-bold text-slate-700">JANコード手入力</p>
-            <p className="text-[11px] text-slate-500">(カタログ消失時の救済)</p>
-          </div>
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
-            <input
-              type="text"
-              inputMode="numeric"
-              value={manualJanInput}
-              onChange={(e) => setManualJanInput(e.target.value)}
-              placeholder="JANコードを入力"
-              disabled={manualReconciling || submitting || conditionSaving || cancelling || deleting}
-              className="w-full rounded-md border border-slate-300 px-2.5 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-400/30 disabled:bg-slate-100 disabled:text-slate-500"
-            />
-            <button
-              type="button"
-              onClick={() => {
-                void handleManualJanReconcile();
-              }}
-              disabled={manualReconciling || submitting || conditionSaving || cancelling || deleting || manualJanInput.trim().length === 0}
-              className={`${buttonClass} h-10 w-full bg-emerald-600 text-xs font-bold text-white shadow-sm hover:bg-emerald-700 disabled:bg-slate-300 disabled:text-slate-500`}
-            >
-              {manualReconciling ? "処理中..." : "手動消込を実行"}
-            </button>
-          </div>
-        </div>
-
-        <div className="rounded-lg border border-slate-200 bg-slate-50/90 p-3 space-y-2.5">
           <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
             <span
               className={`inline-flex w-fit max-w-full items-center rounded-full px-2 py-0.5 text-[11px] font-bold leading-tight ${
@@ -1209,13 +1185,36 @@ function ManualOrderCard({
               </span>
               紐付け可能な在庫がありません。JAN / ASIN を確認し在庫を登録してください。
             </p>
-            <button
-              type="button"
-              disabled
-              className={`${buttonClass} h-9 w-full cursor-not-allowed bg-slate-200 text-slate-500 text-xs`}
-            >
-              手動で紐付け（在庫なしのため選択不可）
-            </button>
+            <div className="space-y-2">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
+                <input
+                  type="text"
+                  value={rescueQuery}
+                  onChange={(e) => setRescueQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void runRescueSearch();
+                    }
+                  }}
+                  placeholder="例: 4901234567890 または 商品名の一部"
+                  disabled={rescueLoading || submitting}
+                  className="min-w-0 flex-1 rounded-md border border-sky-200 bg-white px-2.5 py-2 text-xs text-slate-800 placeholder:text-slate-400 focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-300/40"
+                />
+                <button
+                  type="button"
+                  onClick={() => void runRescueSearch()}
+                  disabled={rescueLoading || submitting}
+                  className={`${buttonClass} h-9 shrink-0 bg-sky-700 text-white hover:bg-sky-800 text-xs px-4 disabled:bg-slate-300`}
+                >
+                  {rescueLoading ? "検索中…" : "検索"}
+                </button>
+              </div>
+              {rescueError ? <p className="text-[11px] font-medium text-red-700">{rescueError}</p> : null}
+              {rescueExtra.length > 0 ? (
+                <p className="text-[11px] text-sky-800/90">レスキュー検索で {rescueExtra.length} 件ヒット（下の候補に反映）</p>
+              ) : null}
+            </div>
           </div>
         ) : (
           <div className="space-y-2 border-t border-slate-100 pt-3">
@@ -1226,7 +1225,7 @@ function ManualOrderCard({
               className="w-full rounded-md border-2 border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-800 focus:border-amber-400 focus:outline-none focus:ring-2 focus:ring-amber-400/30"
             >
               <option value="">選択してください</option>
-              {candidates.map((c) => (
+              {mergedCandidates.map((c: InboundCandidate) => (
                 <option key={c.id} value={c.id}>
                   ID:{c.id} {c.product_name ?? ""} ({c.created_at?.slice(0, 10)})
                 </option>
@@ -1240,6 +1239,36 @@ function ManualOrderCard({
             >
               {submitting ? "確定中…" : "この在庫で確定"}
             </button>
+            <div className="space-y-2 pt-1">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
+                <input
+                  type="text"
+                  value={rescueQuery}
+                  onChange={(e) => setRescueQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void runRescueSearch();
+                    }
+                  }}
+                  placeholder="例: 4901234567890 または 商品名の一部"
+                  disabled={rescueLoading || submitting}
+                  className="min-w-0 flex-1 rounded-md border border-sky-200 bg-white px-2.5 py-2 text-xs text-slate-800 placeholder:text-slate-400 focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-300/40"
+                />
+                <button
+                  type="button"
+                  onClick={() => void runRescueSearch()}
+                  disabled={rescueLoading || submitting}
+                  className={`${buttonClass} h-9 shrink-0 bg-sky-700 text-white hover:bg-sky-800 text-xs px-4 disabled:bg-slate-300`}
+                >
+                  {rescueLoading ? "検索中…" : "検索"}
+                </button>
+              </div>
+              {rescueError ? <p className="text-[11px] font-medium text-red-700">{rescueError}</p> : null}
+              {rescueExtra.length > 0 ? (
+                <p className="text-[11px] text-sky-800/90">レスキュー検索で {rescueExtra.length} 件ヒット（候補に反映）</p>
+              ) : null}
+            </div>
           </div>
         )}
 
