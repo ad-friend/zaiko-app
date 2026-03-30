@@ -82,10 +82,14 @@ export async function GET() {
     list = list.filter((row) => {
       const orderId = row.amazon_order_id?.trim() ?? "";
       const sku = row.sku?.trim() ?? "";
+      const txType = String((row as any).transaction_type ?? "");
 
-      // 「カードで adj_ から始まって見えるもの」は、注文IDもSKUも無い明細をまとめるための仮ID。
-      // 注文IDが無いだけの明細（SKUがある等）は残し、両方無い“注文に関係ない調整”だけ除外する。
-      if (!orderId && !sku) return false;
+      // ここで落とすのは「経費/調整として扱うもの（PostageBilling/ServiceFee/adj_）」のみ。
+      // 以前は「注文IDもSKUも無い行」を一律で除外していたが、Refund 等でも注文ID/SKUが欠けるケースがあり得るため、
+      // そのような通常明細まで落とさないようにする。
+      //
+      // ただし「注文IDもSKUも無い」かつ transaction_type が Adjustment のような純調整は、一覧に出しても解決不能なことが多いので除外する。
+      if (!orderId && !sku && txType === "Adjustment") return false;
 
       return !shouldExcludeByType((row as any).transaction_type, (row as any).amount_type, (row as any).amount_description);
     });
