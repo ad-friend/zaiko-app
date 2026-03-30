@@ -113,6 +113,8 @@ export default function AmazonReconcileManager() {
     message: string;
     type: "success" | "error";
   } | null>(null);
+  /** 本消込のみ（reconcile-sales）実行中 */
+  const [isProcessingOnly, setIsProcessingOnly] = useState(false);
 
   // STEP 5: 未処理イレギュラー（pending finances）用のState
   const [pendingFinances, setPendingFinances] = useState<PendingFinanceGroupData[]>([]);
@@ -259,6 +261,35 @@ export default function AmazonReconcileManager() {
       });
     } finally {
       setIsFetchingFinances(false);
+    }
+  };
+
+  const handleReconcileSalesOnly = async () => {
+    setIsProcessingOnly(true);
+    setFinanceResult(null);
+    try {
+      const res = await fetch("/api/amazon/reconcile-sales", { method: "POST" });
+      const data = (await res.json()) as {
+        error?: string;
+        reconciledCount?: number;
+        skippedCount?: number;
+        message?: string;
+      };
+      if (!res.ok) throw new Error(data.error ?? "本消込に失敗しました");
+      const reconciled = data.reconciledCount ?? 0;
+      const skipped = data.skippedCount ?? 0;
+      setFinanceResult({
+        type: "success",
+        message: data.message ?? `本消込: ${reconciled}件成功（保留: ${skipped}件）`,
+      });
+      await fetchPendingFinances();
+    } catch (e) {
+      setFinanceResult({
+        type: "error",
+        message: e instanceof Error ? e.message : "本消込に失敗しました",
+      });
+    } finally {
+      setIsProcessingOnly(false);
     }
   };
 
@@ -543,21 +574,38 @@ export default function AmazonReconcileManager() {
                       />
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={handleFetchFinances}
-                    disabled={isFetchingFinances}
-                    className={`${buttonClass} w-full bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed text-sm`}
-                  >
-                    {isFetchingFinances ? (
-                      <span className="flex items-center justify-center gap-2">
-                        <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                        取得中...
-                      </span>
-                    ) : (
-                      "売上データを取得・処理する"
-                    )}
-                  </button>
+                  <div className="flex flex-col gap-2 sm:flex-row sm:gap-2">
+                    <button
+                      type="button"
+                      onClick={handleFetchFinances}
+                      disabled={isFetchingFinances || isProcessingOnly}
+                      className={`${buttonClass} w-full bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed text-sm`}
+                    >
+                      {isFetchingFinances ? (
+                        <span className="flex items-center justify-center gap-2">
+                          <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                          取得中...
+                        </span>
+                      ) : (
+                        "売上データを取得・処理する"
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleReconcileSalesOnly}
+                      disabled={isFetchingFinances || isProcessingOnly}
+                      className={`${buttonClass} w-full bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed text-sm`}
+                    >
+                      {isProcessingOnly ? (
+                        <span className="flex items-center justify-center gap-2">
+                          <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                          処理中...
+                        </span>
+                      ) : (
+                        "未処理データの紐づけを実行"
+                      )}
+                    </button>
+                  </div>
                   {financeResult && (
                     <div
                       className={`rounded-lg border px-3 py-2 text-sm ${
