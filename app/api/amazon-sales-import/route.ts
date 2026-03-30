@@ -100,29 +100,6 @@ function lineLooksLikeTransactionHeader(line: string): boolean {
   return hasOrder && hasDate;
 }
 
-function isOrderKindRowType(raw: string): boolean {
-  const t = raw.normalize("NFKC").trim().toLowerCase();
-  if (!t) return false;
-  if (/refund|返金|返品|chargeback|チャージバック/.test(t)) return false;
-  if (
-    /\border\b/.test(t) ||
-    t.includes("注文") ||
-    t.includes("shipment") ||
-    t.includes("配送") ||
-    t.includes("sale") ||
-    t.includes("発送")
-  ) {
-    return true;
-  }
-  return false;
-}
-
-function isExpenseLikeRowType(raw: string): boolean {
-  const t = raw.normalize("NFKC").trim();
-  if (!t) return false;
-  return t.includes("PostageBilling") || t.includes("ServiceFee") || t.includes("adj_");
-}
-
 /** 手数料は負数で統一（Finances API と同様） */
 function signedForKind(kind: LogicalTxKind, amount: number): number {
   if (kind === "Principal" || kind === "Tax") return amount;
@@ -337,15 +314,9 @@ export async function POST(request: NextRequest) {
       const orderId = toTrimmedString(r[hOrder]);
       const dateRaw = toTrimmedString(r[hDate]);
       const typeRaw = hType ? toTrimmedString(r[hType]) : "";
-      const expenseLike = hType ? isExpenseLikeRowType(typeRaw) : false;
 
       if (!dateRaw) {
         rowErrors.push(`行 ${i + 2 + skippedPrefixLines}: 日付が空です（注文 ${orderId}）。`);
-        continue;
-      }
-
-      // オーダー系はこれまで通り。オーダー番号が空の行は「集計用の金の動き」として取り込み対象にする。
-      if (hType && !isOrderKindRowType(typeRaw) && !expenseLike && orderId) {
         continue;
       }
 
@@ -369,8 +340,8 @@ export async function POST(request: NextRequest) {
         }
         const rawCell = toTrimmedString(r[hTotalFallback]);
         const num = rawCell ? parseMoneyToNumber(rawCell) : null;
-        if (num == null || num === 0) {
-          rowErrors.push(`行 ${i + 2 + skippedPrefixLines}: オーダー番号が空ですが、金額が空/0です。`);
+        if (num == null) {
+          rowErrors.push(`行 ${i + 2 + skippedPrefixLines}: オーダー番号が空ですが、金額が空/不正です。`);
           continue;
         }
         const tt = typeRaw || "Adjustment";
@@ -396,7 +367,6 @@ export async function POST(request: NextRequest) {
           );
           continue;
         }
-        if (num === 0) continue;
 
         const signed = signedForKind(kind, num);
         const { amount_type, amount_description } = logicalToAmountTypes(kind);
@@ -405,7 +375,7 @@ export async function POST(request: NextRequest) {
           amazon_order_id: orderId,
           posted_iso: postedIso,
           sku,
-          transaction_type: "Order",
+          transaction_type: typeRaw || "Order",
           amount_type,
           amount_description,
           amount: signed,

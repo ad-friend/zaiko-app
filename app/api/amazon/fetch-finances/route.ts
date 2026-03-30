@@ -60,10 +60,10 @@ function createSpClient() {
   });
 }
 
-function toAmount(c: Currency | undefined): number {
-  if (c == null) return 0;
+function toAmountMaybe(c: Currency | undefined): number | null {
+  if (c == null) return null;
   const n = Number(c.CurrencyAmount);
-  return Number.isFinite(n) ? n : 0;
+  return Number.isFinite(n) ? n : null;
 }
 
 /** 手数料・返金等は負の値で統一 */
@@ -103,14 +103,17 @@ function flattenShipmentEvents(list: ShipmentEvent[] | undefined, transactionTyp
   let rowIndex = 0;
   list.forEach((ev, eventIndex) => {
     const orderId = ev.AmazonOrderId?.trim() ?? null;
-    const posted = ev.PostedDate ?? "";
+    const posted = (ev.PostedDate ?? "").trim();
+    if (!posted) return;
     const items = ev.ShipmentItemList ?? [];
     for (const item of items) {
       const sku = item.SellerSKU?.trim() ?? null;
       const charges = item.ItemChargeList ?? [];
       const fees = item.ItemFeeList ?? [];
       for (const c of charges) {
-        const amount = toSignedAmount(toAmount(c.ChargeAmount), false);
+        const base = toAmountMaybe(c.ChargeAmount);
+        if (base == null) continue;
+        const amount = toSignedAmount(base, false);
         rows.push({
           amazon_order_id: orderId,
           sku,
@@ -123,7 +126,9 @@ function flattenShipmentEvents(list: ShipmentEvent[] | undefined, transactionTyp
         });
       }
       for (const f of fees) {
-        const amount = toSignedAmount(toAmount(f.FeeAmount), true);
+        const base = toAmountMaybe(f.FeeAmount);
+        if (base == null) continue;
+        const amount = toSignedAmount(base, true);
         rows.push({
           amazon_order_id: orderId,
           sku,
@@ -138,7 +143,9 @@ function flattenShipmentEvents(list: ShipmentEvent[] | undefined, transactionTyp
       const chargeAdj = item.ItemChargeAdjustmentList ?? [];
       const feeAdj = item.ItemFeeAdjustmentList ?? [];
       for (const c of chargeAdj) {
-        const amount = toSignedAmount(toAmount(c.ChargeAmount), true);
+        const base = toAmountMaybe(c.ChargeAmount);
+        if (base == null) continue;
+        const amount = toSignedAmount(base, true);
         rows.push({
           amazon_order_id: orderId,
           sku,
@@ -151,7 +158,9 @@ function flattenShipmentEvents(list: ShipmentEvent[] | undefined, transactionTyp
         });
       }
       for (const f of feeAdj) {
-        const amount = toSignedAmount(toAmount(f.FeeAmount), true);
+        const base = toAmountMaybe(f.FeeAmount);
+        if (base == null) continue;
+        const amount = toSignedAmount(base, true);
         rows.push({
           amazon_order_id: orderId,
           sku,
@@ -173,14 +182,17 @@ function flattenAdjustmentEvents(list: AdjustmentEvent[] | undefined): SalesTran
   if (!Array.isArray(list)) return rows;
   let rowIndex = 0;
   list.forEach((ev, eventIndex) => {
-    const posted = ev.PostedDate ?? "";
+    const posted = (ev.PostedDate ?? "").trim();
+    if (!posted) return;
     const adjType = ev.AdjustmentType?.trim() ?? "Adjustment";
-    const amount = toSignedAmount(toAmount(ev.AdjustmentAmount), false);
+    const eventBase = toAmountMaybe(ev.AdjustmentAmount);
     const items = ev.AdjustmentItemList ?? [];
     if (items.length > 0) {
       for (const it of items) {
         const sku = it.SellerSKU?.trim() ?? null;
-        const itemAmount = toSignedAmount(toAmount(it.TotalAmount), false);
+        const base = toAmountMaybe(it.TotalAmount);
+        if (base == null) continue;
+        const itemAmount = toSignedAmount(base, false);
         rows.push({
           amazon_order_id: null,
           sku,
@@ -193,6 +205,8 @@ function flattenAdjustmentEvents(list: AdjustmentEvent[] | undefined): SalesTran
         });
       }
     } else {
+      if (eventBase == null) return;
+      const amount = toSignedAmount(eventBase, false);
       rows.push({
         amazon_order_id: null,
         sku: null,
