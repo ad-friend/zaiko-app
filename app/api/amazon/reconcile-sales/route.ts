@@ -68,22 +68,18 @@ function isExpenseSkipTx(row: Pick<TxRow, "amount_type" | "transaction_type">): 
 async function markSalesTxReconciled(ids: number[]): Promise<void> {
   if (!ids.length) return;
 
-  // sales_transactions 側に status カラムが無い可能性があるため、
-  // status を含めた更新 → カラム不足時のみリトライで status 無しにフォールバック。
-  const payloadWithStatus: Record<string, unknown> = { stock_id: -1, unit_cost: 0, status: "reconciled" };
-  const { error: err1 } = await supabase.from("sales_transactions").update(payloadWithStatus as any).in("id", ids);
+  // 経費データは在庫と紐づけ不要のため、stock_id にダミー値を入れない（FK等で弾かれる可能性がある）。
+  // status カラムが存在する場合のみ「reconciled」で除外マークする。
+  const { error: err1 } = await supabase
+    .from("sales_transactions")
+    .update({ status: "reconciled" } as any)
+    .in("id", ids);
   if (!err1) return;
 
   const code = (err1 as any)?.code;
   const msg = (err1 as any)?.message ?? "";
-  if (code === "42703" || msg.includes("status")) {
-    const { error: err2 } = await supabase
-      .from("sales_transactions")
-      .update({ stock_id: -1, unit_cost: 0 })
-      .in("id", ids);
-    if (err2) throw err2;
-    return;
-  }
+  // status カラムが無いDBでは何も更新しない（表示側で amount_type 等による除外を行う）
+  if (code === "42703" || msg.includes("status")) return;
   throw err1;
 }
 

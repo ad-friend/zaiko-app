@@ -29,14 +29,50 @@ export type PendingFinanceGroup = {
 
 export async function GET() {
   try {
-    const { data: rows, error } = await supabase
-      .from("sales_transactions")
-      .select("id, amazon_order_id, sku, transaction_type, amount_type, amount_description, amount, posted_date")
-      .is("stock_id", null)
-      .order("posted_date", { ascending: false });
+    // status カラムが存在する場合は reconciled を除外する。
+    // 存在しない場合でも動くように、失敗時は status なしで再クエリする。
+    let rows: any[] | null = null;
+    {
+      const res = await supabase
+        .from("sales_transactions")
+        .select("id, amazon_order_id, sku, transaction_type, amount_type, amount_description, amount, posted_date, status")
+        .is("stock_id", null)
+        .neq("status", "reconciled")
+        .order("posted_date", { ascending: false });
+      if (!res.error) {
+        rows = res.data ?? [];
+      } else {
+        const code = (res.error as any)?.code;
+        const msg = (res.error as any)?.message ?? "";
+        if (code !== "42703" && !msg.includes("status")) throw res.error;
+      }
+    }
 
-    if (error) throw error;
-    const list = (rows ?? []) as PendingFinanceDetail[];
+    if (rows == null) {
+      const { data, error } = await supabase
+        .from("sales_transactions")
+        .select("id, amazon_order_id, sku, transaction_type, amount_type, amount_description, amount, posted_date")
+        .is("stock_id", null)
+        .order("posted_date", { ascending: false });
+      if (error) throw error;
+      rows = data ?? [];
+    }
+
+    let list = (rows ?? []) as PendingFinanceDetail[];
+
+    // status が無いDB向けフォールバック: 経費・調整として扱うものは一覧から除外
+    list = list.filter((row) => {
+      const at = String((row as any).amount_type ?? "");
+      const tt = String((row as any).transaction_type ?? "");
+      return !(
+        at.includes("PostageBilling") ||
+        tt.includes("PostageBilling") ||
+        at.includes("ServiceFee") ||
+        tt.includes("ServiceFee") ||
+        at.includes("adj_") ||
+        tt.includes("adj_")
+      );
+    });
 
     const groupMap = new Map<string, PendingFinanceDetail[]>();
 
