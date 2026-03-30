@@ -3,6 +3,10 @@
 import { useMemo, useState } from "react";
 import Papa from "papaparse";
 import { UploadCloud, ShieldCheck, RotateCcw, Banknote } from "lucide-react";
+import { sliceFromTransactionHeader } from "@/lib/amazon-transaction-csv-header";
+
+/** 売上CSVを複数回に分けて送るときのデータ行数（ヘッダー行は除く） */
+const SALES_IMPORT_CHUNK_DATA_ROWS = 500;
 
 type AmazonOrdersImportRow = {
   amazonOrderId: string;
@@ -239,6 +243,7 @@ export default function AmazonOrdersImportPage() {
 
   const [salesFileName, setSalesFileName] = useState<string | null>(null);
   const [salesRunning, setSalesRunning] = useState(false);
+  const [salesBatchProgress, setSalesBatchProgress] = useState<{ current: number; total: number } | null>(null);
   const [salesError, setSalesError] = useState<string | null>(null);
   const [salesResult, setSalesResult] = useState<{
     ok: boolean;
@@ -251,6 +256,8 @@ export default function AmazonOrdersImportPage() {
     message?: string;
     upserted?: number;
     row_errors?: string[];
+    batch_total_chunks?: number;
+    batch_chunk_rows?: number;
   } | null>(null);
 
   const parsedSummary = useMemo(() => {
@@ -442,16 +449,23 @@ export default function AmazonOrdersImportPage() {
     setSalesResult(null);
     setSalesFileName(file.name);
     setSalesRunning(true);
+    setSalesBatchProgress(null);
 
     try {
       const csvText = await file.text();
-      const res = await fetch("/api/amazon-sales-import", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ csvText, fileName: file.name }),
-      });
+      const { body: slicedText, skippedPrefixLines } = sliceFromTransactionHeader(csvText);
+      const lines = slicedText.split(/\r?\n/);
+      const headerLine = lines[0] ?? "";
+      if (!headerLine.trim()) {
+        setSalesError("ヘッダー行が見つかりません（日付・オーダー番号を含む行がありません）。");
+        setSalesResult({ ok: false });
+        return;
+      }
+      const dataLines = lines.slice(1);
+      const totalChunks = Math.max(1, Math.ceil(dataLines.length / SALES_IMPORT_CHUNK_DATA_ROWS));
+      const batchMode = totalChunks > 1;
 
-      const parsedRes = await readJsonOrTextSafe<{
+      type SalesImportApi = {
         error?: string;
         ok?: boolean;
         rows_read?: number;
@@ -463,38 +477,92 @@ export default function AmazonOrdersImportPage() {
         message?: string;
         upserted?: number;
         row_errors?: string[];
-      }>(res);
-      const data = parsedRes.data;
+      };
 
-      if (!res.ok) {
-        const rawSnippet = parsedRes.raw.trim().slice(0, 400);
-        const msg = (data && typeof data.error === "string" ? data.error : null) ?? rawSnippet;
-        setSalesError(msg || "売上データのインポートに失敗しました");
-        setSalesResult({ ok: false });
-        return;
+      let sumUpserted = 0;
+      let sumRowsRead = 0;
+      let sumRowsExpanded = 0;
+      let sumRowsAfterMerge = 0;
+      let sumMergedOrders = 0;
+      let sumMergedExtra = 0;
+      const rowErrorsAll: string[] = [];
+      let lastMessage = "";
+
+      for (let ci = 0; ci < totalChunks; ci++) {
+        setSalesBatchProgress({ current: ci + 1, total: totalChunks });
+        const chunkData = dataLines.slice(ci * SALES_IMPORT_CHUNK_DATA_ROWS, (ci + 1) * SALES_IMPORT_CHUNK_DATA_ROWS);
+        const chunkCsv = [headerLine, ...chunkData].join("\n");
+
+        const res = await fetch("/api/amazon-sales-import", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            csvText: chunkCsv,
+            fileName: file.name,
+            batchMode,
+            chunkIndex: ci,
+            totalChunks,
+          }),
+        });
+
+        const parsedRes = await readJsonOrTextSafe<SalesImportApi>(res);
+        const data = parsedRes.data;
+
+        if (!res.ok) {
+          const rawSnippet = parsedRes.raw.trim().slice(0, 400);
+          const msg = (data && typeof data.error === "string" ? data.error : null) ?? rawSnippet;
+          setSalesError(
+            totalChunks > 1
+              ? `${msg || "売上データのインポートに失敗しました"}（分割 ${ci + 1}/${totalChunks} 回目）`
+              : msg || "売上データのインポートに失敗しました"
+          );
+          setSalesResult({ ok: false });
+          return;
+        }
+
+        if (!parsedRes.okJson || !data) {
+          setSalesError(
+            totalChunks > 1
+              ? `サーバー応答が JSON ではありません。（分割 ${ci + 1}/${totalChunks} 回目）`
+              : "サーバー応答が JSON ではありません。"
+          );
+          return;
+        }
+
+        sumUpserted += data.upserted ?? 0;
+        sumRowsRead += data.rows_read ?? 0;
+        sumRowsExpanded += data.rows_expanded ?? 0;
+        sumRowsAfterMerge += data.rows_after_merge ?? 0;
+        sumMergedOrders += data.merged_split_payment_orders ?? 0;
+        sumMergedExtra += data.merged_split_payment_extra_rows ?? 0;
+        if (data.row_errors?.length) rowErrorsAll.push(...data.row_errors);
+        if (typeof data.message === "string" && data.message) lastMessage = data.message;
       }
 
-      if (!parsedRes.okJson || !data) {
-        setSalesError("サーバー応答が JSON ではありません。");
-        return;
-      }
+      const batchNote =
+        totalChunks > 1
+          ? ` ${totalChunks} 回に分割して送信しました（各チャンク最大 ${SALES_IMPORT_CHUNK_DATA_ROWS} データ行）。同じレポートを再度分割インポートすると金額が重複する場合があるため、再取り込みは可能なら1回の全件送信を推奨します。`
+          : "";
 
       setSalesResult({
         ok: true,
-        rows_read: data.rows_read,
-        rows_expanded: data.rows_expanded,
-        rows_after_merge: data.rows_after_merge,
-        skipped_prefix_lines: data.skipped_prefix_lines,
-        merged_split_payment_orders: data.merged_split_payment_orders,
-        merged_split_payment_extra_rows: data.merged_split_payment_extra_rows,
-        message: data.message,
-        upserted: data.upserted,
-        row_errors: data.row_errors,
+        rows_read: sumRowsRead,
+        rows_expanded: sumRowsExpanded,
+        rows_after_merge: sumRowsAfterMerge,
+        skipped_prefix_lines: skippedPrefixLines,
+        merged_split_payment_orders: sumMergedOrders,
+        merged_split_payment_extra_rows: sumMergedExtra,
+        message: `${lastMessage || "取り込みが完了しました。"}${batchNote}`,
+        upserted: sumUpserted,
+        row_errors: rowErrorsAll.slice(0, 50),
+        batch_total_chunks: totalChunks > 1 ? totalChunks : undefined,
+        batch_chunk_rows: totalChunks > 1 ? SALES_IMPORT_CHUNK_DATA_ROWS : undefined,
       });
     } catch (err) {
       setSalesError(err instanceof Error ? err.message : "売上データのインポートに失敗しました");
     } finally {
       setSalesRunning(false);
+      setSalesBatchProgress(null);
       e.target.value = "";
     }
   };
@@ -703,6 +771,11 @@ export default function AmazonOrdersImportPage() {
           {salesRunning && (
             <p className="mt-3 text-sm font-medium text-amber-800" aria-live="polite">
               売上データを取り込み中…
+              {salesBatchProgress && (
+                <span className="ml-1 tabular-nums">
+                  （{salesBatchProgress.current}/{salesBatchProgress.total} 回目）
+                </span>
+              )}
             </p>
           )}
 
@@ -713,6 +786,12 @@ export default function AmazonOrdersImportPage() {
           {salesResult?.ok ? (
             <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50/70 p-4">
               <p className="font-medium text-amber-950">売上データインポート完了</p>
+              {(salesResult.batch_total_chunks ?? 0) > 1 && (
+                <p className="mt-1 text-xs text-amber-900/85">
+                  分割送信: {salesResult.batch_total_chunks} 回（各チャンク最大 {salesResult.batch_chunk_rows ?? 500}{" "}
+                  データ行）
+                </p>
+              )}
               <p className="mt-2 text-sm text-amber-950/95">{salesResult.message}</p>
               <dl className="mt-3 grid gap-2 text-sm text-amber-950 sm:grid-cols-2">
                 {(salesResult.skipped_prefix_lines ?? 0) > 0 && (

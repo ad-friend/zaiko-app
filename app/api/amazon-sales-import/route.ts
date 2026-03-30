@@ -7,10 +7,25 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createHash } from "crypto";
 import Papa from "papaparse";
+import { sliceFromTransactionHeader } from "@/lib/amazon-transaction-csv-header";
 import { supabase } from "@/lib/supabase";
 import { parseFlexiblePostedDateToIso } from "@/lib/settlement-posted-date";
 
+/** Vercel Hobby の上限。Pro では 300 などに変更可能 */
+export const maxDuration = 60;
+
 const UPSERT_CHUNK = 200;
+
+type SalesTxUpsertRow = {
+  amazon_order_id: string | null;
+  sku: string | null;
+  transaction_type: string;
+  amount_type: string;
+  amount_description: string;
+  amount: number;
+  posted_date: string;
+  amazon_event_hash: string;
+};
 
 /** 論理内訳（レスポンス・マージキー）。DB では amount_description に載せる */
 type LogicalTxKind = "Principal" | "Tax" | "Commission" | "FBA Per Unit Fulfillment Fee" | "Other";
@@ -72,34 +87,6 @@ function toTrimmedString(v: unknown): string {
   return v == null ? "" : String(v).trim();
 }
 
-/** 先頭の説明行・空行を除き、実ヘッダー行から始まるテキストを返す（見つからなければ全文を返す） */
-function sliceFromTransactionHeader(csvText: string): { body: string; skippedPrefixLines: number } {
-  const bomStripped = csvText.replace(/^\uFEFF/, "");
-  const lines = bomStripped.split(/\r?\n/);
-  for (let start = 0; start < lines.length; start++) {
-    const line = lines[start];
-    if (!line || !line.trim()) continue;
-    if (lineLooksLikeTransactionHeader(line)) {
-      return { body: lines.slice(start).join("\n"), skippedPrefixLines: start };
-    }
-  }
-  return { body: bomStripped.trim(), skippedPrefixLines: 0 };
-}
-
-function lineLooksLikeTransactionHeader(line: string): boolean {
-  const t = line.replace(/^\uFEFF/, "").trim();
-  if (t.length < 8) return false;
-  const n = t.normalize("NFKC");
-  const hasOrder =
-    /オーダー番号|注文番号|order[\s_-]*id|amazon[\s_-]*order[\s_-]*id|amazon-order-id/i.test(n) ||
-    /"order\s*id"/i.test(n);
-  const hasDate =
-    /日付[\/／]時刻|(?<![\w])日付(?![\w])|posted\s*date|posting\s*date|transaction\s*date|date[\/／]time/i.test(
-      n
-    );
-  return hasOrder && hasDate;
-}
-
 /** 手数料符号などの正規化を行わず、CSV の符号をそのまま信用します */
 function signedForKind(kind: LogicalTxKind, amount: number): number {
   // 重要: CSV の符号をそのまま信用する（Refund/手数料等も Math.abs で強制しない）
@@ -142,6 +129,47 @@ function hashMergedDetail(orderId: string, amountType: string, amountDescription
 function hashStandaloneExpense(txType: string, amountType: string, postedIso: string, amount: number, seq: number): string {
   const raw = ["AmazonTxCsvExpenseV1", txType.trim(), amountType.trim(), postedIso, String(amount), String(seq)].join("|");
   return createHash("sha256").update(raw).digest("hex");
+}
+
+/**
+ * 分割送信（batchMode）の 2 本目以降: 同一 amazon_event_hash が既に DB にある場合は金額を加算（分割発送がチャンクをまたぐ場合）。
+ * chunkIndex 0（または batchMode でない通常送信）は upsert のみ＝衝突時は上書き（全件1回の再インポート向け）。
+ */
+async function mergeUpsertChunkWithExisting(
+  chunk: SalesTxUpsertRow[],
+  batchMode: boolean,
+  chunkIndex: number | null
+): Promise<SalesTxUpsertRow[]> {
+  if (!batchMode || chunk.length === 0) return chunk;
+  if (chunkIndex == null || chunkIndex === 0) return chunk;
+  const hashes = [...new Set(chunk.map((r) => r.amazon_event_hash).filter(Boolean))];
+  if (hashes.length === 0) return chunk;
+
+  const { data: existingRows, error } = await supabase
+    .from("sales_transactions")
+    .select("amazon_event_hash, amount, posted_date, sku")
+    .in("amazon_event_hash", hashes);
+
+  if (error) throw error;
+
+  const byHash = new Map((existingRows ?? []).map((e) => [e.amazon_event_hash as string, e]));
+
+  return chunk.map((row) => {
+    const h = row.amazon_event_hash;
+    const ex = h ? byHash.get(h) : undefined;
+    if (!ex) return row;
+    const exAmt = Number(ex.amount);
+    const newAmt = Number(row.amount);
+    const exMs = Date.parse(String(ex.posted_date));
+    const rowMs = Date.parse(String(row.posted_date));
+    const usePosted = Number.isFinite(exMs) && Number.isFinite(rowMs) && exMs <= rowMs ? ex.posted_date : row.posted_date;
+    return {
+      ...row,
+      amount: Math.round((exAmt + newAmt) * 100) / 100,
+      posted_date: usePosted as string,
+      sku: row.sku ?? (ex.sku as string | null),
+    };
+  });
 }
 
 type AmountColumnDef = {
@@ -205,9 +233,18 @@ const AMOUNT_COLUMNS: AmountColumnDef[] = [
 
 export async function POST(request: NextRequest) {
   try {
-    const body = (await request.json()) as { csvText?: unknown; fileName?: unknown };
+    const body = (await request.json()) as {
+      csvText?: unknown;
+      fileName?: unknown;
+      batchMode?: unknown;
+      chunkIndex?: unknown;
+      totalChunks?: unknown;
+    };
     const csvText = typeof body.csvText === "string" ? body.csvText : "";
     const fileName = typeof body.fileName === "string" ? body.fileName : "upload.csv";
+    const batchMode = body.batchMode === true;
+    const chunkIndex = typeof body.chunkIndex === "number" && Number.isFinite(body.chunkIndex) ? body.chunkIndex : null;
+    const totalChunks = typeof body.totalChunks === "number" && Number.isFinite(body.totalChunks) ? body.totalChunks : null;
 
     if (!csvText.trim()) {
       return NextResponse.json({ error: "csvText にファイル内容を渡してください。" }, { status: 400 });
@@ -446,7 +483,7 @@ export async function POST(request: NextRequest) {
     const mergedSplitPaymentExtraRows = mergeExtraRows;
 
     let expenseSeq = 0;
-    const insertPayload = [...mergeMap.entries()].map(([key, v]) => {
+    const insertPayload: SalesTxUpsertRow[] = [...mergeMap.entries()].map(([key, v]) => {
       const orderId = key.split("\u0001")[0] ?? "";
       const txType = key.split("\u0001")[1] ?? "Order";
       if (!orderId || txType !== "Order") expenseSeq += 1;
@@ -472,9 +509,10 @@ export async function POST(request: NextRequest) {
     let upserted = 0;
     for (let i = 0; i < insertPayload.length; i += UPSERT_CHUNK) {
       const chunk = insertPayload.slice(i, i + UPSERT_CHUNK);
+      const toUpsert = await mergeUpsertChunkWithExisting(chunk, batchMode, chunkIndex);
       const { data: upData, error: upErr } = await supabase
         .from("sales_transactions")
-        .upsert(chunk, { onConflict: "amazon_event_hash" })
+        .upsert(toUpsert, { onConflict: "amazon_event_hash" })
         .select("id");
 
       if (upErr) {
@@ -508,6 +546,9 @@ export async function POST(request: NextRequest) {
       message: mergeMessage,
       upserted,
       row_errors: rowErrors.slice(0, 50),
+      batch_mode: batchMode,
+      batch_chunk_index: chunkIndex,
+      batch_total_chunks: totalChunks,
     });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "売上データのインポートに失敗しました。";
