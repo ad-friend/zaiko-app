@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Ban, Trash2 } from "lucide-react";
+import { Ban, Trash2, CloudDownload, FileSpreadsheet, Link2 } from "lucide-react";
 import ManualFinanceProcessModal, { type PendingFinanceGroupData } from "@/components/ManualFinanceProcessModal";
 import ReturnInspectionQueueSection from "@/components/ReturnInspectionQueueSection";
 import { normalizeOrderCondition } from "@/lib/amazon-condition-match";
@@ -110,6 +110,22 @@ export default function AmazonReconcileManager() {
   });
   const [isFetchingFinances, setIsFetchingFinances] = useState(false);
   const [financeResult, setFinanceResult] = useState<{
+    message: string;
+    type: "success" | "error";
+  } | null>(null);
+
+  /** CSV 手動インポート（amazon-sales-import） */
+  const [csvSalesFile, setCsvSalesFile] = useState<File | null>(null);
+  const [csvDragActive, setCsvDragActive] = useState(false);
+  const [csvImporting, setCsvImporting] = useState(false);
+  const [csvImportResult, setCsvImportResult] = useState<{
+    message: string;
+    type: "success" | "error";
+  } | null>(null);
+
+  /** 本消込のみ（reconcile-sales） */
+  const [isReconcileSalesOnly, setIsReconcileSalesOnly] = useState(false);
+  const [reconcileSalesOnlyResult, setReconcileSalesOnlyResult] = useState<{
     message: string;
     type: "success" | "error";
   } | null>(null);
@@ -259,6 +275,74 @@ export default function AmazonReconcileManager() {
       });
     } finally {
       setIsFetchingFinances(false);
+    }
+  };
+
+  const handleCsvSalesFileSelected = (file: File | null) => {
+    if (!file) return;
+    setCsvSalesFile(file);
+    setCsvImportResult(null);
+  };
+
+  const handleCsvSalesImport = async () => {
+    if (!csvSalesFile) return;
+    setCsvImporting(true);
+    setCsvImportResult(null);
+    try {
+      const csvText = await csvSalesFile.text();
+      const res = await fetch("/api/amazon-sales-import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ csvText, fileName: csvSalesFile.name }),
+      });
+      const data = (await res.json()) as {
+        error?: string;
+        message?: string;
+        upserted?: number;
+        rows_read?: number;
+        rows_expanded?: number;
+        skipped_prefix_lines?: number;
+      };
+      if (!res.ok) throw new Error(data.error ?? "インポートに失敗しました");
+      const parts = [
+        `Upsert ${data.upserted ?? 0}件`,
+        data.rows_read != null ? `データ行 ${data.rows_read}件` : null,
+        data.rows_expanded != null ? `縦展開 ${data.rows_expanded}件` : null,
+        (data.skipped_prefix_lines ?? 0) > 0 ? `先頭スキップ ${data.skipped_prefix_lines}行` : null,
+        data.message ? `（${data.message}）` : null,
+      ].filter(Boolean);
+      setCsvImportResult({ type: "success", message: parts.join(" / ") });
+    } catch (e) {
+      setCsvImportResult({
+        type: "error",
+        message: e instanceof Error ? e.message : "インポートに失敗しました",
+      });
+    } finally {
+      setCsvImporting(false);
+    }
+  };
+
+  const handleReconcileSalesOnly = async () => {
+    setIsReconcileSalesOnly(true);
+    setReconcileSalesOnlyResult(null);
+    try {
+      const res = await fetch("/api/amazon/reconcile-sales", { method: "POST" });
+      const data = (await res.json()) as { error?: string; reconciledCount?: number; skippedCount?: number; message?: string };
+      if (!res.ok) throw new Error(data.error ?? "本消込に失敗しました");
+      const reconciled = data.reconciledCount ?? 0;
+      const skipped = data.skippedCount ?? 0;
+      setReconcileSalesOnlyResult({
+        type: "success",
+        message: data.message ?? `本消込: ${reconciled}件成功（保留: ${skipped}件）`,
+      });
+      await fetchPendingFinances();
+    } catch (e) {
+      setReconcileSalesOnlyResult({
+        type: "error",
+        message: e instanceof Error ? e.message : "本消込に失敗しました",
+      });
+    } finally {
+      setIsReconcileSalesOnly(false);
     }
   };
 
@@ -514,60 +598,219 @@ export default function AmazonReconcileManager() {
               売上とお金の確定（本消込）
             </h2>
             <div className="space-y-6">
-              {/* STEP 4: 売上データ（ペイメント）の取得 ＆ 自動処理 */}
-              <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-                <h3 className="text-sm font-bold text-slate-800 mb-2">STEP 4: 売上データ（ペイメント）の取得 ＆ 自動処理</h3>
-                <p className="text-xs text-slate-500 mb-4">対象期間の売上・手数料・返品・補填データを取得し、sales_transactions に保存します。</p>
-                <div className="space-y-3">
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label htmlFor="financeStartDate" className="block text-xs font-medium text-slate-600 mb-1">開始日</label>
-                      <input
-                        type="date"
-                        id="financeStartDate"
-                        value={financeStartDate}
-                        onChange={(e) => setFinanceStartDate(e.target.value)}
-                        className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      />
-                    </div>
-                    <div>
-                      <label htmlFor="financeEndDate" className="block text-xs font-medium text-slate-600 mb-1">終了日</label>
-                      <input
-                        type="date"
-                        id="financeEndDate"
-                        value={financeEndDate}
-                        onChange={(e) => setFinanceEndDate(e.target.value)}
-                        className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      />
-                    </div>
+              <p className="text-xs text-slate-600 -mt-2 mb-1">
+                売上の取り込みは「API 一括」「CSV 手動」「その後の本消込のみ」の3通りから選べます。
+              </p>
+
+              {/* 1. API 取得 ＋ 自動本消込 */}
+              <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm ring-1 ring-slate-100/80 border-l-[3px] border-l-blue-600">
+                <div className="flex gap-3">
+                  <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-700">
+                    <CloudDownload className="h-5 w-5" aria-hidden />
                   </div>
-                  <button
-                    type="button"
-                    onClick={handleFetchFinances}
-                    disabled={isFetchingFinances}
-                    className={`${buttonClass} w-full bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed text-sm`}
-                  >
-                    {isFetchingFinances ? (
-                      <span className="flex items-center justify-center gap-2">
-                        <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                        取得中...
-                      </span>
-                    ) : (
-                      "売上データを取得・処理する"
+                  <div className="min-w-0 flex-1 space-y-3">
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900">APIから最新の売上を取得＆自動紐づけ</h3>
+                      <p className="mt-1 text-xs text-slate-500">
+                        SP-API で指定期間の財務イベントを取得し <span className="font-mono">sales_transactions</span> に保存したうえで、続けて本消込（在庫との自動紐づけ）まで実行します。
+                      </p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label htmlFor="financeStartDate" className="mb-1 block text-xs font-medium text-slate-600">
+                          開始日
+                        </label>
+                        <input
+                          type="date"
+                          id="financeStartDate"
+                          value={financeStartDate}
+                          onChange={(e) => setFinanceStartDate(e.target.value)}
+                          className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="financeEndDate" className="mb-1 block text-xs font-medium text-slate-600">
+                          終了日
+                        </label>
+                        <input
+                          type="date"
+                          id="financeEndDate"
+                          value={financeEndDate}
+                          onChange={(e) => setFinanceEndDate(e.target.value)}
+                          className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleFetchFinances}
+                      disabled={isFetchingFinances}
+                      className={`${buttonClass} w-full bg-blue-600 text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60 text-sm`}
+                    >
+                      {isFetchingFinances ? (
+                        <span className="flex items-center justify-center gap-2">
+                          <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                          取得・紐づけ中…
+                        </span>
+                      ) : (
+                        "APIで取得して自動紐づけまで実行"
+                      )}
+                    </button>
+                    {financeResult && (
+                      <div
+                        className={`rounded-lg border px-3 py-2 text-sm ${
+                          financeResult.type === "success"
+                            ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                            : "border-red-200 bg-red-50 text-red-800"
+                        }`}
+                      >
+                        {financeResult.type === "success" ? "✅ " : "❌ "}
+                        {financeResult.message}
+                      </div>
                     )}
-                  </button>
-                  {financeResult && (
+                  </div>
+                </div>
+              </div>
+
+              {/* 2. CSV 手動インポート（Upsert のみ） */}
+              <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm ring-1 ring-slate-100/80 border-l-[3px] border-l-amber-500">
+                <div className="flex gap-3">
+                  <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-50 text-amber-800">
+                    <FileSpreadsheet className="h-5 w-5" aria-hidden />
+                  </div>
+                  <div className="min-w-0 flex-1 space-y-3">
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900">CSVファイルから手動インポート</h3>
+                      <p className="mt-1 text-xs text-slate-500">
+                        日付範囲別レポートのトランザクション CSV をアップロードします。DB への保存（Upsert）のみで、在庫との紐づけは行いません。
+                      </p>
+                    </div>
                     <div
-                      className={`rounded-lg border px-3 py-2 text-sm ${
-                        financeResult.type === "success"
-                          ? "bg-emerald-50 border-emerald-200 text-emerald-800"
-                          : "bg-red-50 border-red-200 text-red-800"
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          document.getElementById("reconcile-csv-sales-input")?.click();
+                        }
+                      }}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setCsvDragActive(true);
+                      }}
+                      onDragLeave={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setCsvDragActive(false);
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setCsvDragActive(false);
+                        const f = e.dataTransfer.files?.[0];
+                        if (f && /\.(csv|tsv|txt)$/i.test(f.name)) handleCsvSalesFileSelected(f);
+                      }}
+                      className={`rounded-lg border-2 border-dashed px-4 py-6 text-center transition-colors ${
+                        csvDragActive
+                          ? "border-amber-400 bg-amber-50/60"
+                          : "border-slate-200 bg-slate-50/50 hover:border-amber-200"
                       }`}
                     >
-                      {financeResult.type === "success" ? "✅ " : "❌ "}
-                      {financeResult.message}
+                      <input
+                        id="reconcile-csv-sales-input"
+                        type="file"
+                        accept=".csv,.tsv,.txt"
+                        className="sr-only"
+                        onChange={(e) => {
+                          handleCsvSalesFileSelected(e.target.files?.[0] ?? null);
+                          e.target.value = "";
+                        }}
+                      />
+                      <label htmlFor="reconcile-csv-sales-input" className="cursor-pointer text-sm text-slate-700">
+                        <span className="font-medium text-amber-900">ファイルを選択</span>
+                        <span className="text-slate-500"> またはドラッグ＆ドロップ（.csv / .tsv / .txt）</span>
+                      </label>
+                      {csvSalesFile ? (
+                        <p className="mt-2 truncate text-xs text-slate-600" title={csvSalesFile.name}>
+                          選択中: <span className="font-mono">{csvSalesFile.name}</span>
+                        </p>
+                      ) : (
+                        <p className="mt-2 text-xs text-slate-400">未選択</p>
+                      )}
                     </div>
-                  )}
+                    <button
+                      type="button"
+                      onClick={handleCsvSalesImport}
+                      disabled={csvImporting || !csvSalesFile}
+                      className={`${buttonClass} w-full border border-amber-300 bg-amber-600 text-white hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-50 text-sm`}
+                    >
+                      {csvImporting ? (
+                        <span className="flex items-center justify-center gap-2">
+                          <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                          インポート中…
+                        </span>
+                      ) : (
+                        "CSVをインポート"
+                      )}
+                    </button>
+                    {csvImportResult && (
+                      <div
+                        className={`rounded-lg border px-3 py-2 text-sm ${
+                          csvImportResult.type === "success"
+                            ? "border-amber-200 bg-amber-50/90 text-amber-950"
+                            : "border-red-200 bg-red-50 text-red-800"
+                        }`}
+                      >
+                        {csvImportResult.type === "success" ? "✅ " : "❌ "}
+                        {csvImportResult.message}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* 3. 本消込のみ（CSV 後・再実行用） */}
+              <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm ring-1 ring-slate-100/80 border-l-[3px] border-l-emerald-600">
+                <div className="flex gap-3">
+                  <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-800">
+                    <Link2 className="h-5 w-5" aria-hidden />
+                  </div>
+                  <div className="min-w-0 flex-1 space-y-3">
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900">未処理データの紐づけを実行</h3>
+                      <p className="mt-1 text-xs text-slate-500">
+                        CSVからインポートした決済データや、APIで紐づけ漏れになったデータを在庫と紐づけます（本消込）。取得は行わず、DB 上の未紐づき <span className="font-mono">sales_transactions</span> のみが対象です。
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleReconcileSalesOnly}
+                      disabled={isReconcileSalesOnly}
+                      className={`${buttonClass} w-full border border-emerald-300 bg-emerald-600 text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60 text-sm`}
+                    >
+                      {isReconcileSalesOnly ? (
+                        <span className="flex items-center justify-center gap-2">
+                          <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                          処理中…
+                        </span>
+                      ) : (
+                        "紐づけ処理（本消込）を開始"
+                      )}
+                    </button>
+                    {reconcileSalesOnlyResult && (
+                      <div
+                        className={`rounded-lg border px-3 py-2 text-sm ${
+                          reconcileSalesOnlyResult.type === "success"
+                            ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+                            : "border-red-200 bg-red-50 text-red-800"
+                        }`}
+                      >
+                        {reconcileSalesOnlyResult.type === "success" ? "✅ " : "❌ "}
+                        {reconcileSalesOnlyResult.message}
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
 
