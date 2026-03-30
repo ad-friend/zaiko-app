@@ -483,7 +483,9 @@ export default function AmazonReconcileManager() {
                   <p className="mt-1">手動確認に回した注文: {reconcileResult.manual_required} 件</p>
                 )}
                 {reconcileResult.skipped_used_safety != null && reconcileResult.skipped_used_safety > 0 && (
-                  <p className="mt-1">中古安全装置でスキップ（pending のまま）: {reconcileResult.skipped_used_safety} 件</p>
+                  <p className="mt-1">
+                    中古安全装置により自動確定せず手動確認へ: {reconcileResult.skipped_used_safety} 件
+                  </p>
                 )}
               </div>
             )}

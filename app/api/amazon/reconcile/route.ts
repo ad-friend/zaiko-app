@@ -180,6 +180,7 @@ export async function POST() {
           const { error } = await updateAmazonOrderReconciliation(order.id, AMAZON_ORDER_STATUS_MANUAL_REQUIRED, janForRow);
           if (error) throw error;
           manualRequired++;
+          skippedUsedSafety++;
           continue;
         }
         try {
@@ -220,6 +221,7 @@ export async function POST() {
             const { error } = await updateAmazonOrderReconciliation(order.id, AMAZON_ORDER_STATUS_MANUAL_REQUIRED, janForRow);
             if (error) throw error;
             manualRequired++;
+            skippedUsedSafety++;
             continue;
           }
           if (setOk && collectedIds.length > 0) {
@@ -307,6 +309,7 @@ export async function POST() {
         const { error } = await updateAmazonOrderReconciliation(order.id, AMAZON_ORDER_STATUS_MANUAL_REQUIRED, jan);
         if (error) throw error;
         manualRequired++;
+        skippedUsedSafety++;
         continue;
       } catch (e) {
         console.error("[amazon/reconcile] order row id=%s rollback or failure:", order.id, e);
