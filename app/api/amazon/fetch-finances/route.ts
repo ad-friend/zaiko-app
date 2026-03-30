@@ -7,6 +7,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createHash } from "crypto";
 import { supabase } from "@/lib/supabase";
 
+const UPSERT_CHUNK = 500;
+
 type Currency = { CurrencyCode?: string; CurrencyAmount?: number };
 type ChargeComponent = { ChargeType?: string; ChargeAmount?: Currency };
 type FeeComponent = { FeeType?: string; FeeAmount?: Currency };
@@ -306,29 +308,35 @@ export async function POST(request: NextRequest) {
       amazon_event_hash: r.amazon_event_hash,
     }));
 
-    const { data, error } = await supabase
-      .from("sales_transactions")
-      .upsert(insertPayload, {
-        onConflict: "amazon_event_hash",
-        ignoreDuplicates: true,
-      })
-      .select("id");
+    let inserted = 0;
+    let skipped = 0;
+    for (let i = 0; i < insertPayload.length; i += UPSERT_CHUNK) {
+      const chunk = insertPayload.slice(i, i + UPSERT_CHUNK);
+      const { data, error } = await supabase
+        .from("sales_transactions")
+        .upsert(chunk, {
+          onConflict: "amazon_event_hash",
+          ignoreDuplicates: true,
+        })
+        .select("id");
 
-    if (error) {
-      if (error.code === "42P01") {
-        return NextResponse.json(
-          {
-            error:
-              "sales_transactions テーブルが存在しません。docs/sales_transactions_table.sql を実行してください。",
-          },
-          { status: 500 }
-        );
+      if (error) {
+        if (error.code === "42P01") {
+          return NextResponse.json(
+            {
+              error:
+                "sales_transactions テーブルが存在しません。docs/sales_transactions_table.sql を実行してください。",
+            },
+            { status: 500 }
+          );
+        }
+        throw error;
       }
-      throw error;
-    }
 
-    const inserted = Array.isArray(data) ? data.length : 0;
-    const skipped = allRows.length - inserted;
+      const insertedInChunk = Array.isArray(data) ? data.length : 0;
+      inserted += insertedInChunk;
+      skipped += chunk.length - insertedInChunk;
+    }
 
     return NextResponse.json({
       ok: true,

@@ -75,6 +75,19 @@ function toTrimmedString(v: unknown): string {
   return v == null ? "" : String(v).trim();
 }
 
+async function readJsonOrTextSafe<T = unknown>(
+  res: Response
+): Promise<{ okJson: boolean; data: T | null; raw: string }> {
+  const raw = await res.text();
+  const trimmed = raw.trim();
+  if (!trimmed) return { okJson: false, data: null, raw };
+  try {
+    return { okJson: true, data: JSON.parse(trimmed) as T, raw };
+  } catch {
+    return { okJson: false, data: null, raw };
+  }
+}
+
 function buildMappingAndRows(text: string, fileName: string): ParseResult {
   // 先頭数行からヘッダーっぽい1行を取り、区切り文字推定に使う
   const firstNonEmptyLine = text
@@ -284,7 +297,7 @@ export default function AmazonOrdersImportPage() {
         body: JSON.stringify(parsed.rows),
       });
 
-      const data = (await res.json()) as {
+      const parsedRes = await readJsonOrTextSafe<{
         error?: string;
         received?: number;
         upserted?: number;
@@ -295,10 +308,13 @@ export default function AmazonOrdersImportPage() {
         skipped_cancelled_new?: number;
         cancellation_rollbacks?: number;
         errors?: unknown[];
-      };
+      }>(res);
 
+      const data = parsedRes.data;
       if (!res.ok) {
-        setError(data?.error ?? "インポートに失敗しました");
+        const rawSnippet = parsedRes.raw.trim().slice(0, 400);
+        const msg = (data && typeof data === "object" && typeof data.error === "string" ? data.error : null) ?? rawSnippet;
+        setError(msg || "インポートに失敗しました");
         setResult({
           ok: false,
           received: data?.received ?? parsed.rows.length,
@@ -310,8 +326,14 @@ export default function AmazonOrdersImportPage() {
           skipped_cancelled_new: data?.skipped_cancelled_new,
           cancellation_rollbacks: data?.cancellation_rollbacks,
           errors: parsed.rowErrors,
-          rawErrors: data?.errors ?? [],
+          rawErrors: data?.errors ?? (parsedRes.okJson ? [] : [parsedRes.raw]),
         });
+        return;
+      }
+
+      if (!parsedRes.okJson || !data) {
+        setError("サーバー応答が JSON ではありません。コンソールを確認してください。");
+        console.warn("[amazon-orders-import] non-json response:", parsedRes.raw.slice(0, 300));
         return;
       }
 
@@ -365,7 +387,7 @@ export default function AmazonOrdersImportPage() {
         body: form,
       });
 
-      const data = (await res.json()) as {
+      const parsedRes = await readJsonOrTextSafe<{
         error?: string;
         ok?: boolean;
         total_rows_read?: number;
@@ -375,14 +397,22 @@ export default function AmazonOrdersImportPage() {
         skipped_already_processed?: number;
         row_parse_warnings?: number;
         errors?: string[];
-      };
+      }>(res);
+      const data = parsedRes.data;
 
       if (!res.ok) {
-        setReturnsError(data?.error ?? "返品インポートに失敗しました");
+        const rawSnippet = parsedRes.raw.trim().slice(0, 400);
+        const msg = (data && typeof data.error === "string" ? data.error : null) ?? rawSnippet;
+        setReturnsError(msg || "返品インポートに失敗しました");
         setReturnsResult({
           ok: false,
           errors: data?.errors,
         });
+        return;
+      }
+
+      if (!parsedRes.okJson || !data) {
+        setReturnsError("サーバー応答が JSON ではありません。");
         return;
       }
 
@@ -421,7 +451,7 @@ export default function AmazonOrdersImportPage() {
         body: JSON.stringify({ csvText, fileName: file.name }),
       });
 
-      const data = (await res.json()) as {
+      const parsedRes = await readJsonOrTextSafe<{
         error?: string;
         ok?: boolean;
         rows_read?: number;
@@ -433,11 +463,19 @@ export default function AmazonOrdersImportPage() {
         message?: string;
         upserted?: number;
         row_errors?: string[];
-      };
+      }>(res);
+      const data = parsedRes.data;
 
       if (!res.ok) {
-        setSalesError(data?.error ?? "売上データのインポートに失敗しました");
+        const rawSnippet = parsedRes.raw.trim().slice(0, 400);
+        const msg = (data && typeof data.error === "string" ? data.error : null) ?? rawSnippet;
+        setSalesError(msg || "売上データのインポートに失敗しました");
         setSalesResult({ ok: false });
+        return;
+      }
+
+      if (!parsedRes.okJson || !data) {
+        setSalesError("サーバー応答が JSON ではありません。");
         return;
       }
 

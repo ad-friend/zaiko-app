@@ -70,6 +70,17 @@ async function readJsonSafe(res: Response): Promise<{ ok: boolean; status: numbe
   }
 }
 
+async function readJsonAnySafe(res: Response): Promise<{ json: unknown | null; raw: string }> {
+  const raw = await res.text();
+  const trimmed = raw.trim();
+  if (!trimmed) return { json: null, raw };
+  try {
+    return { json: JSON.parse(trimmed), raw };
+  } catch {
+    return { json: null, raw };
+  }
+}
+
 const buttonClass =
   "inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 h-10 px-6 py-2 shadow-sm active:scale-[0.98] duration-100";
 
@@ -131,9 +142,12 @@ export default function AmazonReconcileManager() {
     setError(null);
     try {
       const res = await fetch("/api/amazon/orders?status=manual_required");
-      if (!res.ok) throw new Error("注文一覧の取得に失敗しました");
-      const data = await res.json();
-      setManualOrders(Array.isArray(data) ? data : []);
+      const { json, raw } = await readJsonAnySafe(res);
+      if (!res.ok) {
+        const msg = (json && typeof json === "object" && "error" in json && typeof (json as any).error === "string" ? (json as any).error : null) ?? raw.slice(0, 300);
+        throw new Error(msg || "注文一覧の取得に失敗しました");
+      }
+      setManualOrders(Array.isArray(json) ? (json as AmazonOrder[]) : []);
     } catch (e) {
       setError(e instanceof Error ? e.message : "エラーが発生しました");
       setManualOrders([]);
@@ -189,9 +203,12 @@ export default function AmazonReconcileManager() {
     setIsLoadingPendingFinances(true);
     try {
       const res = await fetch("/api/amazon/pending-finances");
-      if (!res.ok) throw new Error("未処理財務データの取得に失敗しました");
-      const data = await res.json();
-      setPendingFinances(Array.isArray(data) ? data : []);
+      const { json, raw } = await readJsonAnySafe(res);
+      if (!res.ok) {
+        const msg = (json && typeof json === "object" && "error" in json && typeof (json as any).error === "string" ? (json as any).error : null) ?? raw.slice(0, 300);
+        throw new Error(msg || "未処理財務データの取得に失敗しました");
+      }
+      setPendingFinances(Array.isArray(json) ? (json as PendingFinanceGroupData[]) : []);
     } catch {
       setPendingFinances([]);
     } finally {
@@ -213,9 +230,13 @@ export default function AmazonReconcileManager() {
       if (orderEndDate) params.set("endDate", orderEndDate);
       const url = `/api/amazon/fetch-orders?${params}`;
       const res = await fetch(url);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "データ取得に失敗しました");
-      setFetchResult(`${data.message} (新規/更新: ${data.rowsUpserted}件)`);
+      const { json, raw } = await readJsonAnySafe(res);
+      const data = json as any;
+      if (!res.ok) {
+        const msg = (data && typeof data.error === "string" ? data.error : null) ?? raw.slice(0, 300);
+        throw new Error(msg || "データ取得に失敗しました");
+      }
+      setFetchResult(`${data?.message ?? "取得完了"} (新規/更新: ${data?.rowsUpserted ?? 0}件)`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "データ取得に失敗しました");
     } finally {
@@ -235,22 +256,29 @@ export default function AmazonReconcileManager() {
           endDate: financeEndDate,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "売上データの取得に失敗しました");
-      const total = data.totalFetched ?? 0;
-      const inserted = data.rowsInserted ?? 0;
-      const skipped = data.rowsSkipped ?? 0;
+      const { json, raw } = await readJsonAnySafe(res);
+      const data = json as any;
+      if (!res.ok) {
+        const msg = (data && typeof data.error === "string" ? data.error : null) ?? raw.slice(0, 300);
+        throw new Error(msg || "売上データの取得に失敗しました");
+      }
+      const total = data?.totalFetched ?? 0;
+      const inserted = data?.rowsInserted ?? 0;
+      const skipped = data?.rowsSkipped ?? 0;
       let message = `取得成功: ${total}件 (新規: ${inserted}件, スキップ: ${skipped}件)`;
 
       const reconcileRes = await fetch("/api/amazon/reconcile-sales", { method: "POST" });
-      const reconcileData = await reconcileRes.json();
+      const reconcileParsed = await readJsonAnySafe(reconcileRes);
+      const reconcileData = reconcileParsed.json as any;
       if (reconcileRes.ok) {
-        const reconciled = reconcileData.reconciledCount ?? 0;
-        const skippedReconcile = reconcileData.skippedCount ?? 0;
+        const reconciled = reconcileData?.reconciledCount ?? 0;
+        const skippedReconcile = reconcileData?.skippedCount ?? 0;
         message += ` / 自動消込: ${reconciled}件成功 (保留: ${skippedReconcile}件)`;
         await fetchPendingFinances();
       } else {
-        message += ` / 自動消込: 失敗 (${reconcileData.error ?? "エラー"})`;
+        const msg =
+          reconcileData && typeof reconcileData.error === "string" ? reconcileData.error : reconcileParsed.raw.slice(0, 300);
+        message += ` / 自動消込: 失敗 (${msg || "エラー"})`;
       }
 
       setFinanceResult({ message, type: "success" });
@@ -269,18 +297,17 @@ export default function AmazonReconcileManager() {
     setFinanceResult(null);
     try {
       const res = await fetch("/api/amazon/reconcile-sales", { method: "POST" });
-      const data = (await res.json()) as {
-        error?: string;
-        reconciledCount?: number;
-        skippedCount?: number;
-        message?: string;
-      };
-      if (!res.ok) throw new Error(data.error ?? "本消込に失敗しました");
-      const reconciled = data.reconciledCount ?? 0;
-      const skipped = data.skippedCount ?? 0;
+      const { json, raw } = await readJsonAnySafe(res);
+      const data = json as any;
+      if (!res.ok) {
+        const msg = data && typeof data.error === "string" ? data.error : raw.slice(0, 300);
+        throw new Error(msg || "本消込に失敗しました");
+      }
+      const reconciled = data?.reconciledCount ?? 0;
+      const skipped = data?.skippedCount ?? 0;
       setFinanceResult({
         type: "success",
-        message: data.message ?? `本消込: ${reconciled}件成功（保留: ${skipped}件）`,
+        message: data?.message ?? `本消込: ${reconciled}件成功（保留: ${skipped}件）`,
       });
       await fetchPendingFinances();
     } catch (e) {
@@ -313,23 +340,17 @@ export default function AmazonReconcileManager() {
         setReconcileLoopRound(round);
 
         const res = await fetch("/api/amazon/reconcile", { method: "POST" });
-        const data = (await res.json()) as {
-          error?: string;
-          processed?: number;
-          completed?: number;
-          manual_required?: number;
-          skipped_used_safety?: number;
-          message?: string;
-        };
-
+        const { json, raw } = await readJsonAnySafe(res);
+        const data = json as any;
         if (!res.ok) {
-          throw new Error(data.error ?? "消込に失敗しました");
+          const msg = data && typeof data.error === "string" ? data.error : raw.slice(0, 300);
+          throw new Error(msg || "消込に失敗しました");
         }
 
-        const processed = Number(data.processed ?? 0);
-        totalCompleted += Number(data.completed ?? 0);
-        totalManual += Number(data.manual_required ?? 0);
-        totalSkippedUsed += Number(data.skipped_used_safety ?? 0);
+        const processed = Number(data?.processed ?? 0);
+        totalCompleted += Number(data?.completed ?? 0);
+        totalManual += Number(data?.manual_required ?? 0);
+        totalSkippedUsed += Number(data?.skipped_used_safety ?? 0);
 
         if (processed === 0) {
           setReconcileResult({
@@ -762,7 +783,11 @@ function ManualOrderCard({
     const params = new URLSearchParams({ amazon_order_id: order.amazon_order_id });
     if (order.sku) params.set("sku", order.sku);
     fetch(`/api/amazon/orders/candidates?${params}`)
-      .then((res) => (res.ok ? res.json() : []))
+      .then(async (res) => {
+        if (!res.ok) return [];
+        const { json } = await readJsonAnySafe(res);
+        return Array.isArray(json) ? json : [];
+      })
       .then((data) => {
         const list = Array.isArray(data) ? data : [];
         if (!cancelled) {
@@ -932,8 +957,12 @@ function ManualOrderCard({
           sku: order.sku,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "確定に失敗しました");
+      const { json, raw } = await readJsonAnySafe(res);
+      const data = json as any;
+      if (!res.ok) {
+        const msg = data && typeof data.error === "string" ? data.error : raw.slice(0, 300);
+        throw new Error(msg || "確定に失敗しました");
+      }
       onConfirmed();
     } catch (e) {
       setError(e instanceof Error ? e.message : "確定に失敗しました");
