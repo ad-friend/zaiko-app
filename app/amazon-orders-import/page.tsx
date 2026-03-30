@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import Papa from "papaparse";
-import { UploadCloud, ShieldCheck, RotateCcw } from "lucide-react";
+import { UploadCloud, ShieldCheck, RotateCcw, Banknote } from "lucide-react";
 
 type AmazonOrdersImportRow = {
   amazonOrderId: string;
@@ -223,6 +223,21 @@ export default function AmazonOrdersImportPage() {
     row_parse_warnings?: number;
     errors?: string[];
   } | null>(null);
+
+  const [salesFileName, setSalesFileName] = useState<string | null>(null);
+  const [salesRunning, setSalesRunning] = useState(false);
+  const [salesError, setSalesError] = useState<string | null>(null);
+  const [salesResult, setSalesResult] = useState<{
+    ok: boolean;
+    rows_read?: number;
+    rows_after_merge?: number;
+    merged_split_payment_orders?: number;
+    merged_split_payment_extra_rows?: number;
+    message?: string;
+    upserted?: number;
+    row_errors?: string[];
+  } | null>(null);
+
   const parsedSummary = useMemo(() => {
     if (!parsePreview) return null;
     return `有効行: ${parsePreview.previewRows}件 / パース警告: ${parsePreview.previewErrors}件`;
@@ -387,6 +402,59 @@ export default function AmazonOrdersImportPage() {
     }
   };
 
+  const handleSalesFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setSalesError(null);
+    setSalesResult(null);
+    setSalesFileName(file.name);
+    setSalesRunning(true);
+
+    try {
+      const csvText = await file.text();
+      const res = await fetch("/api/amazon-sales-import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ csvText, fileName: file.name }),
+      });
+
+      const data = (await res.json()) as {
+        error?: string;
+        ok?: boolean;
+        rows_read?: number;
+        rows_after_merge?: number;
+        merged_split_payment_orders?: number;
+        merged_split_payment_extra_rows?: number;
+        message?: string;
+        upserted?: number;
+        row_errors?: string[];
+      };
+
+      if (!res.ok) {
+        setSalesError(data?.error ?? "売上データのインポートに失敗しました");
+        setSalesResult({ ok: false });
+        return;
+      }
+
+      setSalesResult({
+        ok: true,
+        rows_read: data.rows_read,
+        rows_after_merge: data.rows_after_merge,
+        merged_split_payment_orders: data.merged_split_payment_orders,
+        merged_split_payment_extra_rows: data.merged_split_payment_extra_rows,
+        message: data.message,
+        upserted: data.upserted,
+        row_errors: data.row_errors,
+      });
+    } catch (err) {
+      setSalesError(err instanceof Error ? err.message : "売上データのインポートに失敗しました");
+    } finally {
+      setSalesRunning(false);
+      e.target.value = "";
+    }
+  };
+
   return (
     <main className="flex-1 py-8 w-full max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
       <div className="space-y-6">
@@ -397,7 +465,8 @@ export default function AmazonOrdersImportPage() {
           <div>
             <h1 className="text-2xl font-bold text-slate-900">Amazon 注文レポート一括インポート</h1>
             <p className="text-sm text-slate-500">
-              注文レポート・返品レポートをそれぞれアップロードできます（返品は在庫巻き戻しと `returned` 更新）
+              注文レポート・返品レポート・トランザクション売上CSVをアップロードできます（返品は在庫巻き戻しと{" "}
+              <span className="font-mono">returned</span> 更新）
             </p>
           </div>
         </div>
@@ -543,6 +612,96 @@ export default function AmazonOrdersImportPage() {
               {error}
             </div>
           )}
+        </section>
+
+        <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div className="flex items-center gap-3 mb-3">
+            <div className="rounded-lg bg-amber-50 p-2 text-amber-800">
+              <Banknote className="h-5 w-5" />
+            </div>
+            <h2 className="text-lg font-bold text-slate-800">Amazon 売上データ（トランザクションレポート CSV/TSV）</h2>
+          </div>
+          <p className="text-sm text-slate-600 mb-4">
+            日付範囲別レポート等のトランザクション形式。必須列: 日付（<span className="font-mono">date</span> /{" "}
+            <span className="font-mono">posted date</span> 等）、注文番号（<span className="font-mono">order id</span>{" "}
+            等）、合計金額（<span className="font-mono">total</span> 等）。任意: <span className="font-mono">type</span>、
+            <span className="font-mono">sku</span>。
+            <br />
+            <span className="text-slate-500">
+              FBA 分割発送などで同一注文の「Order」系行が複数ある場合は、インポート時に金額を合算して1件の{" "}
+              <span className="font-mono">sales_transactions</span> として保存します（二重計上防止）。
+            </span>
+          </p>
+
+          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+            <div className="flex-1">
+              <input
+                type="file"
+                accept=".csv,.tsv,.txt"
+                onChange={handleSalesFileChange}
+                disabled={salesRunning}
+                className="block w-full text-sm text-slate-700"
+              />
+              {salesFileName && <p className="mt-2 text-xs text-slate-500">選択: {salesFileName}</p>}
+            </div>
+            <div className="shrink-0">
+              <button
+                type="button"
+                disabled
+                className={`${buttonClass} bg-slate-100 text-slate-400 border border-slate-200`}
+                title="ファイル選択後、自動で実行します"
+              >
+                {salesRunning ? "インポートを実行中..." : "自動実行"}
+              </button>
+            </div>
+          </div>
+
+          {salesRunning && (
+            <p className="mt-3 text-sm font-medium text-amber-800" aria-live="polite">
+              売上データを取り込み中…
+            </p>
+          )}
+
+          {salesError && (
+            <div className="mt-4 rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-800">{salesError}</div>
+          )}
+
+          {salesResult?.ok ? (
+            <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50/70 p-4">
+              <p className="font-medium text-amber-950">売上データインポート完了</p>
+              <p className="mt-2 text-sm text-amber-950/95">{salesResult.message}</p>
+              <dl className="mt-3 grid gap-2 text-sm text-amber-950 sm:grid-cols-2">
+                <div className="flex justify-between gap-2 rounded-md bg-white/80 px-3 py-2 border border-amber-100">
+                  <dt className="text-amber-900/85">読み取り行 / マージ後行</dt>
+                  <dd className="font-semibold tabular-nums">
+                    {salesResult.rows_read ?? 0} / {salesResult.rows_after_merge ?? 0}
+                  </dd>
+                </div>
+                <div className="flex justify-between gap-2 rounded-md bg-white/80 px-3 py-2 border border-amber-100">
+                  <dt className="text-amber-900/85">Upsert 件数</dt>
+                  <dd className="font-semibold tabular-nums">{salesResult.upserted ?? 0}</dd>
+                </div>
+                <div className="flex justify-between gap-2 rounded-md bg-white/80 px-3 py-2 border border-amber-100">
+                  <dt className="text-amber-900/85">分割決済をマージした注文数</dt>
+                  <dd className="font-semibold tabular-nums">{salesResult.merged_split_payment_orders ?? 0}</dd>
+                </div>
+                <div className="flex justify-between gap-2 rounded-md bg-white/80 px-3 py-2 border border-amber-100">
+                  <dt className="text-amber-900/85">合算した余分行数</dt>
+                  <dd className="font-semibold tabular-nums">{salesResult.merged_split_payment_extra_rows ?? 0}</dd>
+                </div>
+              </dl>
+              {salesResult.row_errors && salesResult.row_errors.length > 0 && (
+                <div className="mt-3 text-xs text-amber-950/90">
+                  <p className="font-medium">行レベル警告（先頭）</p>
+                  <ul className="list-disc pl-5 mt-1 space-y-1 max-h-32 overflow-auto">
+                    {salesResult.row_errors.slice(0, 10).map((x, idx) => (
+                      <li key={idx}>{x}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          ) : null}
         </section>
 
         <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
