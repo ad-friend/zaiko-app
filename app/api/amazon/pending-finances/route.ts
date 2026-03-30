@@ -29,16 +29,20 @@ export type PendingFinanceGroup = {
 
 export async function GET() {
   try {
-    const shouldExcludeByType = (transactionType: unknown, amountType: unknown): boolean => {
+    const shouldExcludeByType = (transactionType: unknown, amountType: unknown, amountDescription: unknown): boolean => {
       const tt = String(transactionType ?? "");
       const at = String(amountType ?? "");
+      const ad = String(amountDescription ?? "");
       return (
         tt.includes("PostageBilling") ||
         at.includes("PostageBilling") ||
+        ad.includes("PostageBilling") ||
         tt.includes("ServiceFee") ||
         at.includes("ServiceFee") ||
+        ad.includes("ServiceFee") ||
         tt.includes("adj_") ||
-        at.includes("adj_")
+        at.includes("adj_") ||
+        ad.includes("adj_")
       );
     };
 
@@ -75,7 +79,9 @@ export async function GET() {
     let list = (rows ?? []) as PendingFinanceDetail[];
 
     // 経費・調整として扱うものだけを除外（部分一致）。Order/Refund 等の通常データは絶対に落とさない。
-    list = list.filter((row) => !shouldExcludeByType((row as any).transaction_type, (row as any).amount_type));
+    list = list.filter((row) =>
+      !shouldExcludeByType((row as any).transaction_type, (row as any).amount_type, (row as any).amount_description)
+    );
 
     const groupMap = new Map<string, PendingFinanceDetail[]>();
 

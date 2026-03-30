@@ -49,19 +49,23 @@ function toNumber(v: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-function isExpenseSkipTx(row: Pick<TxRow, "amount_type" | "transaction_type">): boolean {
+function isExpenseSkipTx(row: Pick<TxRow, "amount_type" | "transaction_type" | "amount_description">): boolean {
   // このAPIでは transaction_type は常に "Order" を取得している想定だが、
   // 要件通り amount_type / transaction_type の両方に文字列が含まれる場合に除外する。
   const amountType = String(row.amount_type ?? "");
   const txType = String(row.transaction_type ?? "");
+  const desc = String(row.amount_description ?? "");
 
   return (
     amountType.includes("PostageBilling") ||
     txType.includes("PostageBilling") ||
+    desc.includes("PostageBilling") ||
     amountType.includes("adj_") ||
     txType.includes("adj_") ||
+    desc.includes("adj_") ||
     amountType.includes("ServiceFee") ||
-    txType.includes("ServiceFee")
+    txType.includes("ServiceFee") ||
+    desc.includes("ServiceFee")
   );
 }
 
@@ -178,7 +182,7 @@ export async function POST() {
         const sku = String(r.sku ?? "").trim();
         if (!orderId || !sku) continue;
         // 経費扱いは Refund 側では想定しないが、要件の「競合しない分岐」のため最上流で除外
-        if (isExpenseSkipTx({ amount_type: r.amount_type, transaction_type: r.transaction_type })) {
+        if (isExpenseSkipTx({ amount_type: r.amount_type, transaction_type: r.transaction_type, amount_description: r.amount_description })) {
           await markSalesTxReconciled([r.id]);
           continue;
         }
@@ -221,7 +225,9 @@ export async function POST() {
 
     for (const [amazonOrderId, txGroup] of byOrder) {
       // 経費/調整（在庫紐づけ不要）を先にスキップして処理済みにする
-      const expenseTx = txGroup.filter((r) => isExpenseSkipTx({ amount_type: r.amount_type, transaction_type: r.transaction_type }));
+      const expenseTx = txGroup.filter((r) =>
+        isExpenseSkipTx({ amount_type: r.amount_type, transaction_type: r.transaction_type, amount_description: r.amount_description })
+      );
       if (expenseTx.length) await markSalesTxReconciled(expenseTx.map((r) => r.id));
 
       // 通常の在庫紐づけ対象のみで以降のロジックを回す

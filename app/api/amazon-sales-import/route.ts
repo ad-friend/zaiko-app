@@ -16,11 +16,11 @@ const UPSERT_CHUNK = 200;
 type LogicalTxKind = "Principal" | "Tax" | "Commission" | "FBA Per Unit Fulfillment Fee" | "Other";
 
 type DetailRow = {
-  amazon_order_id: string;
+  amazon_order_id: string | null;
   posted_iso: string;
   sku: string | null;
-  transaction_type: "Order";
-  amount_type: "Charge" | "Fee";
+  transaction_type: string;
+  amount_type: string;
   amount_description: string;
   amount: number;
 };
@@ -117,6 +117,12 @@ function isOrderKindRowType(raw: string): boolean {
   return false;
 }
 
+function isExpenseLikeRowType(raw: string): boolean {
+  const t = raw.normalize("NFKC").trim();
+  if (!t) return false;
+  return t.includes("PostageBilling") || t.includes("ServiceFee") || t.includes("adj_");
+}
+
 /** 手数料は負数で統一（Finances API と同様） */
 function signedForKind(kind: LogicalTxKind, amount: number): number {
   if (kind === "Principal" || kind === "Tax") return amount;
@@ -143,6 +149,11 @@ function logicalToAmountTypes(kind: LogicalTxKind): { amount_type: "Charge" | "F
 /** 同一注文・同一内訳で再インポートしても上書きできる安定ハッシュ */
 function hashMergedDetail(orderId: string, amountType: string, amountDescription: string): string {
   const raw = ["AmazonTxCsvV3", orderId.trim(), amountType, amountDescription].join("|");
+  return createHash("sha256").update(raw).digest("hex");
+}
+
+function hashStandaloneExpense(txType: string, amountType: string, postedIso: string, amount: number, seq: number): string {
+  const raw = ["AmazonTxCsvExpenseV1", txType.trim(), amountType.trim(), postedIso, String(amount), String(seq)].join("|");
   return createHash("sha256").update(raw).digest("hex");
 }
 
@@ -292,6 +303,9 @@ export async function POST(request: NextRequest) {
       if (key) amountHeaderByKind.set(col.kind, key);
     }
 
+    // オーダー番号が空の行（送金/調整/経費など）の取り込み用。レポートによっては金額列が total しか無いケースがある。
+    const hTotalFallback = pickHeaderKey(headers, ["total", "amount", "合計", "合計金額", "金額", "total amount"]);
+
     if (!hDate || !hOrder) {
       return NextResponse.json(
         {
@@ -302,7 +316,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (amountHeaderByKind.size === 0) {
+    if (amountHeaderByKind.size === 0 && !hTotalFallback) {
       return NextResponse.json(
         {
           error:
@@ -323,17 +337,15 @@ export async function POST(request: NextRequest) {
       const orderId = toTrimmedString(r[hOrder]);
       const dateRaw = toTrimmedString(r[hDate]);
       const typeRaw = hType ? toTrimmedString(r[hType]) : "";
+      const expenseLike = hType ? isExpenseLikeRowType(typeRaw) : false;
 
-      if (!orderId) {
-        rowErrors.push(`行 ${i + 2 + skippedPrefixLines}: オーダー番号が空です。`);
-        continue;
-      }
       if (!dateRaw) {
         rowErrors.push(`行 ${i + 2 + skippedPrefixLines}: 日付が空です（注文 ${orderId}）。`);
         continue;
       }
 
-      if (hType && !isOrderKindRowType(typeRaw)) {
+      // オーダー系はこれまで通り。オーダー番号が空の行は「集計用の金の動き」として取り込み対象にする。
+      if (hType && !isOrderKindRowType(typeRaw) && !expenseLike && orderId) {
         continue;
       }
 
@@ -347,6 +359,32 @@ export async function POST(request: NextRequest) {
 
       const skuRaw = hSku ? toTrimmedString(r[hSku]) : "";
       const sku = skuRaw ? skuRaw : null;
+
+      if (!orderId) {
+        // オーダー番号が空でも取り込みは許可（集計用）。
+        // ただし金額が取れないと意味がないので total/amount にフォールバックする。
+        if (!hTotalFallback) {
+          rowErrors.push(`行 ${i + 2 + skippedPrefixLines}: オーダー番号が空で、かつ金額列（total等）も見つかりません。`);
+          continue;
+        }
+        const rawCell = toTrimmedString(r[hTotalFallback]);
+        const num = rawCell ? parseMoneyToNumber(rawCell) : null;
+        if (num == null || num === 0) {
+          rowErrors.push(`行 ${i + 2 + skippedPrefixLines}: オーダー番号が空ですが、金額が空/0です。`);
+          continue;
+        }
+        const tt = typeRaw || "Adjustment";
+        expanded.push({
+          amazon_order_id: null,
+          posted_iso: postedIso,
+          sku,
+          transaction_type: tt,
+          amount_type: tt, // 文字列仕分け（PostageBilling/ServiceFee/adj_ 等）に使う
+          amount_description: `Transaction report CSV — ${tt}`,
+          amount: Math.round(num * 100) / 100,
+        });
+        continue;
+      }
 
       for (const [kind, headerName] of amountHeaderByKind) {
         const rawCell = toTrimmedString(r[headerName]);
@@ -398,7 +436,7 @@ export async function POST(request: NextRequest) {
     >();
 
     const mergeKeyOf = (d: DetailRow): MergeKey =>
-      [d.amazon_order_id.trim(), d.transaction_type, d.amount_type, d.amount_description].join("\u0001");
+      [d.amazon_order_id ?? "", d.transaction_type, d.amount_type, d.amount_description].join("\u0001");
 
     let mergeExtraRows = 0;
     const ordersThatMerged = new Set<string>();
@@ -420,24 +458,30 @@ export async function POST(request: NextRequest) {
         }
         if (!cur.sku && d.sku) cur.sku = d.sku;
         mergeExtraRows += 1;
-        ordersThatMerged.add(d.amazon_order_id.trim());
+        if (d.amazon_order_id) ordersThatMerged.add(d.amazon_order_id.trim());
       }
     }
 
     const mergedSplitPaymentOrders = ordersThatMerged.size;
     const mergedSplitPaymentExtraRows = mergeExtraRows;
 
+    let expenseSeq = 0;
     const insertPayload = [...mergeMap.entries()].map(([key, v]) => {
       const orderId = key.split("\u0001")[0] ?? "";
+      const txType = key.split("\u0001")[1] ?? "Order";
+      if (!orderId || txType !== "Order") expenseSeq += 1;
       return {
-        amazon_order_id: orderId,
+        amazon_order_id: orderId || null,
         sku: v.sku,
-        transaction_type: "Order" as const,
+        transaction_type: txType,
         amount_type: v.amount_type,
         amount_description: `Transaction report CSV — ${v.amount_description}`,
         amount: Math.round(v.amount * 100) / 100,
         posted_date: v.posted_iso,
-        amazon_event_hash: hashMergedDetail(orderId, v.amount_type, v.amount_description),
+        amazon_event_hash:
+          orderId && txType === "Order"
+            ? hashMergedDetail(orderId, v.amount_type, v.amount_description)
+            : hashStandaloneExpense(txType, v.amount_type, v.posted_iso, v.amount, expenseSeq),
       };
     });
 
