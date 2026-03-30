@@ -4,8 +4,10 @@ import { supabase } from "@/lib/supabase";
 
 const UPSERT_CHUNK = 500;
 
+/** 全角英数字・見えない空白を吸収しつつ、大文字小文字無視で列名を比較する */
 function normalizeHeaderKey(s: string): string {
   return s
+    .normalize("NFKC")
     .toLowerCase()
     .trim()
     .replace(/\u3000/g, " ")
@@ -69,16 +71,33 @@ function parseActiveListingsTsv(text: string): {
   }
 
   const headers = (parsed.meta.fields ?? []).filter((h): h is string => typeof h === "string");
-  const skuHeader = pickHeaderKey(headers, ["seller-sku", "sellersku", "sku"]);
-  const asinHeader = pickHeaderKey(headers, ["asin1", "asin"]);
-  const conditionHeader = pickHeaderKey(headers, ["item-condition", "itemcondition", "condition"]);
+  // 英語・日本語セラーセントラル双方の列名（normalizeHeaderKey で比較）
+  const skuHeader = pickHeaderKey(headers, [
+    "seller-sku",
+    "sellersku",
+    "sku",
+    "出品者sku",
+    "出品者SKU",
+  ]);
+  const asinHeader = pickHeaderKey(headers, [
+    "asin1",
+    "asin",
+    "ASIN 1",
+    "asin 1",
+  ]);
+  const conditionHeader = pickHeaderKey(headers, [
+    "item-condition",
+    "itemcondition",
+    "condition",
+    "コンディション",
+  ]);
 
   if (!skuHeader || !asinHeader || !conditionHeader) {
     return {
       rows: [],
       parseErrors: [
         ...parseErrors,
-        "必須列が見つかりません。seller-sku / asin1（または asin）/ item-condition が必要です。",
+        "必須列が見つかりません。次のいずれかの列が必要です: seller-sku（出品者SKU）/ asin1・ASIN 1・asin / item-condition（コンディション）。",
       ],
     };
   }

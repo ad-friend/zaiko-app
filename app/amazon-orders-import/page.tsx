@@ -230,7 +230,9 @@ export default function AmazonOrdersImportPage() {
   const [salesResult, setSalesResult] = useState<{
     ok: boolean;
     rows_read?: number;
+    rows_expanded?: number;
     rows_after_merge?: number;
+    skipped_prefix_lines?: number;
     merged_split_payment_orders?: number;
     merged_split_payment_extra_rows?: number;
     message?: string;
@@ -423,7 +425,9 @@ export default function AmazonOrdersImportPage() {
         error?: string;
         ok?: boolean;
         rows_read?: number;
+        rows_expanded?: number;
         rows_after_merge?: number;
+        skipped_prefix_lines?: number;
         merged_split_payment_orders?: number;
         merged_split_payment_extra_rows?: number;
         message?: string;
@@ -440,7 +444,9 @@ export default function AmazonOrdersImportPage() {
       setSalesResult({
         ok: true,
         rows_read: data.rows_read,
+        rows_expanded: data.rows_expanded,
         rows_after_merge: data.rows_after_merge,
+        skipped_prefix_lines: data.skipped_prefix_lines,
         merged_split_payment_orders: data.merged_split_payment_orders,
         merged_split_payment_extra_rows: data.merged_split_payment_extra_rows,
         message: data.message,
@@ -628,8 +634,8 @@ export default function AmazonOrdersImportPage() {
             <span className="font-mono">sku</span>。
             <br />
             <span className="text-slate-500">
-              FBA 分割発送などで同一注文の「Order」系行が複数ある場合は、インポート時に金額を合算して1件の{" "}
-              <span className="font-mono">sales_transactions</span> として保存します（二重計上防止）。
+              先頭のタイトル行は自動でスキップします。金額列は Principal / Tax / 手数料などに縦展開し、同一注文×種別は合算して{" "}
+              <span className="font-mono">sales_transactions</span> に保存します（分割発送の二重計上防止）。
             </span>
           </p>
 
@@ -671,10 +677,15 @@ export default function AmazonOrdersImportPage() {
               <p className="font-medium text-amber-950">売上データインポート完了</p>
               <p className="mt-2 text-sm text-amber-950/95">{salesResult.message}</p>
               <dl className="mt-3 grid gap-2 text-sm text-amber-950 sm:grid-cols-2">
+                {(salesResult.skipped_prefix_lines ?? 0) > 0 && (
+                  <p className="text-xs text-amber-900/80 mb-2">
+                    先頭の説明行を {salesResult.skipped_prefix_lines} 行スキップしました。
+                  </p>
+                )}
                 <div className="flex justify-between gap-2 rounded-md bg-white/80 px-3 py-2 border border-amber-100">
-                  <dt className="text-amber-900/85">読み取り行 / マージ後行</dt>
+                  <dt className="text-amber-900/85">データ行 / 縦展開 / Upsert行</dt>
                   <dd className="font-semibold tabular-nums">
-                    {salesResult.rows_read ?? 0} / {salesResult.rows_after_merge ?? 0}
+                    {salesResult.rows_read ?? 0} / {salesResult.rows_expanded ?? 0} / {salesResult.rows_after_merge ?? 0}
                   </dd>
                 </div>
                 <div className="flex justify-between gap-2 rounded-md bg-white/80 px-3 py-2 border border-amber-100">

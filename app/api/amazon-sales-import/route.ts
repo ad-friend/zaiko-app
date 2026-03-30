@@ -1,6 +1,8 @@
 /**
- * Amazon 日付範囲別レポート等の「トランザクション」CSV/TSV を sales_transactions に取り込む。
- * 同一注文・Order 系の分割行は金額合算して1行にマージ（二重計上防止）。
+ * Amazon 日付範囲別レポートのトランザクション CSV/TSV を sales_transactions に取り込む。
+ * - 先頭のタイトル行をスキップしてからパース
+ * - 1 CSV 行を金額列ごとに縦持ち（Finances API 相当: transaction_type=Order, amount_type=Charge/Fee）
+ * - 同一 order_id × 内訳種別で分割発送行をマージ
  */
 import { NextRequest, NextResponse } from "next/server";
 import { createHash } from "crypto";
@@ -8,8 +10,24 @@ import Papa from "papaparse";
 import { supabase } from "@/lib/supabase";
 import { parseFlexiblePostedDateToIso } from "@/lib/settlement-posted-date";
 
+const UPSERT_CHUNK = 200;
+
+/** 論理内訳（レスポンス・マージキー）。DB では amount_description に載せる */
+type LogicalTxKind = "Principal" | "Tax" | "Commission" | "FBA Per Unit Fulfillment Fee" | "Other";
+
+type DetailRow = {
+  amazon_order_id: string;
+  posted_iso: string;
+  sku: string | null;
+  transaction_type: "Order";
+  amount_type: "Charge" | "Fee";
+  amount_description: string;
+  amount: number;
+};
+
 function normalizeHeaderKey(s: string): string {
   return s
+    .normalize("NFKC")
     .toLowerCase()
     .trim()
     .replace(/\u3000/g, " ")
@@ -54,69 +72,138 @@ function toTrimmedString(v: unknown): string {
   return v == null ? "" : String(v).trim();
 }
 
-/** 売上系は同一注文でマージ対象（FBA 分割発送の複数 Order 行など） */
-function shouldMergeSplitPayments(classified: "Order" | "Refund" | "Fee" | "Other"): boolean {
-  return classified === "Order";
+/** 先頭の説明行・空行を除き、実ヘッダー行から始まるテキストを返す（見つからなければ全文を返す） */
+function sliceFromTransactionHeader(csvText: string): { body: string; skippedPrefixLines: number } {
+  const bomStripped = csvText.replace(/^\uFEFF/, "");
+  const lines = bomStripped.split(/\r?\n/);
+  for (let start = 0; start < lines.length; start++) {
+    const line = lines[start];
+    if (!line || !line.trim()) continue;
+    if (lineLooksLikeTransactionHeader(line)) {
+      return { body: lines.slice(start).join("\n"), skippedPrefixLines: start };
+    }
+  }
+  return { body: bomStripped.trim(), skippedPrefixLines: 0 };
 }
 
-function classifyTransactionType(raw: string): "Order" | "Refund" | "Fee" | "Other" {
-  const t = raw.trim().toLowerCase();
-  if (!t) return "Order";
-  if (t.includes("refund")) return "Refund";
-  if (t.includes("fee") || t.includes("commission") || t.includes("subscription") || t.includes("chargeback")) {
-    return "Fee";
-  }
+function lineLooksLikeTransactionHeader(line: string): boolean {
+  const t = line.replace(/^\uFEFF/, "").trim();
+  if (t.length < 8) return false;
+  const n = t.normalize("NFKC");
+  const hasOrder =
+    /オーダー番号|注文番号|order[\s_-]*id|amazon[\s_-]*order[\s_-]*id|amazon-order-id/i.test(n) ||
+    /"order\s*id"/i.test(n);
+  const hasDate =
+    /日付[\/／]時刻|(?<![\w])日付(?![\w])|posted\s*date|posting\s*date|transaction\s*date|date[\/／]time/i.test(
+      n
+    );
+  return hasOrder && hasDate;
+}
+
+function isOrderKindRowType(raw: string): boolean {
+  const t = raw.normalize("NFKC").trim().toLowerCase();
+  if (!t) return false;
+  if (/refund|返金|返品|chargeback|チャージバック/.test(t)) return false;
   if (
-    t.includes("order") ||
+    /\border\b/.test(t) ||
+    t.includes("注文") ||
     t.includes("shipment") ||
-    t === "sale" ||
-    (t.includes("sale") && !t.includes("refund"))
+    t.includes("配送") ||
+    t.includes("sale") ||
+    t.includes("発送")
   ) {
-    return "Order";
+    return true;
   }
-  return "Other";
+  return false;
 }
 
-function dbTransactionType(c: "Order" | "Refund" | "Fee" | "Other"): string {
-  if (c === "Other") return "Adjustment";
-  return c;
+/** 手数料は負数で統一（Finances API と同様） */
+function signedForKind(kind: LogicalTxKind, amount: number): number {
+  if (kind === "Principal" || kind === "Tax") return amount;
+  const a = Math.abs(amount);
+  return -a;
 }
 
-function dbAmountType(c: "Order" | "Refund" | "Fee" | "Other"): string {
-  if (c === "Order") return "Sell";
-  if (c === "Refund") return "Refund";
-  if (c === "Fee") return "Fee";
-  return "Other";
+function logicalToAmountTypes(kind: LogicalTxKind): { amount_type: "Charge" | "Fee"; amount_description: string } {
+  switch (kind) {
+    case "Principal":
+      return { amount_type: "Charge", amount_description: "Principal" };
+    case "Tax":
+      return { amount_type: "Charge", amount_description: "Tax" };
+    case "Commission":
+      return { amount_type: "Fee", amount_description: "Commission" };
+    case "FBA Per Unit Fulfillment Fee":
+      return { amount_type: "Fee", amount_description: "FBA Per Unit Fulfillment Fee" };
+    case "Other":
+    default:
+      return { amount_type: "Fee", amount_description: "Other" };
+  }
 }
 
-/** マージ済み Order 行は注文単位で安定したハッシュ（再取込で上書き） */
-function hashMergedOrder(amazonOrderId: string): string {
-  const raw = ["AmazonTxReportMergedV1", "Order", "Sell", amazonOrderId.trim()].join("|");
+/** 同一注文・同一内訳で再インポートしても上書きできる安定ハッシュ */
+function hashMergedDetail(orderId: string, amountType: string, amountDescription: string): string {
+  const raw = ["AmazonTxCsvV3", orderId.trim(), amountType, amountDescription].join("|");
   return createHash("sha256").update(raw).digest("hex");
 }
 
-function hashStandaloneRow(
-  amazonOrderId: string,
-  transactionType: string,
-  amountType: string,
-  postedIso: string,
-  amount: number,
-  seq: number
-): string {
-  const raw = ["AmazonTxReportRowV1", amazonOrderId, transactionType, amountType, postedIso, String(amount), String(seq)].join("|");
-  return createHash("sha256").update(raw).digest("hex");
-}
-
-type ParsedRow = {
-  amazon_order_id: string;
-  posted_raw: string;
-  posted_iso: string;
-  amount: number;
-  classified: ReturnType<typeof classifyTransactionType>;
-  sku: string | null;
+type AmountColumnDef = {
+  kind: LogicalTxKind;
+  headerCandidates: string[];
 };
 
-const UPSERT_CHUNK = 150;
+const AMOUNT_COLUMNS: AmountColumnDef[] = [
+  {
+    kind: "Principal",
+    headerCandidates: [
+      "商品売上",
+      "product sales",
+      "principal",
+      "商品の売上",
+      "product charges",
+      "売上",
+    ],
+  },
+  {
+    kind: "Tax",
+    headerCandidates: [
+      "商品の売上税",
+      "product sales tax",
+      "tax",
+      "売上税",
+      "商品売上税",
+    ],
+  },
+  {
+    kind: "Commission",
+    headerCandidates: [
+      "Amazon手数料",
+      "amazon fees",
+      "selling fees",
+      "referral fee",
+      "commission",
+    ],
+  },
+  {
+    kind: "FBA Per Unit Fulfillment Fee",
+    headerCandidates: [
+      "FBA 手数料",
+      "FBA手数料",
+      "fba fees",
+      "fba fulfillment fee",
+      "fba per unit fulfillment fee",
+    ],
+  },
+  {
+    kind: "Other",
+    headerCandidates: [
+      "その他トランザクション手数料",
+      "その他のトランザクション手数料",
+      "other transaction fees",
+      "other fees",
+      "miscellaneous",
+    ],
+  },
+];
 
 export async function POST(request: NextRequest) {
   try {
@@ -128,61 +215,68 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "csvText にファイル内容を渡してください。" }, { status: 400 });
     }
 
+    const { body: slicedText, skippedPrefixLines } = sliceFromTransactionHeader(csvText);
+
     const firstNonEmptyLine =
-      csvText
-        .replace(/^\uFEFF/, "")
+      slicedText
         .split(/\r?\n/)
         .map((l) => l.trim())
         .find((l) => l.length > 0) ?? "";
 
+    if (!firstNonEmptyLine) {
+      return NextResponse.json({ error: "ヘッダー行が見つかりません（日付・オーダー番号を含む行がありません）。" }, { status: 400 });
+    }
+
     const delimiter = guessDelimiter(fileName, firstNonEmptyLine);
 
-    const parsed = Papa.parse<Record<string, string>>(csvText, {
+    const parsed = Papa.parse<Record<string, string>>(slicedText, {
       header: true,
       delimiter: delimiter === "\t" ? "\t" : ",",
       skipEmptyLines: "greedy",
     });
 
     if (parsed.errors?.length) {
-      const msg = parsed.errors.map((e) => e.message).join("; ");
-      return NextResponse.json({ error: `CSV パースエラー: ${msg}` }, { status: 400 });
+      const critical = parsed.errors.filter((e) => e.type === "FieldMismatch" || e.type === "Quotes");
+      if (critical.length) {
+        const msg = critical.map((e) => e.message).join("; ");
+        return NextResponse.json(
+          {
+            error: `CSV パースエラー: ${msg}`,
+            hint: skippedPrefixLines > 0 ? `先頭 ${skippedPrefixLines} 行をスキップ済みです。` : undefined,
+          },
+          { status: 400 }
+        );
+      }
     }
 
     const headers = (parsed.meta.fields ?? []).filter((h): h is string => typeof h === "string" && h.trim().length > 0);
 
     const hDate = pickHeaderKey(headers, [
+      "日付/時刻",
+      "日付／時刻",
+      "日付",
       "date",
       "posted date",
       "posteddate",
       "transaction date",
       "posting date",
       "settlement date",
-      "日付",
+      "date/time",
       "決済日",
-      "投稿日",
       "トランザクション日付",
     ]);
     const hOrder = pickHeaderKey(headers, [
+      "オーダー番号",
+      "注文番号",
       "order id",
       "orderid",
       "amazon order id",
       "amazon-order-id",
       "amazonorderid",
-      "注文番号",
       "注文id",
     ]);
-    const hTotal = pickHeaderKey(headers, [
-      "total",
-      "amount",
-      "product sales",
-      "product sales price",
-      "total amount",
-      "合計",
-      "金額",
-      "売上",
-      "product charges",
-    ]);
     const hType = pickHeaderKey(headers, [
+      "トランザクションの種類",
       "type",
       "transaction type",
       "transactiontype",
@@ -190,13 +284,29 @@ export async function POST(request: NextRequest) {
       "トランザクションタイプ",
       "タイプ",
     ]);
-    const hSku = pickHeaderKey(headers, ["sku", "seller-sku", "sellersku", "SKU", "商品sku"]);
+    const hSku = pickHeaderKey(headers, ["sku", "seller-sku", "sellersku", "SKU", "出品者sku", "商品sku"]);
 
-    if (!hDate || !hOrder || !hTotal) {
+    const amountHeaderByKind = new Map<LogicalTxKind, string>();
+    for (const col of AMOUNT_COLUMNS) {
+      const key = pickHeaderKey(headers, col.headerCandidates);
+      if (key) amountHeaderByKind.set(col.kind, key);
+    }
+
+    if (!hDate || !hOrder) {
       return NextResponse.json(
         {
           error:
-            "必須列が見つかりません。日付（date / posted date 等）・注文番号（order id 等）・合計金額（total 等）の列が必要です。",
+            "必須列が見つかりません。日付（日付/時刻・日付・posted date 等）とオーダー番号（オーダー番号・order id 等）が必要です。",
+        },
+        { status: 400 }
+      );
+    }
+
+    if (amountHeaderByKind.size === 0) {
+      return NextResponse.json(
+        {
+          error:
+            "金額列が1つも見つかりません。商品売上・商品の売上税・Amazon手数料・FBA 手数料・その他トランザクション手数料等の列が必要です。",
         },
         { status: 400 }
       );
@@ -204,7 +314,7 @@ export async function POST(request: NextRequest) {
 
     const data = Array.isArray(parsed.data) ? parsed.data : [];
     const rowErrors: string[] = [];
-    const parsedRows: ParsedRow[] = [];
+    const expanded: DetailRow[] = [];
 
     for (let i = 0; i < data.length; i++) {
       const r = data[i];
@@ -212,145 +322,132 @@ export async function POST(request: NextRequest) {
 
       const orderId = toTrimmedString(r[hOrder]);
       const dateRaw = toTrimmedString(r[hDate]);
-      const totalRaw = toTrimmedString(r[hTotal]);
       const typeRaw = hType ? toTrimmedString(r[hType]) : "";
-      const skuRaw = hSku ? toTrimmedString(r[hSku]) : "";
 
       if (!orderId) {
-        rowErrors.push(`行 ${i + 2}: 注文番号が空です。`);
+        rowErrors.push(`行 ${i + 2 + skippedPrefixLines}: オーダー番号が空です。`);
         continue;
       }
       if (!dateRaw) {
-        rowErrors.push(`行 ${i + 2}: 日付が空です（注文 ${orderId}）。`);
+        rowErrors.push(`行 ${i + 2 + skippedPrefixLines}: 日付が空です（注文 ${orderId}）。`);
         continue;
       }
 
-      const postedIso = parseFlexiblePostedDateToIso(dateRaw) ?? (Date.parse(dateRaw) ? new Date(Date.parse(dateRaw)).toISOString() : null);
+      if (hType && !isOrderKindRowType(typeRaw)) {
+        continue;
+      }
+
+      const postedIso =
+        parseFlexiblePostedDateToIso(dateRaw) ??
+        (Date.parse(dateRaw) ? new Date(Date.parse(dateRaw)).toISOString() : null);
       if (!postedIso) {
-        rowErrors.push(`行 ${i + 2}: 日付を解釈できません（${dateRaw}）。`);
+        rowErrors.push(`行 ${i + 2 + skippedPrefixLines}: 日付を解釈できません（${dateRaw}）。`);
         continue;
       }
 
-      const amount = parseMoneyToNumber(totalRaw);
-      if (amount == null) {
-        rowErrors.push(`行 ${i + 2}: 金額が数値として解釈できません（注文 ${orderId}）。`);
-        continue;
+      const skuRaw = hSku ? toTrimmedString(r[hSku]) : "";
+      const sku = skuRaw ? skuRaw : null;
+
+      for (const [kind, headerName] of amountHeaderByKind) {
+        const rawCell = toTrimmedString(r[headerName]);
+        if (!rawCell) continue;
+        const num = parseMoneyToNumber(rawCell);
+        if (num == null) {
+          rowErrors.push(
+            `行 ${i + 2 + skippedPrefixLines}: 金額が数値として解釈できません（${orderId} / ${headerName}）。`
+          );
+          continue;
+        }
+        if (num === 0) continue;
+
+        const signed = signedForKind(kind, num);
+        const { amount_type, amount_description } = logicalToAmountTypes(kind);
+
+        expanded.push({
+          amazon_order_id: orderId,
+          posted_iso: postedIso,
+          sku,
+          transaction_type: "Order",
+          amount_type,
+          amount_description,
+          amount: signed,
+        });
       }
-
-      const classified = classifyTransactionType(typeRaw);
-
-      parsedRows.push({
-        amazon_order_id: orderId,
-        posted_raw: dateRaw,
-        posted_iso: postedIso,
-        amount,
-        classified,
-        sku: skuRaw ? skuRaw : null,
-      });
     }
 
-    if (!parsedRows.length) {
+    if (!expanded.length) {
       return NextResponse.json({
         ok: true,
-        rows_read: 0,
+        skipped_prefix_lines: skippedPrefixLines,
+        rows_read: data.length,
+        rows_expanded: 0,
         rows_after_merge: 0,
         merged_split_payment_orders: 0,
         merged_split_payment_extra_rows: 0,
-        message: "取り込む有効行がありません。",
+        message: "取り込む有効行がありません（注文種別の行に金額が無い、または列が空です）。",
         upserted: 0,
         row_errors: rowErrors.slice(0, 50),
       });
     }
 
-    /** マージ: Order かつ同一 amazon_order_id */
-    const orderMergeMap = new Map<string, { amount: number; posted_iso: string; sku: string | null }>();
-    const nonMergeRows: ParsedRow[] = [];
+    /** order_id × transaction_type(内訳は amount_description) × amount_type でマージ */
+    type MergeKey = string;
+    const mergeMap = new Map<
+      MergeKey,
+      { amount: number; posted_iso: string; sku: string | null; amount_type: string; amount_description: string }
+    >();
+
+    const mergeKeyOf = (d: DetailRow): MergeKey =>
+      [d.amazon_order_id.trim(), d.transaction_type, d.amount_type, d.amount_description].join("\u0001");
+
     let mergeExtraRows = 0;
-
-    for (const row of parsedRows) {
-      if (!shouldMergeSplitPayments(row.classified)) {
-        nonMergeRows.push(row);
-        continue;
-      }
-
-      const key = row.amazon_order_id.trim();
-      const existing = orderMergeMap.get(key);
-      if (!existing) {
-        orderMergeMap.set(key, {
-          amount: row.amount,
-          posted_iso: row.posted_iso,
-          sku: row.sku,
+    const ordersThatMerged = new Set<string>();
+    for (const d of expanded) {
+      const k = mergeKeyOf(d);
+      const cur = mergeMap.get(k);
+      if (!cur) {
+        mergeMap.set(k, {
+          amount: d.amount,
+          posted_iso: d.posted_iso,
+          sku: d.sku,
+          amount_type: d.amount_type,
+          amount_description: d.amount_description,
         });
       } else {
-        existing.amount += row.amount;
-        if (Date.parse(row.posted_iso) < Date.parse(existing.posted_iso)) {
-          existing.posted_iso = row.posted_iso;
+        cur.amount += d.amount;
+        if (Date.parse(d.posted_iso) < Date.parse(cur.posted_iso)) {
+          cur.posted_iso = d.posted_iso;
         }
-        if (!existing.sku && row.sku) existing.sku = row.sku;
+        if (!cur.sku && d.sku) cur.sku = d.sku;
         mergeExtraRows += 1;
+        ordersThatMerged.add(d.amazon_order_id.trim());
       }
     }
 
-    const orderRowCounts = new Map<string, number>();
-    for (const row of parsedRows) {
-      if (!shouldMergeSplitPayments(row.classified)) continue;
-      const k = row.amazon_order_id.trim();
-      orderRowCounts.set(k, (orderRowCounts.get(k) ?? 0) + 1);
-    }
-    const mergedSplitPaymentOrders = [...orderRowCounts.values()].filter((c) => c > 1).length;
-
+    const mergedSplitPaymentOrders = ordersThatMerged.size;
     const mergedSplitPaymentExtraRows = mergeExtraRows;
 
-    const insertRows: Array<{
-      amazon_order_id: string;
-      sku: string | null;
-      transaction_type: string;
-      amount_type: string;
-      amount_description: string | null;
-      amount: number;
-      posted_date: string;
-      amazon_event_hash: string;
-    }> = [];
-
-    let hashSeq = 0;
-    for (const [orderId, agg] of orderMergeMap) {
-      const tt = dbTransactionType("Order");
-      const at = dbAmountType("Order");
-      insertRows.push({
+    const insertPayload = [...mergeMap.entries()].map(([key, v]) => {
+      const orderId = key.split("\u0001")[0] ?? "";
+      return {
         amazon_order_id: orderId,
-        sku: agg.sku,
-        transaction_type: tt,
-        amount_type: at,
-        amount_description: "Transaction report (merged split payments)",
-        amount: Math.round(agg.amount * 100) / 100,
-        posted_date: agg.posted_iso,
-        amazon_event_hash: hashMergedOrder(orderId),
-      });
-    }
-
-    for (const row of nonMergeRows) {
-      const tt = dbTransactionType(row.classified);
-      const at = dbAmountType(row.classified);
-      hashSeq += 1;
-      insertRows.push({
-        amazon_order_id: row.amazon_order_id.trim(),
-        sku: row.sku,
-        transaction_type: tt,
-        amount_type: at,
-        amount_description: "Transaction report CSV",
-        amount: Math.round(row.amount * 100) / 100,
-        posted_date: row.posted_iso,
-        amazon_event_hash: hashStandaloneRow(row.amazon_order_id.trim(), tt, at, row.posted_iso, row.amount, hashSeq),
-      });
-    }
+        sku: v.sku,
+        transaction_type: "Order" as const,
+        amount_type: v.amount_type,
+        amount_description: `Transaction report CSV — ${v.amount_description}`,
+        amount: Math.round(v.amount * 100) / 100,
+        posted_date: v.posted_iso,
+        amazon_event_hash: hashMergedDetail(orderId, v.amount_type, v.amount_description),
+      };
+    });
 
     console.log(
-      `[amazon-sales-import] rows_read=${parsedRows.length} rows_out=${insertRows.length} merged_orders=${mergedSplitPaymentOrders} merged_extra_rows=${mergedSplitPaymentExtraRows}`
+      `[amazon-sales-import] skipped_prefix=${skippedPrefixLines} csv_rows=${data.length} expanded=${expanded.length} merged_out=${insertPayload.length} merged_orders=${mergedSplitPaymentOrders} merged_extra=${mergedSplitPaymentExtraRows}`
     );
 
     let upserted = 0;
-    for (let i = 0; i < insertRows.length; i += UPSERT_CHUNK) {
-      const chunk = insertRows.slice(i, i + UPSERT_CHUNK);
+    for (let i = 0; i < insertPayload.length; i += UPSERT_CHUNK) {
+      const chunk = insertPayload.slice(i, i + UPSERT_CHUNK);
       const { data: upData, error: upErr } = await supabase
         .from("sales_transactions")
         .upsert(chunk, { onConflict: "amazon_event_hash" })
@@ -373,13 +470,15 @@ export async function POST(request: NextRequest) {
 
     const mergeMessage =
       mergedSplitPaymentExtraRows > 0
-        ? `${mergedSplitPaymentExtraRows}件の分割決済行をマージしました（${mergedSplitPaymentOrders}注文）。`
-        : "分割決済のマージはありませんでした。";
+        ? `${mergedSplitPaymentExtraRows}件の明細をマージしました（分割発送等・${mergedSplitPaymentOrders}注文）。内訳は order_id × 種別ごとに合算済みです。`
+        : "分割発送による明細マージはありませんでした。";
 
     return NextResponse.json({
       ok: true,
-      rows_read: parsedRows.length,
-      rows_after_merge: insertRows.length,
+      skipped_prefix_lines: skippedPrefixLines,
+      rows_read: data.length,
+      rows_expanded: expanded.length,
+      rows_after_merge: insertPayload.length,
       merged_split_payment_orders: mergedSplitPaymentOrders,
       merged_split_payment_extra_rows: mergedSplitPaymentExtraRows,
       message: mergeMessage,
