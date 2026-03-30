@@ -990,7 +990,7 @@ function ManualOrderCard({
     }
   };
 
-  const noCandidates = !loadingCandidates && candidates.length === 0;
+  const noCandidates = !loadingCandidates && mergedCandidates.length === 0;
 
   const createdLabel =
     order.created_at != null && String(order.created_at).trim() !== ""
