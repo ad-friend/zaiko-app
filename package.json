@@ -12,6 +12,7 @@
     "@supabase/supabase-js": "^2.98.0",
     "amazon-sp-api": "^1.2.0",
     "html5-qrcode": "^2.3.8",
+    "iconv-lite": "^0.7.0",
     "lucide-react": "^0.577.0",
     "mysql2": "^3.19.0",
     "next": "16.1.6",

@@ -5,11 +5,29 @@
 import { NextRequest, NextResponse } from "next/server";
 import { parseAmazonReturnsDelimitedText } from "@/lib/amazon-returns-import-parse";
 import { handleOrderReturn } from "@/lib/amazon-return";
+import iconv from "iconv-lite";
+
+function decodeUtf8(bytes: ArrayBuffer): string {
+  return new TextDecoder("utf-8").decode(new Uint8Array(bytes));
+}
+
+function decodeMaybeShiftJis(bytes: ArrayBuffer): string {
+  // Node/Next の TextDecoder は Shift-JIS を安定サポートしないため iconv-lite で対応
+  const buf = Buffer.from(bytes);
+  // Amazon日本語レポートは CP932(=Windows-31J) が多い
+  return iconv.decode(buf, "cp932");
+}
+
+function looksLikeMissingHeaderError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e ?? "");
+  return msg.includes("必須ヘッダーが見つかりません");
+}
 
 export async function POST(request: NextRequest) {
   try {
     let text: string;
     let fileName = "returns.csv";
+    let uploadBytes: ArrayBuffer | null = null;
 
     const ct = request.headers.get("content-type") ?? "";
     if (ct.includes("multipart/form-data")) {
@@ -18,7 +36,10 @@ export async function POST(request: NextRequest) {
       if (!(file instanceof File)) {
         return NextResponse.json({ error: "file フィールドに CSV/TSV を添付してください。" }, { status: 400 });
       }
-      text = await file.text();
+      // file.text() は UTF-8 前提になりやすく、Shift-JIS だとヘッダーが文字化けして失敗するため、
+      // まずUTF-8でデコード→ヘッダー検出に失敗したら CP932(Shift-JIS系) で再デコードして再試行する。
+      uploadBytes = await file.arrayBuffer();
+      text = decodeUtf8(uploadBytes);
       fileName = file.name || fileName;
     } else {
       const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
@@ -38,8 +59,20 @@ export async function POST(request: NextRequest) {
     try {
       parsed = parseAmazonReturnsDelimitedText(text, fileName);
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : "CSV/TSV のパースに失敗しました。";
-      return NextResponse.json({ error: msg }, { status: 400 });
+      // ヘッダー未検出は「文字コード違い」や「ヘッダー行が先頭でない」が多い。
+      // multipart の場合のみ、Shift-JIS再デコードで自動復旧を試す。
+      if (uploadBytes && looksLikeMissingHeaderError(e)) {
+        try {
+          const sjisText = decodeMaybeShiftJis(uploadBytes);
+          parsed = parseAmazonReturnsDelimitedText(sjisText, fileName);
+        } catch (e2: unknown) {
+          const msg = e2 instanceof Error ? e2.message : "CSV/TSV のパースに失敗しました。";
+          return NextResponse.json({ error: msg }, { status: 400 });
+        }
+      } else {
+        const msg = e instanceof Error ? e.message : "CSV/TSV のパースに失敗しました。";
+        return NextResponse.json({ error: msg }, { status: 400 });
+      }
     }
 
     /** 注文ID単位で1回だけ処理（重複行は冪等にまとめる） */

@@ -48,6 +48,31 @@ function toTrimmedString(v: unknown): string {
   return v == null ? "" : String(v).trim();
 }
 
+function stripToHeaderLine(text: string, fileName: string): { stripped: string; skippedPrefixLines: number } {
+  const bomStripped = text.replace(/^\uFEFF/, "");
+  const lines = bomStripped.split(/\r?\n/);
+
+  // 返品レポートは先頭からヘッダーのことが多いが、タイトル/説明行が付くケースもあるため
+  // 「注文ID列が含まれていそうな行」までスキップする。
+  const headerHint = /注文番号|注文id|amazon[\s_-]*order[\s_-]*id|order[\s_-]*id/i;
+
+  // 先頭50行まで探索（十分なはず）
+  for (let i = 0; i < Math.min(lines.length, 50); i++) {
+    const line = lines[i];
+    if (!line || !line.trim()) continue;
+
+    const delim = guessDelimiter(fileName, line);
+    const cols = line.split(delim).map((c) => c.trim()).filter(Boolean);
+    if (cols.length < 2) continue;
+
+    if (headerHint.test(line)) {
+      return { stripped: lines.slice(i).join("\n"), skippedPrefixLines: i };
+    }
+  }
+
+  return { stripped: bomStripped, skippedPrefixLines: 0 };
+}
+
 /**
  * FBA 返品レポート等の CSV/TSV から order id と disposition を抽出する。
  */
@@ -55,8 +80,9 @@ export function parseAmazonReturnsDelimitedText(text: string, fileName: string):
   rows: AmazonReturnImportRow[];
   rowErrors: string[];
 } {
+  const { stripped, skippedPrefixLines } = stripToHeaderLine(text, fileName);
   const firstNonEmptyLine =
-    text
+    stripped
       .replace(/^\uFEFF/, "")
       .split(/\r?\n/)
       .map((l) => l.trim())
@@ -64,7 +90,7 @@ export function parseAmazonReturnsDelimitedText(text: string, fileName: string):
 
   const delimiter = guessDelimiter(fileName, firstNonEmptyLine);
 
-  const parsed = Papa.parse<Record<string, string>>(text, {
+  const parsed = Papa.parse<Record<string, string>>(stripped, {
     header: true,
     delimiter: delimiter === "," ? "," : "\t",
     skipEmptyLines: "greedy",
@@ -99,6 +125,9 @@ export function parseAmazonReturnsDelimitedText(text: string, fileName: string):
     throw new Error(
       "必須ヘッダーが見つかりません（amazon-order-id / order-id などの注文ID列）。"
     );
+  }
+  if (skippedPrefixLines > 0) {
+    rowErrors.push(`先頭の説明行を ${skippedPrefixLines} 行スキップしました。`);
   }
 
   const data = Array.isArray(parsed.data) ? parsed.data : [];
