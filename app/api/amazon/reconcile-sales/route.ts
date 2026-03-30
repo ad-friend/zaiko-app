@@ -326,6 +326,19 @@ async function fetchTargetOrderIdsForBatch(batchSizeOrders: number): Promise<str
   return out;
 }
 
+async function filterOrderIdsHavingInboundItems(orderIds: string[]): Promise<string[]> {
+  const ids = orderIds.map((s) => String(s).trim()).filter(Boolean);
+  if (!ids.length) return [];
+  const { data, error } = await supabase.from("inbound_items").select("order_id").in("order_id", ids);
+  if (error) throw error;
+  const has = new Set<string>();
+  for (const r of (data ?? []) as Array<{ order_id?: unknown }>) {
+    const oid = String((r as any).order_id ?? "").trim();
+    if (oid) has.add(oid);
+  }
+  return ids.filter((oid) => has.has(oid));
+}
+
 async function fetchUnlinkedSalesTxRowsForOrderIds(orderIds: string[]): Promise<TxRow[]> {
   const ids = orderIds.map((s) => String(s).trim()).filter(Boolean);
   if (!ids.length) return [];
@@ -388,14 +401,18 @@ export async function POST(request: NextRequest) {
     const body = (await request.json().catch(() => ({}))) as ReconcileSalesRequestBody;
     const batchSizeOrders = clampInt(body?.batchSizeOrders, 20, 1, 50);
 
-    const orderIds = await fetchTargetOrderIdsForBatch(batchSizeOrders);
+    const orderIdsRaw = await fetchTargetOrderIdsForBatch(batchSizeOrders);
+    const orderIds = await filterOrderIdsHavingInboundItems(orderIdsRaw);
     if (!orderIds.length) {
       return NextResponse.json({
         ok: true,
         processedOrders: 0,
         reconciledCount: 0,
         skippedCount: 0,
-        message: "本消込対象の売上明細がありません。",
+        message:
+          orderIdsRaw.length === 0
+            ? "本消込対象の売上明細がありません。"
+            : "在庫（inbound_items）が紐づいている注文が無いため、本消込を行いません（先にSTEP2の自動消込で在庫引当を完了してください）。",
       });
     }
 
