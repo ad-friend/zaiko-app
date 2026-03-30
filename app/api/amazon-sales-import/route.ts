@@ -100,11 +100,21 @@ function lineLooksLikeTransactionHeader(line: string): boolean {
   return hasOrder && hasDate;
 }
 
-/** 手数料は負数で統一（Finances API と同様） */
+/** 手数料符号などの正規化を行わず、CSV の符号をそのまま信用します */
 function signedForKind(kind: LogicalTxKind, amount: number): number {
-  if (kind === "Principal" || kind === "Tax") return amount;
-  const a = Math.abs(amount);
-  return -a;
+  // 重要: CSV の符号をそのまま信用する（Refund/手数料等も Math.abs で強制しない）
+  return amount;
+}
+
+function normalizeTransactionType(rawType: string): "Order" | "Refund" | string {
+  const t = rawType.normalize("NFKC").trim();
+  if (!t) return "Order";
+  const lower = t.toLowerCase();
+  // Refund / 返金
+  if (lower === "refund" || lower.includes("refund") || t === "返金" || t.includes("返金")) return "Refund";
+  // Order / 注文
+  if (lower === "order" || lower.includes("order") || t === "注文" || t.includes("注文")) return "Order";
+  return t;
 }
 
 function logicalToAmountTypes(kind: LogicalTxKind): { amount_type: "Charge" | "Fee"; amount_description: string } {
@@ -344,7 +354,7 @@ export async function POST(request: NextRequest) {
           rowErrors.push(`行 ${i + 2 + skippedPrefixLines}: オーダー番号が空ですが、金額が空/不正です。`);
           continue;
         }
-        const tt = typeRaw || "Adjustment";
+        const tt = normalizeTransactionType(typeRaw || "Adjustment");
         expanded.push({
           amazon_order_id: null,
           posted_iso: postedIso,
@@ -368,14 +378,14 @@ export async function POST(request: NextRequest) {
           continue;
         }
 
-        const signed = signedForKind(kind, num);
+        const signed = signedForKind(kind, num); // 現在は identity（CSV 符号をそのまま）
         const { amount_type, amount_description } = logicalToAmountTypes(kind);
 
         expanded.push({
           amazon_order_id: orderId,
           posted_iso: postedIso,
           sku,
-          transaction_type: typeRaw || "Order",
+          transaction_type: normalizeTransactionType(typeRaw || "Order"),
           amount_type,
           amount_description,
           amount: signed,
