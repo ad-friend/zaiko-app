@@ -17,6 +17,7 @@ type TxRow = {
   sku: string | null;
   amount_type: string | null;
   amount_description: string | null;
+  transaction_type: string | null;
 };
 
 type StockRow = {
@@ -46,6 +47,44 @@ function normalizeJan(j: string | null | undefined): string {
 function toNumber(v: unknown): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
+}
+
+function isExpenseSkipTx(row: Pick<TxRow, "amount_type" | "transaction_type">): boolean {
+  // このAPIでは transaction_type は常に "Order" を取得している想定だが、
+  // 要件通り amount_type / transaction_type の両方に文字列が含まれる場合に除外する。
+  const amountType = String(row.amount_type ?? "");
+  const txType = String(row.transaction_type ?? "");
+
+  return (
+    amountType.includes("PostageBilling") ||
+    txType.includes("PostageBilling") ||
+    amountType.includes("adj_") ||
+    txType.includes("adj_") ||
+    amountType.includes("ServiceFee") ||
+    txType.includes("ServiceFee")
+  );
+}
+
+async function markSalesTxReconciled(ids: number[]): Promise<void> {
+  if (!ids.length) return;
+
+  // sales_transactions 側に status カラムが無い可能性があるため、
+  // status を含めた更新 → カラム不足時のみリトライで status 無しにフォールバック。
+  const payloadWithStatus: Record<string, unknown> = { stock_id: -1, unit_cost: 0, status: "reconciled" };
+  const { error: err1 } = await supabase.from("sales_transactions").update(payloadWithStatus as any).in("id", ids);
+  if (!err1) return;
+
+  const code = (err1 as any)?.code;
+  const msg = (err1 as any)?.message ?? "";
+  if (code === "42703" || msg.includes("status")) {
+    const { error: err2 } = await supabase
+      .from("sales_transactions")
+      .update({ stock_id: -1, unit_cost: 0 })
+      .in("id", ids);
+    if (err2) throw err2;
+    return;
+  }
+  throw err1;
 }
 
 async function buildSkuToJanMap(sellerSkus: string[]): Promise<Map<string, string | null>> {
@@ -95,7 +134,7 @@ export async function POST() {
   try {
     const { data: unlinkedRows, error: fetchError } = await supabase
       .from("sales_transactions")
-      .select("id, amazon_order_id, posted_date, amount, sku, amount_type, amount_description")
+      .select("id, amazon_order_id, posted_date, amount, sku, amount_type, amount_description, transaction_type")
       .not("amazon_order_id", "is", null)
       .is("stock_id", null)
       .eq("transaction_type", "Order");
@@ -125,19 +164,30 @@ export async function POST() {
     let skippedCount = 0;
 
     for (const [amazonOrderId, txGroup] of byOrder) {
-      const settledAt = earliestPostedDateIso(txGroup);
+      // 経費/調整（在庫紐づけ不要）を先にスキップして処理済みにする
+      const expenseTx = txGroup.filter((r) => isExpenseSkipTx({ amount_type: r.amount_type, transaction_type: r.transaction_type }));
+      if (expenseTx.length) await markSalesTxReconciled(expenseTx.map((r) => r.id));
+
+      // 通常の在庫紐づけ対象のみで以降のロジックを回す
+      const normalTx = txGroup.filter((r) => !expenseTx.some((e) => e.id === r.id));
+      if (!normalTx.length) {
+        // この注文内は経費のみ → inbound_items 更新は行わない
+        continue;
+      }
+
+      const settledAt = earliestPostedDateIso(normalTx);
       if (!settledAt) {
         skippedCount += 1;
         continue;
       }
 
       /** 注文単位のサマリー（ログ用） */
-      const totalAmount = txGroup.reduce((s, r) => s + toNumber(r.amount), 0);
-      const principalSum = txGroup
+      const totalAmount = normalTx.reduce((s, r) => s + toNumber(r.amount), 0);
+      const principalSum = normalTx
         .filter((r) => String(r.amount_type ?? "") === "Charge" && String(r.amount_description ?? "").includes("Principal"))
         .reduce((s, r) => s + toNumber(r.amount), 0);
       console.log(
-        `[reconcile-sales] order=${amazonOrderId} tx_rows=${txGroup.length} sum_amount=${totalAmount.toFixed(2)} principal_like=${principalSum.toFixed(2)}`
+        `[reconcile-sales] order=${amazonOrderId} tx_rows=${normalTx.length} sum_amount=${totalAmount.toFixed(2)} principal_like=${principalSum.toFixed(2)}`
       );
 
       const { data: stocksRaw, error: stocksError } = await supabase
@@ -153,7 +203,7 @@ export async function POST() {
         continue;
       }
 
-      const txSorted = [...txGroup].sort((a, b) => a.id - b.id);
+      const txSorted = [...normalTx].sort((a, b) => a.id - b.id);
 
       /** 単一的在庫: 従来どおり全明細に同一 stock */
       if (stocks.length === 1) {

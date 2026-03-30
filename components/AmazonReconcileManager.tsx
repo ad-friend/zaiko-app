@@ -725,6 +725,10 @@ function ManualOrderCard({
   const [deleting, setDeleting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
 
+  // カタログ消失などの救済: JAN を手入力して在庫と紐づける
+  const [manualJanInput, setManualJanInput] = useState<string>("");
+  const [manualReconciling, setManualReconciling] = useState(false);
+
   useEffect(() => {
     setConditionId(order.condition_id);
   }, [order.id, order.condition_id]);
@@ -919,6 +923,69 @@ function ManualOrderCard({
     }
   };
 
+  const handleManualJanReconcile = async () => {
+    const jan = manualJanInput.trim();
+    if (!jan) {
+      setError("JANコードを入力してください。");
+      return;
+    }
+    if (!String(order.amazon_order_id ?? "").trim()) {
+      setError("Amazonの注文番号がありません。");
+      return;
+    }
+
+    setManualReconciling(true);
+    setError(null);
+    try {
+      // JAN で候補在庫を検索（在庫候補が返った最初の1件を利用）
+      const params = new URLSearchParams({
+        amazon_order_id: order.amazon_order_id,
+        search: jan,
+      });
+      const res = await fetch(`/api/amazon/candidate-stocks?${params.toString()}`);
+      const raw = await res.json().catch(() => null);
+      if (!res.ok) {
+        const msg = raw && typeof raw === "object" && "error" in raw && typeof (raw as any).error === "string" ? (raw as any).error : null;
+        throw new Error(msg ?? "在庫候補の取得に失敗しました。");
+      }
+
+      const list = Array.isArray(raw) ? raw : [];
+      const first = list[0] as unknown as { id?: unknown } | undefined;
+      const stockId = first?.id != null ? Number(first.id) : NaN;
+      if (!Number.isFinite(stockId) || stockId < 1) {
+        throw new Error("該当する在庫候補がありませんでした。");
+      }
+
+      // 在庫との手動紐づけ（注文消込）
+      const manualRes = await fetch("/api/amazon/reconcile/manual", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          amazon_order_id: order.amazon_order_id,
+          inbound_item_id: stockId,
+          amazon_order_db_id: order.id,
+          sku: order.sku,
+        }),
+      });
+
+      const manualData = await manualRes.json().catch(() => null);
+      if (!manualRes.ok) {
+        const msg =
+          manualData && typeof manualData === "object" && "error" in manualData && typeof (manualData as any).error === "string"
+            ? (manualData as any).error
+            : null;
+        throw new Error(msg ?? "手動消込に失敗しました。");
+      }
+
+      setManualJanInput("");
+      await onConfirmed();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "手動消込に失敗しました。");
+    } finally {
+      setManualReconciling(false);
+    }
+  };
+
   const noCandidates = !loadingCandidates && candidates.length === 0;
 
   const createdLabel =
@@ -1022,6 +1089,34 @@ function ManualOrderCard({
             )}
           </div>
         )}
+
+        <div className="rounded-lg border border-slate-200 bg-slate-50/90 p-3 space-y-2.5">
+          <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-[11px] font-bold text-slate-700">JANコード手入力</p>
+            <p className="text-[11px] text-slate-500">(カタログ消失時の救済)</p>
+          </div>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
+            <input
+              type="text"
+              inputMode="numeric"
+              value={manualJanInput}
+              onChange={(e) => setManualJanInput(e.target.value)}
+              placeholder="JANコードを入力"
+              disabled={manualReconciling || submitting || conditionSaving || cancelling || deleting}
+              className="w-full rounded-md border border-slate-300 px-2.5 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-400/30 disabled:bg-slate-100 disabled:text-slate-500"
+            />
+            <button
+              type="button"
+              onClick={() => {
+                void handleManualJanReconcile();
+              }}
+              disabled={manualReconciling || submitting || conditionSaving || cancelling || deleting || manualJanInput.trim().length === 0}
+              className={`${buttonClass} h-10 w-full bg-emerald-600 text-xs font-bold text-white shadow-sm hover:bg-emerald-700 disabled:bg-slate-300 disabled:text-slate-500`}
+            >
+              {manualReconciling ? "処理中..." : "手動消込を実行"}
+            </button>
+          </div>
+        </div>
 
         <div className="rounded-lg border border-slate-200 bg-slate-50/90 p-3 space-y-2.5">
           <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
