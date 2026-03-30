@@ -5,9 +5,14 @@
  * - inbound_items が複数ある場合は seller SKU → sku_mappings → JAN で在庫行と突き合わせ、行ごとに stock_id / unit_cost を設定。
  * - 在庫側は注文に紐づく全行に一度に settled_at（posted_date 最早）をセットする。
  */
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { earliestPostedDateIso } from "@/lib/settlement-posted-date";
+
+type ReconcileSalesRequestBody = {
+  /** 1回の実行で処理する注文数（amazon_order_id）上限 */
+  batchSizeOrders?: number;
+};
 
 type TxRow = {
   id: number;
@@ -257,18 +262,117 @@ function buildJanPools(stocks: StockRow[]): Map<string, StockRow[]> {
   return pools;
 }
 
-export async function POST() {
+function clampInt(v: unknown, def: number, min: number, max: number): number {
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return def;
+  return Math.min(max, Math.max(min, Math.trunc(n)));
+}
+
+async function fetchTargetOrderIdsForBatch(batchSizeOrders: number): Promise<string[]> {
+  // Supabase で distinct + order を安定的にやりにくいため、
+  // 「未紐付け行を先頭から少しだけスキャン」→「注文IDをユニーク化」→「最大N件」を採用する。
+  // これにより1回のAPI実行時間を短く保つ（Vercel timeout 回避）。
+  const SCAN_LIMIT = Math.max(200, batchSizeOrders * 60);
+
+  // status カラムが存在する場合は reconciled を除外する（存在しないDBでも動くようにする）
+  {
+    const res = await supabase
+      .from("sales_transactions")
+      .select("amazon_order_id, posted_date, id, status")
+      .not("amazon_order_id", "is", null)
+      .is("stock_id", null)
+      .or("status.is.null,status.neq.reconciled")
+      .order("posted_date", { ascending: true })
+      .order("id", { ascending: true })
+      .limit(SCAN_LIMIT);
+    if (!res.error) {
+      const rows = (res.data ?? []) as Array<{ amazon_order_id?: unknown }>;
+      const out: string[] = [];
+      const seen = new Set<string>();
+      for (const r of rows) {
+        const oid = String((r as any).amazon_order_id ?? "").trim();
+        if (!oid || seen.has(oid)) continue;
+        seen.add(oid);
+        out.push(oid);
+        if (out.length >= batchSizeOrders) break;
+      }
+      return out;
+    }
+    const code = (res.error as any)?.code;
+    const msg = (res.error as any)?.message ?? "";
+    if (code !== "42703" && !msg.includes("status")) throw res.error;
+  }
+
+  const { data, error } = await supabase
+    .from("sales_transactions")
+    .select("amazon_order_id, posted_date, id")
+    .not("amazon_order_id", "is", null)
+    .is("stock_id", null)
+    .order("posted_date", { ascending: true })
+    .order("id", { ascending: true })
+    .limit(SCAN_LIMIT);
+  if (error) throw error;
+
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const r of (data ?? []) as Array<{ amazon_order_id?: unknown }>) {
+    const oid = String((r as any).amazon_order_id ?? "").trim();
+    if (!oid || seen.has(oid)) continue;
+    seen.add(oid);
+    out.push(oid);
+    if (out.length >= batchSizeOrders) break;
+  }
+  return out;
+}
+
+async function fetchUnlinkedSalesTxRowsForOrderIds(orderIds: string[]): Promise<TxRow[]> {
+  const ids = orderIds.map((s) => String(s).trim()).filter(Boolean);
+  if (!ids.length) return [];
+
+  // status カラムが存在する場合は reconciled を除外する（存在しないDBでも動くようにする）
+  {
+    const res = await supabase
+      .from("sales_transactions")
+      .select("id, amazon_order_id, posted_date, amount, sku, amount_type, amount_description, transaction_type, status")
+      .in("amazon_order_id", ids)
+      .is("stock_id", null)
+      .or("status.is.null,status.neq.reconciled")
+      .order("posted_date", { ascending: true })
+      .order("id", { ascending: true });
+    if (!res.error) return (res.data ?? []) as TxRow[];
+    const code = (res.error as any)?.code;
+    const msg = (res.error as any)?.message ?? "";
+    if (code !== "42703" && !msg.includes("status")) throw res.error;
+  }
+
+  const { data, error } = await supabase
+    .from("sales_transactions")
+    .select("id, amazon_order_id, posted_date, amount, sku, amount_type, amount_description, transaction_type")
+    .in("amazon_order_id", ids)
+    .is("stock_id", null)
+    .order("posted_date", { ascending: true })
+    .order("id", { ascending: true });
+  if (error) throw error;
+  return (data ?? []) as TxRow[];
+}
+
+export async function POST(request: NextRequest) {
   try {
-    const unlinkedRows = await fetchUnlinkedSalesTxRows();
-    if (!unlinkedRows?.length) {
+    const body = (await request.json().catch(() => ({}))) as ReconcileSalesRequestBody;
+    const batchSizeOrders = clampInt(body?.batchSizeOrders, 20, 1, 50);
+
+    const orderIds = await fetchTargetOrderIdsForBatch(batchSizeOrders);
+    if (!orderIds.length) {
       return NextResponse.json({
         ok: true,
+        processedOrders: 0,
         reconciledCount: 0,
         skippedCount: 0,
         message: "本消込対象の売上明細がありません。",
       });
     }
 
+    const unlinkedRows = await fetchUnlinkedSalesTxRowsForOrderIds(orderIds);
     const typed = unlinkedRows as TxRow[];
 
     // === 自己修復 1) Order手数料（マイナス）を親売上にぶら下げる ===
@@ -319,9 +423,9 @@ export async function POST() {
     }
 
     // === 相殺（Offset）: 同一注文にプラス売上と返金が揃い、在庫に紐づけられない行を status のみ完結 ===
-    let typedForMain = await fetchUnlinkedSalesTxRows();
+    let typedForMain = await fetchUnlinkedSalesTxRowsForOrderIds(orderIds);
     const offsetOrderCount = await applyOffsetReconciliation(typedForMain);
-    typedForMain = await fetchUnlinkedSalesTxRows();
+    typedForMain = await fetchUnlinkedSalesTxRowsForOrderIds(orderIds);
 
     /** order_id ごとにグループ化 */
     const byOrder = new Map<string, TxRow[]>();
@@ -476,6 +580,7 @@ export async function POST() {
 
     return NextResponse.json({
       ok: true,
+      processedOrders: byOrder.size,
       reconciledCount,
       skippedCount,
       message: `本消込: ${reconciledCount}注文を処理しました (保留: ${skippedCount}件) / 自己修復: 手数料 ${healedFeeCount}件, 返金 ${healedRefundCount}件 / 相殺: ${offsetOrderCount}注文`,

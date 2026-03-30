@@ -267,19 +267,38 @@ export default function AmazonReconcileManager() {
       const skipped = data?.rowsSkipped ?? 0;
       let message = `取得成功: ${total}件 (新規: ${inserted}件, スキップ: ${skipped}件)`;
 
-      const reconcileRes = await fetch("/api/amazon/reconcile-sales", { method: "POST" });
-      const reconcileParsed = await readJsonAnySafe(reconcileRes);
-      const reconcileData = reconcileParsed.json as any;
-      if (reconcileRes.ok) {
-        const reconciled = reconcileData?.reconciledCount ?? 0;
-        const skippedReconcile = reconcileData?.skippedCount ?? 0;
-        message += ` / 自動消込: ${reconciled}件成功 (保留: ${skippedReconcile}件)`;
-        await fetchPendingFinances();
-      } else {
-        const msg =
-          reconcileData && typeof reconcileData.error === "string" ? reconcileData.error : reconcileParsed.raw.slice(0, 300);
-        message += ` / 自動消込: 失敗 (${msg || "エラー"})`;
+      const RECONCILE_SALES_MAX_ROUNDS = 300;
+      const BATCH_SIZE_ORDERS = 20;
+      let totalReconciled = 0;
+      let totalSkippedReconcile = 0;
+
+      for (let round = 0; round < RECONCILE_SALES_MAX_ROUNDS; round += 1) {
+        const reconcileRes = await fetch("/api/amazon/reconcile-sales", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: stringifyPayload({ batchSizeOrders: BATCH_SIZE_ORDERS }),
+        });
+        const reconcileParsed = await readJsonAnySafe(reconcileRes);
+        const reconcileData = reconcileParsed.json as any;
+        if (!reconcileRes.ok) {
+          const msg =
+            reconcileData && typeof reconcileData.error === "string"
+              ? reconcileData.error
+              : reconcileParsed.raw.slice(0, 300);
+          message += ` / 自動消込: 失敗 (${msg || "エラー"})`;
+          break;
+        }
+
+        const processedOrders = Number(reconcileData?.processedOrders ?? 0);
+        totalReconciled += Number(reconcileData?.reconciledCount ?? 0);
+        totalSkippedReconcile += Number(reconcileData?.skippedCount ?? 0);
+
+        if (processedOrders <= 0) break;
+        await new Promise((r) => setTimeout(r, 150));
       }
+
+      message += ` / 自動消込: ${totalReconciled}件成功 (保留: ${totalSkippedReconcile}件)`;
+      await fetchPendingFinances();
 
       setFinanceResult({ message, type: "success" });
     } catch (e) {
@@ -296,18 +315,33 @@ export default function AmazonReconcileManager() {
     setIsProcessingOnly(true);
     setFinanceResult(null);
     try {
-      const res = await fetch("/api/amazon/reconcile-sales", { method: "POST" });
-      const { json, raw } = await readJsonAnySafe(res);
-      const data = json as any;
-      if (!res.ok) {
-        const msg = data && typeof data.error === "string" ? data.error : raw.slice(0, 300);
-        throw new Error(msg || "本消込に失敗しました");
+      const RECONCILE_SALES_MAX_ROUNDS = 300;
+      const BATCH_SIZE_ORDERS = 20;
+      let totalReconciled = 0;
+      let totalSkipped = 0;
+
+      for (let round = 0; round < RECONCILE_SALES_MAX_ROUNDS; round += 1) {
+        const res = await fetch("/api/amazon/reconcile-sales", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: stringifyPayload({ batchSizeOrders: BATCH_SIZE_ORDERS }),
+        });
+        const { json, raw } = await readJsonAnySafe(res);
+        const data = json as any;
+        if (!res.ok) {
+          const msg = data && typeof data.error === "string" ? data.error : raw.slice(0, 300);
+          throw new Error(msg || "本消込に失敗しました");
+        }
+        const processedOrders = Number(data?.processedOrders ?? 0);
+        totalReconciled += Number(data?.reconciledCount ?? 0);
+        totalSkipped += Number(data?.skippedCount ?? 0);
+        if (processedOrders <= 0) break;
+        await new Promise((r) => setTimeout(r, 150));
       }
-      const reconciled = data?.reconciledCount ?? 0;
-      const skipped = data?.skippedCount ?? 0;
+
       setFinanceResult({
         type: "success",
-        message: data?.message ?? `本消込: ${reconciled}件成功（保留: ${skipped}件）`,
+        message: `本消込: ${totalReconciled}件成功（保留: ${totalSkipped}件）`,
       });
       await fetchPendingFinances();
     } catch (e) {
