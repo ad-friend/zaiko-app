@@ -536,8 +536,6 @@ export default function AmazonReconcileManager() {
               </div>
             )}
           </div>
-
-          <ReturnInspectionQueueSection />
         </div>
 
         {/* 右カラム: 売上とお金の確定（本消込） */}
@@ -574,7 +572,7 @@ export default function AmazonReconcileManager() {
                       />
                     </div>
                   </div>
-                  <div className="flex flex-col gap-2 sm:flex-row sm:gap-2">
+                  <div className="flex flex-col gap-2">
                     <button
                       type="button"
                       onClick={handleFetchFinances}
@@ -594,7 +592,7 @@ export default function AmazonReconcileManager() {
                       type="button"
                       onClick={handleReconcileSalesOnly}
                       disabled={isFetchingFinances || isProcessingOnly}
-                      className={`${buttonClass} w-full bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed text-sm`}
+                      className={`${buttonClass} w-full border border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60 disabled:cursor-not-allowed text-sm`}
                     >
                       {isProcessingOnly ? (
                         <span className="flex items-center justify-center gap-2">
@@ -680,6 +678,8 @@ export default function AmazonReconcileManager() {
                   </ul>
                 )}
               </div>
+
+              <ReturnInspectionQueueSection />
             </div>
           </div>
         </div>
