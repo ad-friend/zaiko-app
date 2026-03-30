@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Pencil, Save, X, ChevronLeft, Download, Upload, Search, ArrowUp, ArrowDown, ArrowUpDown, Calendar, Loader2, PackageMinus } from "lucide-react";
 import { normalizeToFullWidthKatakana } from "@/lib/kana";
 import { normalizeSupplierForMatch } from "@/lib/normalizeSupplier";
+import { getInventoryStatusDisplay } from "@/lib/inventory-status-display";
 
 /** 在庫一覧1行。主軸はJANのためテーブルにはASIN列を表示しない（保存時ペイロード用に asin は取得のみ） */
 type RecordRow = {
@@ -21,6 +22,7 @@ type RecordRow = {
   order_id: string | null;
   settled_at: string | null;
   exit_type: string | null;
+  stock_status: string | null;
   header: {
     id: number;
     purchase_date: string;
@@ -75,21 +77,6 @@ function DocumentIcon({ className }: { className?: string }) {
 const inputClass = "flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 transition-all duration-200 shadow-sm";
 // px-4 -> px-6
 const buttonClass = "inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 h-10 px-6 py-2 shadow-sm active:scale-[0.98] duration-100";
-
-function exitTypeLabel(exitType: string | null | undefined): string {
-  switch (exitType) {
-    case "damaged":
-      return "破損";
-    case "lost":
-      return "紛失";
-    case "internal_use":
-      return "社内使用";
-    case "entertainment":
-      return "接待";
-    default:
-      return exitType ?? "";
-  }
-}
 
 /** inbound_items.condition_type（new / used 等）を一覧・CSV・検索用ラベルに */
 function statusLabel(c: string | null | undefined): string {
@@ -158,9 +145,10 @@ export default function HistoryPage() {
       }
       const list = recordsData;
       setRows(
-        list.map((r: RecordRow & { exit_type?: string | null }) => ({
+        list.map((r: RecordRow & { exit_type?: string | null; stock_status?: string | null }) => ({
           ...r,
           exit_type: r.exit_type ?? null,
+          stock_status: r.stock_status ?? null,
         }))
       );
 
@@ -1242,6 +1230,12 @@ export default function HistoryPage() {
                       const isIndividualEdit = editingId === row.id;
                       const isEditMode = isIndividualEdit || isBulkEditing;
                       const displayDate = formatDate(row.header?.purchase_date ?? row.created_at);
+                      const invStatus = getInventoryStatusDisplay({
+                        order_id: row.order_id,
+                        settled_at: row.settled_at,
+                        exit_type: row.exit_type,
+                        stock_status: row.stock_status,
+                      });
 
                       return (
                         <tr key={row.id} className="hover:bg-slate-50/50 transition-colors">
@@ -1520,31 +1514,11 @@ export default function HistoryPage() {
                             {row.effective_unit_price > 0 ? Math.round(row.effective_unit_price).toLocaleString() + " 円" : "—"}
                           </td>
                           <td className="min-w-0 px-1 py-3 align-middle whitespace-nowrap">
-                            {row.exit_type ? (
-                              <span
-                                className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-bold ${
-                                  row.exit_type === "damaged"
-                                    ? "bg-red-100 text-red-800"
-                                    : row.exit_type === "lost"
-                                      ? "bg-orange-100 text-orange-800"
-                                      : row.exit_type === "internal_use"
-                                        ? "bg-violet-100 text-violet-800"
-                                        : row.exit_type === "entertainment"
-                                          ? "bg-indigo-100 text-indigo-800"
-                                          : "bg-slate-100 text-slate-600"
-                                }`}
-                              >
-                                {exitTypeLabel(row.exit_type)}
-                              </span>
-                            ) : row.settled_at ? (
-                              <span className="bg-emerald-100 text-emerald-800 px-2.5 py-1 rounded-full text-[10px] font-bold">
-                                販売済
-                              </span>
-                            ) : (
-                              <span className="inline-block bg-green-100 text-green-800 px-2.5 py-1 rounded-full text-[10px] font-bold text-center">
-                                販売中
-                              </span>
-                            )}
+                            <span
+                              className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-bold ${invStatus.badgeClassName}`}
+                            >
+                              {invStatus.label}
+                            </span>
                           </td>
                           <td className="min-w-0 max-w-[200px] px-1 py-3 font-mono text-xs text-center align-middle">
                             {row.order_id ? (

@@ -19,6 +19,7 @@ export type RecordRow = {
   settled_at?: string | null;
   /** 在庫調整理由（damaged 等） */
   exit_type?: string | null;
+  stock_status?: string | null;
   header: {
     id: number;
     purchase_date: string;
@@ -43,6 +44,7 @@ const SELECT_WITH_REGISTERED = `
   order_id,
   settled_at,
   exit_type,
+  stock_status,
   inbound_headers (
     id,
     purchase_date,
@@ -66,6 +68,7 @@ const SELECT_WITHOUT_REGISTERED = `
   order_id,
   settled_at,
   exit_type,
+  stock_status,
   inbound_headers (
     id,
     purchase_date,
@@ -120,6 +123,7 @@ export async function GET(request: NextRequest) {
       order_id: row.order_id ?? null,
       settled_at: row.settled_at ?? null,
       exit_type: row.exit_type ?? null,
+      stock_status: row.stock_status ?? null,
       header: Array.isArray(row.inbound_headers) ? row.inbound_headers[0] : row.inbound_headers ?? null,
     }));
 

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { LayoutDashboard, Loader2, RefreshCw, AlertCircle, Package, TrendingUp, TrendingDown, Wallet, ShoppingCart, PieChart } from "lucide-react";
 import type { DashboardPayload } from "@/lib/dashboard-types";
 import DashboardNotices from "@/components/DashboardNotices";
+import QuickInventoryAdjustment from "@/components/QuickInventoryAdjustment";
 
 function formatYen(n: number): string {
   const rounded = Math.round(n);
@@ -102,6 +103,8 @@ export default function DashboardPage() {
         {data && (
           <>
             <DashboardNotices notices={data.notices ?? []} onAfterDismiss={() => void load()} />
+
+            <QuickInventoryAdjustment />
 
             <p className="mb-4 text-sm font-medium text-slate-600">
               集計期間（当月・東京）: <span className="text-slate-900">{data.period.label}</span>
