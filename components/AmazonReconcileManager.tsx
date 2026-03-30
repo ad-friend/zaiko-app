@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Ban, Trash2, CloudDownload, FileSpreadsheet, Link2 } from "lucide-react";
+import { Ban, Trash2 } from "lucide-react";
 import ManualFinanceProcessModal, { type PendingFinanceGroupData } from "@/components/ManualFinanceProcessModal";
 import ReturnInspectionQueueSection from "@/components/ReturnInspectionQueueSection";
 import { normalizeOrderCondition } from "@/lib/amazon-condition-match";
@@ -110,15 +110,6 @@ export default function AmazonReconcileManager() {
   });
   const [isFetchingFinances, setIsFetchingFinances] = useState(false);
   const [financeResult, setFinanceResult] = useState<{
-    message: string;
-    type: "success" | "error";
-  } | null>(null);
-
-  /** CSV 手動インポート（amazon-sales-import） */
-  const [csvSalesFile, setCsvSalesFile] = useState<File | null>(null);
-  const [csvDragActive, setCsvDragActive] = useState(false);
-  const [csvImporting, setCsvImporting] = useState(false);
-  const [csvImportResult, setCsvImportResult] = useState<{
     message: string;
     type: "success" | "error";
   } | null>(null);
@@ -278,50 +269,6 @@ export default function AmazonReconcileManager() {
     }
   };
 
-  const handleCsvSalesFileSelected = (file: File | null) => {
-    if (!file) return;
-    setCsvSalesFile(file);
-    setCsvImportResult(null);
-  };
-
-  const handleCsvSalesImport = async () => {
-    if (!csvSalesFile) return;
-    setCsvImporting(true);
-    setCsvImportResult(null);
-    try {
-      const csvText = await csvSalesFile.text();
-      const res = await fetch("/api/amazon-sales-import", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ csvText, fileName: csvSalesFile.name }),
-      });
-      const data = (await res.json()) as {
-        error?: string;
-        message?: string;
-        upserted?: number;
-        rows_read?: number;
-        rows_expanded?: number;
-        skipped_prefix_lines?: number;
-      };
-      if (!res.ok) throw new Error(data.error ?? "インポートに失敗しました");
-      const parts = [
-        `Upsert ${data.upserted ?? 0}件`,
-        data.rows_read != null ? `データ行 ${data.rows_read}件` : null,
-        data.rows_expanded != null ? `縦展開 ${data.rows_expanded}件` : null,
-        (data.skipped_prefix_lines ?? 0) > 0 ? `先頭スキップ ${data.skipped_prefix_lines}行` : null,
-        data.message ? `（${data.message}）` : null,
-      ].filter(Boolean);
-      setCsvImportResult({ type: "success", message: parts.join(" / ") });
-    } catch (e) {
-      setCsvImportResult({
-        type: "error",
-        message: e instanceof Error ? e.message : "インポートに失敗しました",
-      });
-    } finally {
-      setCsvImporting(false);
-    }
-  };
-
   const handleReconcileSalesOnly = async () => {
     setIsReconcileSalesOnly(true);
     setReconcileSalesOnlyResult(null);
@@ -430,9 +377,9 @@ export default function AmazonReconcileManager() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-8 xl:grid-cols-12">
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-12">
         {/* 左カラム: 在庫の仮消込（ワイド画面で広く） */}
-        <div className="flex flex-col gap-8 xl:col-span-9">
+        <div className="flex flex-col gap-6 xl:col-span-8">
           <h2 className="text-lg font-bold tracking-tight text-slate-800 border-b border-slate-200 pb-3">
             在庫の仮消込
           </h2>
@@ -592,289 +539,169 @@ export default function AmazonReconcileManager() {
         </div>
 
         {/* 右カラム: 売上とお金の確定（本消込） */}
-        <div className="flex flex-col gap-8 xl:col-span-3 xl:min-h-0">
-          <div className="rounded-xl border border-slate-200 bg-slate-100/60 p-5 lg:p-6 lg:sticky lg:top-24">
-            <h2 className="text-lg font-bold tracking-tight text-slate-800 border-b border-slate-300 pb-3 mb-5">
-              売上とお金の確定（本消込）
-            </h2>
-            <div className="space-y-6">
-              <p className="text-xs text-slate-600 -mt-2 mb-1">
-                売上の取り込みは「API 一括」「CSV 手動」「その後の本消込のみ」の3通りから選べます。
+        <div className="flex min-h-0 flex-col gap-4 xl:col-span-4">
+          <div className="flex max-h-[calc(100vh-4.5rem)] min-h-0 flex-col rounded-xl border border-slate-200 bg-slate-100/60 lg:sticky lg:top-20">
+            <div className="shrink-0 space-y-2 border-b border-slate-200/80 p-3 sm:p-4">
+              <h2 className="text-base font-bold tracking-tight text-slate-800">売上とお金の確定（本消込）</h2>
+              <p className="text-[11px] leading-snug text-slate-500">
+                決済 CSV の取り込みは「注文インポート」画面から行えます。ここでは API 取得・本消込とイレギュラー対応のみです。
               </p>
-
-              {/* 1. API 取得 ＋ 自動本消込 */}
-              <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm ring-1 ring-slate-100/80 border-l-[3px] border-l-blue-600">
-                <div className="flex gap-3">
-                  <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-700">
-                    <CloudDownload className="h-5 w-5" aria-hidden />
-                  </div>
-                  <div className="min-w-0 flex-1 space-y-3">
-                    <div>
-                      <h3 className="text-sm font-bold text-slate-900">APIから最新の売上を取得＆自動紐づけ</h3>
-                      <p className="mt-1 text-xs text-slate-500">
-                        SP-API で指定期間の財務イベントを取得し <span className="font-mono">sales_transactions</span> に保存したうえで、続けて本消込（在庫との自動紐づけ）まで実行します。
-                      </p>
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label htmlFor="financeStartDate" className="mb-1 block text-xs font-medium text-slate-600">
-                          開始日
-                        </label>
-                        <input
-                          type="date"
-                          id="financeStartDate"
-                          value={financeStartDate}
-                          onChange={(e) => setFinanceStartDate(e.target.value)}
-                          className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        />
-                      </div>
-                      <div>
-                        <label htmlFor="financeEndDate" className="mb-1 block text-xs font-medium text-slate-600">
-                          終了日
-                        </label>
-                        <input
-                          type="date"
-                          id="financeEndDate"
-                          value={financeEndDate}
-                          onChange={(e) => setFinanceEndDate(e.target.value)}
-                          className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        />
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleFetchFinances}
-                      disabled={isFetchingFinances}
-                      className={`${buttonClass} w-full bg-blue-600 text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60 text-sm`}
-                    >
-                      {isFetchingFinances ? (
-                        <span className="flex items-center justify-center gap-2">
-                          <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                          取得・紐づけ中…
-                        </span>
-                      ) : (
-                        "APIで取得して自動紐づけまで実行"
-                      )}
-                    </button>
-                    {financeResult && (
-                      <div
-                        className={`rounded-lg border px-3 py-2 text-sm ${
-                          financeResult.type === "success"
-                            ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-                            : "border-red-200 bg-red-50 text-red-800"
-                        }`}
-                      >
-                        {financeResult.type === "success" ? "✅ " : "❌ "}
-                        {financeResult.message}
-                      </div>
-                    )}
-                  </div>
+              <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="sr-only" htmlFor="financeStartDate">
+                    取得開始日
+                  </label>
+                  <input
+                    type="date"
+                    id="financeStartDate"
+                    value={financeStartDate}
+                    onChange={(e) => setFinanceStartDate(e.target.value)}
+                    className="h-9 rounded-md border border-slate-300 px-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  <span className="text-slate-400">—</span>
+                  <label className="sr-only" htmlFor="financeEndDate">
+                    取得終了日
+                  </label>
+                  <input
+                    type="date"
+                    id="financeEndDate"
+                    value={financeEndDate}
+                    onChange={(e) => setFinanceEndDate(e.target.value)}
+                    className="h-9 rounded-md border border-slate-300 px-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
                 </div>
               </div>
-
-              {/* 2. CSV 手動インポート（Upsert のみ） */}
-              <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm ring-1 ring-slate-100/80 border-l-[3px] border-l-amber-500">
-                <div className="flex gap-3">
-                  <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-50 text-amber-800">
-                    <FileSpreadsheet className="h-5 w-5" aria-hidden />
-                  </div>
-                  <div className="min-w-0 flex-1 space-y-3">
-                    <div>
-                      <h3 className="text-sm font-bold text-slate-900">CSVファイルから手動インポート</h3>
-                      <p className="mt-1 text-xs text-slate-500">
-                        日付範囲別レポートのトランザクション CSV をアップロードします。DB への保存（Upsert）のみで、在庫との紐づけは行いません。
-                      </p>
-                    </div>
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
+                <button
+                  type="button"
+                  onClick={handleFetchFinances}
+                  disabled={isFetchingFinances}
+                  className={`${buttonClass} min-h-10 flex-1 bg-blue-600 px-3 text-xs text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60 sm:text-sm`}
+                >
+                  {isFetchingFinances ? (
+                    <span className="flex items-center justify-center gap-2">
+                      <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                      取得中…
+                    </span>
+                  ) : (
+                    "APIから最新の売上を取得（取得＆自動紐づけ）"
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleReconcileSalesOnly}
+                  disabled={isReconcileSalesOnly}
+                  className={`${buttonClass} min-h-10 flex-1 border border-emerald-600 bg-emerald-600 px-3 text-xs text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60 sm:text-sm`}
+                >
+                  {isReconcileSalesOnly ? (
+                    <span className="flex items-center justify-center gap-2">
+                      <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                      処理中…
+                    </span>
+                  ) : (
+                    "未処理データの紐づけを実行（本消込のみを実行）"
+                  )}
+                </button>
+              </div>
+              {(financeResult || reconcileSalesOnlyResult) && (
+                <div className="space-y-1.5 pt-0.5">
+                  {financeResult && (
                     <div
-                      role="button"
-                      tabIndex={0}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          document.getElementById("reconcile-csv-sales-input")?.click();
-                        }
-                      }}
-                      onDragOver={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        setCsvDragActive(true);
-                      }}
-                      onDragLeave={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        setCsvDragActive(false);
-                      }}
-                      onDrop={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        setCsvDragActive(false);
-                        const f = e.dataTransfer.files?.[0];
-                        if (f && /\.(csv|tsv|txt)$/i.test(f.name)) handleCsvSalesFileSelected(f);
-                      }}
-                      className={`rounded-lg border-2 border-dashed px-4 py-6 text-center transition-colors ${
-                        csvDragActive
-                          ? "border-amber-400 bg-amber-50/60"
-                          : "border-slate-200 bg-slate-50/50 hover:border-amber-200"
+                      className={`rounded-md border px-2 py-1.5 text-[11px] leading-snug sm:text-xs ${
+                        financeResult.type === "success"
+                          ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                          : "border-red-200 bg-red-50 text-red-800"
                       }`}
                     >
-                      <input
-                        id="reconcile-csv-sales-input"
-                        type="file"
-                        accept=".csv,.tsv,.txt"
-                        className="sr-only"
-                        onChange={(e) => {
-                          handleCsvSalesFileSelected(e.target.files?.[0] ?? null);
-                          e.target.value = "";
-                        }}
-                      />
-                      <label htmlFor="reconcile-csv-sales-input" className="cursor-pointer text-sm text-slate-700">
-                        <span className="font-medium text-amber-900">ファイルを選択</span>
-                        <span className="text-slate-500"> またはドラッグ＆ドロップ（.csv / .tsv / .txt）</span>
-                      </label>
-                      {csvSalesFile ? (
-                        <p className="mt-2 truncate text-xs text-slate-600" title={csvSalesFile.name}>
-                          選択中: <span className="font-mono">{csvSalesFile.name}</span>
-                        </p>
-                      ) : (
-                        <p className="mt-2 text-xs text-slate-400">未選択</p>
-                      )}
+                      {financeResult.type === "success" ? "✅ " : "❌ "}
+                      {financeResult.message}
                     </div>
-                    <button
-                      type="button"
-                      onClick={handleCsvSalesImport}
-                      disabled={csvImporting || !csvSalesFile}
-                      className={`${buttonClass} w-full border border-amber-300 bg-amber-600 text-white hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-50 text-sm`}
+                  )}
+                  {reconcileSalesOnlyResult && (
+                    <div
+                      className={`rounded-md border px-2 py-1.5 text-[11px] leading-snug sm:text-xs ${
+                        reconcileSalesOnlyResult.type === "success"
+                          ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+                          : "border-red-200 bg-red-50 text-red-800"
+                      }`}
                     >
-                      {csvImporting ? (
-                        <span className="flex items-center justify-center gap-2">
-                          <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                          インポート中…
-                        </span>
-                      ) : (
-                        "CSVをインポート"
-                      )}
-                    </button>
-                    {csvImportResult && (
-                      <div
-                        className={`rounded-lg border px-3 py-2 text-sm ${
-                          csvImportResult.type === "success"
-                            ? "border-amber-200 bg-amber-50/90 text-amber-950"
-                            : "border-red-200 bg-red-50 text-red-800"
-                        }`}
-                      >
-                        {csvImportResult.type === "success" ? "✅ " : "❌ "}
-                        {csvImportResult.message}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              {/* 3. 本消込のみ（CSV 後・再実行用） */}
-              <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm ring-1 ring-slate-100/80 border-l-[3px] border-l-emerald-600">
-                <div className="flex gap-3">
-                  <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-800">
-                    <Link2 className="h-5 w-5" aria-hidden />
-                  </div>
-                  <div className="min-w-0 flex-1 space-y-3">
-                    <div>
-                      <h3 className="text-sm font-bold text-slate-900">未処理データの紐づけを実行</h3>
-                      <p className="mt-1 text-xs text-slate-500">
-                        CSVからインポートした決済データや、APIで紐づけ漏れになったデータを在庫と紐づけます（本消込）。取得は行わず、DB 上の未紐づき <span className="font-mono">sales_transactions</span> のみが対象です。
-                      </p>
+                      {reconcileSalesOnlyResult.type === "success" ? "✅ " : "❌ "}
+                      {reconcileSalesOnlyResult.message}
                     </div>
-                    <button
-                      type="button"
-                      onClick={handleReconcileSalesOnly}
-                      disabled={isReconcileSalesOnly}
-                      className={`${buttonClass} w-full border border-emerald-300 bg-emerald-600 text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60 text-sm`}
-                    >
-                      {isReconcileSalesOnly ? (
-                        <span className="flex items-center justify-center gap-2">
-                          <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                          処理中…
-                        </span>
-                      ) : (
-                        "紐づけ処理（本消込）を開始"
-                      )}
-                    </button>
-                    {reconcileSalesOnlyResult && (
-                      <div
-                        className={`rounded-lg border px-3 py-2 text-sm ${
-                          reconcileSalesOnlyResult.type === "success"
-                            ? "border-emerald-200 bg-emerald-50 text-emerald-900"
-                            : "border-red-200 bg-red-50 text-red-800"
-                        }`}
-                      >
-                        {reconcileSalesOnlyResult.type === "success" ? "✅ " : "❌ "}
-                        {reconcileSalesOnlyResult.message}
-                      </div>
-                    )}
-                  </div>
+                  )}
                 </div>
-              </div>
+              )}
+            </div>
 
-              {/* STEP 5: イレギュラー処理（返品・補填など） */}
-              <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-                <h3 className="text-sm font-bold text-slate-800 mb-2">STEP 5: イレギュラー処理（返品・補填など）</h3>
-                <p className="text-xs text-slate-500 mb-3">返品・補填など未処理のイレギュラーを確認します。</p>
-                {isLoadingPendingFinances ? (
-                  <p className="text-xs text-slate-500 py-4 text-center">読み込み中...</p>
-                ) : pendingFinances.length === 0 ? (
-                  <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/80 py-6 px-3 text-center">
-                    <p className="text-xs text-slate-500">現在、未処理のイレギュラーデータはありません。</p>
-                  </div>
-                ) : (
-                  <ul className="space-y-2 max-h-[280px] overflow-y-auto pr-0.5">
-                    {pendingFinances.map((g) => (
-                      <li
-                        key={g.groupId}
-                        className="flex items-center gap-2 rounded-lg border border-slate-100 bg-slate-50/50 px-2.5 py-2 text-xs"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate font-medium text-slate-800" title={g.amazon_order_id ?? g.sku ?? g.groupId}>
-                            {g.amazon_order_id ?? g.sku ?? g.groupId}
-                          </p>
-                          <div className="mt-0.5 flex items-center gap-1.5 flex-wrap">
-                            <span
-                              className={`inline-flex shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${
-                                g.transaction_type === "Order"
-                                  ? "bg-blue-100 text-blue-700"
-                                  : g.transaction_type === "Refund"
-                                    ? "bg-amber-100 text-amber-700"
-                                    : "bg-slate-200 text-slate-700"
-                              }`}
-                            >
-                              {g.transaction_type}
-                            </span>
-                            <span className="text-slate-500">
-                              {g.posted_date ? new Date(g.posted_date).toLocaleDateString("ja-JP", { month: "numeric", day: "numeric" }) : "—"}
-                            </span>
+            <div className="flex min-h-0 flex-1 flex-col p-3 sm:p-4 pt-2">
+              <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-slate-200 bg-white shadow-sm">
+                <div className="shrink-0 border-b border-slate-100 px-3 py-2 sm:px-3.5 sm:py-2.5">
+                  <h3 className="text-sm font-bold text-slate-800">イレギュラー（未消込・要確認）</h3>
+                  <p className="mt-0.5 text-[11px] text-slate-500">返品・補填など、在庫と未紐づきの決済です。</p>
+                </div>
+                <div className="min-h-0 flex-1 overflow-hidden p-2 sm:p-3">
+                  {isLoadingPendingFinances ? (
+                    <p className="py-8 text-center text-xs text-slate-500">読み込み中...</p>
+                  ) : pendingFinances.length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/80 py-10 text-center">
+                      <p className="text-xs text-slate-500">未処理のイレギュラーはありません。</p>
+                    </div>
+                  ) : (
+                    <ul className="max-h-[min(70vh,52rem)] space-y-1.5 overflow-y-auto pr-0.5 [-webkit-overflow-scrolling:touch]">
+                      {pendingFinances.map((g) => (
+                        <li
+                          key={g.groupId}
+                          className="flex items-center gap-2 rounded-lg border border-slate-100 bg-slate-50/80 px-2.5 py-2 text-xs"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate font-medium text-slate-800" title={g.amazon_order_id ?? g.sku ?? g.groupId}>
+                              {g.amazon_order_id ?? g.sku ?? g.groupId}
+                            </p>
+                            <div className="mt-0.5 flex flex-wrap items-center gap-1.5">
+                              <span
+                                className={`inline-flex shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                                  g.transaction_type === "Order"
+                                    ? "bg-blue-100 text-blue-700"
+                                    : g.transaction_type === "Refund"
+                                      ? "bg-amber-100 text-amber-700"
+                                      : "bg-slate-200 text-slate-700"
+                                }`}
+                              >
+                                {g.transaction_type}
+                              </span>
+                              <span className="text-slate-500">
+                                {g.posted_date
+                                  ? new Date(g.posted_date).toLocaleDateString("ja-JP", { month: "numeric", day: "numeric" })
+                                  : "—"}
+                              </span>
+                            </div>
                           </div>
-                        </div>
-                        <div className="shrink-0 text-right">
-                          <p className={`font-semibold tabular-nums ${g.net_amount >= 0 ? "text-slate-800" : "text-red-600"}`}>
-                            {g.net_amount >= 0 ? "" : "−"}
-                            {Math.abs(g.net_amount).toLocaleString()}円
-                          </p>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSelectedPendingFinance(g);
-                              setIsModalOpen(true);
-                            }}
-                            className="mt-1 inline-flex items-center justify-center rounded bg-slate-200 px-2 py-1 text-[10px] font-medium text-slate-700 hover:bg-slate-300 transition-colors"
-                          >
-                            手動処理
-                          </button>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                )}
+                          <div className="shrink-0 text-right">
+                            <p className={`font-semibold tabular-nums ${g.net_amount >= 0 ? "text-slate-800" : "text-red-600"}`}>
+                              {g.net_amount >= 0 ? "" : "−"}
+                              {Math.abs(g.net_amount).toLocaleString()}円
+                            </p>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedPendingFinance(g);
+                                setIsModalOpen(true);
+                              }}
+                              className="mt-1 inline-flex items-center justify-center rounded bg-slate-200 px-2 py-1 text-[10px] font-medium text-slate-700 hover:bg-slate-300 transition-colors"
+                            >
+                              手動処理
+                            </button>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
               </div>
 
-              <ReturnInspectionQueueSection />
+              <div className="mt-3 shrink-0">
+                <ReturnInspectionQueueSection />
+              </div>
             </div>
           </div>
         </div>
