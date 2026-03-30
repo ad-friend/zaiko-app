@@ -319,6 +319,7 @@ export default function AmazonReconcileManager() {
       const BATCH_SIZE_ORDERS = 10;
       let totalReconciled = 0;
       let totalSkipped = 0;
+      let lastServerMessage = "";
 
       for (let round = 0; round < RECONCILE_SALES_MAX_ROUNDS; round += 1) {
         const res = await fetch("/api/amazon/reconcile-sales", {
@@ -333,15 +334,23 @@ export default function AmazonReconcileManager() {
           throw new Error(msg || "本消込に失敗しました");
         }
         const processedOrders = Number(data?.processedOrders ?? 0);
-        totalReconciled += Number(data?.reconciledCount ?? 0);
-        totalSkipped += Number(data?.skippedCount ?? 0);
+        const roundReconciled = Number(data?.reconciledCount ?? 0);
+        const roundSkipped = Number(data?.skippedCount ?? 0);
+        totalReconciled += roundReconciled;
+        totalSkipped += roundSkipped;
+        if (typeof data?.message === "string") lastServerMessage = data.message;
+        // 処理対象注文が 0 なら打ち止め（未紐付きなし／在庫引当済みのバッチが組めない）
         if (processedOrders <= 0) break;
         await new Promise((r) => setTimeout(r, 150));
       }
 
+      const detail =
+        totalReconciled === 0 && totalSkipped === 0 && lastServerMessage
+          ? ` ${lastServerMessage}`
+          : "";
       setFinanceResult({
         type: "success",
-        message: `本消込: ${totalReconciled}件成功（保留: ${totalSkipped}件）`,
+        message: `本消込: ${totalReconciled}件成功（保留: ${totalSkipped}件）${detail}`,
       });
       await fetchPendingFinances();
     } catch (e) {
@@ -387,8 +396,11 @@ export default function AmazonReconcileManager() {
         totalSkippedUsed += Number(data?.skipped_used_safety ?? 0);
 
         if (processed === 0) {
+          const idleFirstRound = round === 1 && totalCompleted === 0 && totalManual === 0 && totalSkippedUsed === 0;
           setReconcileResult({
-            message: "🎉 全ての自動消込が完了しました！",
+            message: idleFirstRound
+              ? "処理対象の pending 注文はありません（すでに処理済み、または対象外です）。"
+              : "🎉 全ての自動消込が完了しました！",
             completed: totalCompleted,
             manual_required: totalManual,
             skipped_used_safety: totalSkippedUsed,

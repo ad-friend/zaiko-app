@@ -269,61 +269,111 @@ function clampInt(v: unknown, def: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.trunc(n)));
 }
 
-async function fetchTargetOrderIdsForBatch(batchSizeOrders: number): Promise<string[]> {
-  // Supabase で distinct + order を安定的にやりにくいため、
-  // 「未紐付け行を先頭から少しだけスキャン」→「注文IDをユニーク化」→「最大N件」を採用する。
-  // これにより1回のAPI実行時間を短く保つ（Vercel timeout 回避）。
-  const SCAN_LIMIT = Math.max(200, batchSizeOrders * 60);
+/**
+ * 未紐付け売上を posted_date 順にページ走査し、inbound_items.order_id が存在する注文だけを
+ * 同じ順序で最大 batchSizeOrders 件まで集める。
+ * 先頭に「在庫未引当」の注文だけが並んでいても、後続の処理可能注文に届く。
+ */
+async function fetchEligibleOrderIdsForBatch(batchSizeOrders: number): Promise<{
+  orderIds: string[];
+  hadUnlinkedRows: boolean;
+  distinctOrdersSeen: number;
+}> {
+  const PAGE_SIZE = 500;
+  const MAX_PAGES = 50;
+  const INBOUND_CHECK_CHUNK = 80;
 
-  // status カラムが存在する場合は reconciled を除外する（存在しないDBでも動くようにする）
-  {
-    const res = await supabase
-      .from("sales_transactions")
-      .select("amazon_order_id, posted_date, id, status")
-      .not("amazon_order_id", "is", null)
-      .is("stock_id", null)
-      .or("status.is.null,status.neq.reconciled")
-      .order("posted_date", { ascending: true })
-      .order("id", { ascending: true })
-      .limit(SCAN_LIMIT);
-    if (!res.error) {
-      const rows = (res.data ?? []) as Array<{ amazon_order_id?: unknown }>;
-      const out: string[] = [];
-      const seen = new Set<string>();
-      for (const r of rows) {
-        const oid = String((r as any).amazon_order_id ?? "").trim();
-        if (!oid || seen.has(oid)) continue;
-        seen.add(oid);
-        out.push(oid);
-        if (out.length >= batchSizeOrders) break;
+  const eligible: string[] = [];
+  const globalSeenOid = new Set<string>();
+  let hadUnlinkedRows = false;
+  /** まだ inbound 照会していない候補（posted_date 初出順） */
+  const pendingCandidates: string[] = [];
+
+  async function flushPendingCandidates(): Promise<void> {
+    while (pendingCandidates.length > 0 && eligible.length < batchSizeOrders) {
+      const take = pendingCandidates.splice(0, INBOUND_CHECK_CHUNK);
+      const withInbound = await filterOrderIdsHavingInboundItems(take);
+      const has = new Set(withInbound);
+      for (const oid of take) {
+        if (eligible.length >= batchSizeOrders) break;
+        if (has.has(oid)) eligible.push(oid);
       }
-      return out;
     }
-    const code = (res.error as any)?.code;
-    const msg = (res.error as any)?.message ?? "";
-    if (code !== "42703" && !msg.includes("status")) throw res.error;
   }
 
-  const { data, error } = await supabase
-    .from("sales_transactions")
-    .select("amazon_order_id, posted_date, id")
-    .not("amazon_order_id", "is", null)
-    .is("stock_id", null)
-    .order("posted_date", { ascending: true })
-    .order("id", { ascending: true })
-    .limit(SCAN_LIMIT);
-  if (error) throw error;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const from = page * PAGE_SIZE;
+    const to = from + PAGE_SIZE - 1;
 
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const r of (data ?? []) as Array<{ amazon_order_id?: unknown }>) {
-    const oid = String((r as any).amazon_order_id ?? "").trim();
-    if (!oid || seen.has(oid)) continue;
-    seen.add(oid);
-    out.push(oid);
-    if (out.length >= batchSizeOrders) break;
+    let rows: Array<{ amazon_order_id?: unknown }> = [];
+
+    {
+      const res = await supabase
+        .from("sales_transactions")
+        .select("amazon_order_id, posted_date, id, status")
+        .not("amazon_order_id", "is", null)
+        .is("stock_id", null)
+        .or("status.is.null,status.neq.reconciled")
+        .order("posted_date", { ascending: true })
+        .order("id", { ascending: true })
+        .range(from, to);
+      if (!res.error) {
+        rows = (res.data ?? []) as Array<{ amazon_order_id?: unknown }>;
+      } else {
+        const code = (res.error as any)?.code;
+        const msg = (res.error as any)?.message ?? "";
+        if (code !== "42703" && !msg.includes("status")) throw res.error;
+        const { data, error } = await supabase
+          .from("sales_transactions")
+          .select("amazon_order_id, posted_date, id")
+          .not("amazon_order_id", "is", null)
+          .is("stock_id", null)
+          .order("posted_date", { ascending: true })
+          .order("id", { ascending: true })
+          .range(from, to);
+        if (error) throw error;
+        rows = (data ?? []) as Array<{ amazon_order_id?: unknown }>;
+      }
+    }
+
+    if (!rows.length) break;
+    hadUnlinkedRows = true;
+
+    for (const r of rows) {
+      const oid = String((r as any).amazon_order_id ?? "").trim();
+      if (!oid || globalSeenOid.has(oid)) continue;
+      globalSeenOid.add(oid);
+      pendingCandidates.push(oid);
+      if (pendingCandidates.length >= INBOUND_CHECK_CHUNK) await flushPendingCandidates();
+      if (eligible.length >= batchSizeOrders) {
+        pendingCandidates.length = 0;
+        return {
+          orderIds: eligible.slice(0, batchSizeOrders),
+          hadUnlinkedRows,
+          distinctOrdersSeen: globalSeenOid.size,
+        };
+      }
+    }
+
+    await flushPendingCandidates();
+    if (eligible.length >= batchSizeOrders) {
+      pendingCandidates.length = 0;
+      return {
+        orderIds: eligible.slice(0, batchSizeOrders),
+        hadUnlinkedRows,
+        distinctOrdersSeen: globalSeenOid.size,
+      };
+    }
+    if (rows.length < PAGE_SIZE) break;
   }
-  return out;
+
+  await flushPendingCandidates();
+
+  return {
+    orderIds: eligible.slice(0, batchSizeOrders),
+    hadUnlinkedRows,
+    distinctOrdersSeen: globalSeenOid.size,
+  };
 }
 
 async function filterOrderIdsHavingInboundItems(orderIds: string[]): Promise<string[]> {
@@ -401,18 +451,25 @@ export async function POST(request: NextRequest) {
     const body = (await request.json().catch(() => ({}))) as ReconcileSalesRequestBody;
     const batchSizeOrders = clampInt(body?.batchSizeOrders, 20, 1, 50);
 
-    const orderIdsRaw = await fetchTargetOrderIdsForBatch(batchSizeOrders);
-    const orderIds = await filterOrderIdsHavingInboundItems(orderIdsRaw);
+    const { orderIds, hadUnlinkedRows, distinctOrdersSeen } = await fetchEligibleOrderIdsForBatch(batchSizeOrders);
     if (!orderIds.length) {
+      let message: string;
+      if (!hadUnlinkedRows) {
+        message = "本消込対象の売上明細がありません。";
+      } else if (distinctOrdersSeen > 0) {
+        message =
+          "未紐付けの売上はありますが、スキャン範囲内に在庫（inbound_items.order_id）が付いた注文が見つかりませんでした。先にSTEP2で在庫引当を完了するか、手動処理を行ってください。";
+      } else {
+        message = "本消込対象の売上明細がありません。";
+      }
       return NextResponse.json({
         ok: true,
         processedOrders: 0,
         reconciledCount: 0,
         skippedCount: 0,
-        message:
-          orderIdsRaw.length === 0
-            ? "本消込対象の売上明細がありません。"
-            : "在庫（inbound_items）が紐づいている注文が無いため、本消込を行いません（先にSTEP2の自動消込で在庫引当を完了してください）。",
+        hadUnlinkedSales: hadUnlinkedRows,
+        scannedDistinctOrders: distinctOrdersSeen,
+        message,
       });
     }
 
@@ -661,6 +718,8 @@ export async function POST(request: NextRequest) {
       processedOrders: byOrder.size,
       reconciledCount,
       skippedCount,
+      hadUnlinkedSales: true,
+      batchOrderCount: orderIds.length,
       message: `本消込: ${reconciledCount}注文を処理しました (保留: ${skippedCount}件) / 自己修復: 手数料 ${healedFeeCount}件, 返金 ${healedRefundCount}件 / 相殺: ${offsetOrderCount}注文`,
     });
   } catch (e: unknown) {
