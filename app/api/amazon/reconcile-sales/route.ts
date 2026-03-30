@@ -31,6 +31,7 @@ type StockRow = {
   settled_at: string | null;
   jan_code: string | null;
   created_at: string | null;
+  order_id?: string | null;
 };
 
 /** sku_mappings から JAN が一意に定まるときだけ返す（セット品は null） */
@@ -356,6 +357,32 @@ async function fetchUnlinkedSalesTxRowsForOrderIds(orderIds: string[]): Promise<
   return (data ?? []) as TxRow[];
 }
 
+function createPromisePool(opts: { concurrency: number }) {
+  const concurrency = clampInt(opts.concurrency, 5, 1, 10);
+  let active = 0;
+  const queue: Array<() => void> = [];
+
+  const next = () => {
+    active -= 1;
+    const fn = queue.shift();
+    if (fn) fn();
+  };
+
+  const run = async <T>(task: () => Promise<T>): Promise<T> => {
+    if (active >= concurrency) {
+      await new Promise<void>((resolve) => queue.push(resolve));
+    }
+    active += 1;
+    try {
+      return await task();
+    } finally {
+      next();
+    }
+  };
+
+  return { run };
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = (await request.json().catch(() => ({}))) as ReconcileSalesRequestBody;
@@ -375,6 +402,16 @@ export async function POST(request: NextRequest) {
     const unlinkedRows = await fetchUnlinkedSalesTxRowsForOrderIds(orderIds);
     const typed = unlinkedRows as TxRow[];
 
+    const parentCache = new Map<string, { stock_id: number; unit_cost: number } | null>();
+    const getParent = async (amazonOrderId: string): Promise<{ stock_id: number; unit_cost: number } | null> => {
+      const key = String(amazonOrderId ?? "").trim();
+      if (!key) return null;
+      if (parentCache.has(key)) return parentCache.get(key) ?? null;
+      const parent = await findParentLinkedSaleForOrderId(key);
+      parentCache.set(key, parent);
+      return parent;
+    };
+
     // === 自己修復 1) Order手数料（マイナス）を親売上にぶら下げる ===
     // 条件: transaction_type が Order 系 かつ amount < 0（Commission/FBA Per Unit Fulfillment Fee 等）
     let healedFeeCount = 0;
@@ -393,7 +430,7 @@ export async function POST(request: NextRequest) {
         await markSalesTxReconciled([r.id]);
         continue;
       }
-      const parent = await findParentLinkedSaleForOrderId(orderId);
+      const parent = await getParent(orderId);
       if (!parent) continue;
       await updateSalesTxWithOptionalStatus([r.id], { stock_id: parent.stock_id, unit_cost: parent.unit_cost });
       healedFeeCount += 1;
@@ -416,7 +453,7 @@ export async function POST(request: NextRequest) {
         await markSalesTxReconciled([r.id]);
         continue;
       }
-      const parent = await findParentLinkedSaleForOrderId(orderId);
+      const parent = await getParent(orderId);
       if (!parent) continue;
       await updateSalesTxWithOptionalStatus([r.id], { stock_id: parent.stock_id, unit_cost: parent.unit_cost });
       healedRefundCount += 1;
@@ -440,6 +477,25 @@ export async function POST(request: NextRequest) {
 
     let reconciledCount = 0;
     let skippedCount = 0;
+
+    const inboundByOrderId = new Map<string, StockRow[]>();
+    {
+      const wantOrderIds = [...byOrder.keys()].map((s) => String(s).trim()).filter(Boolean);
+      if (wantOrderIds.length > 0) {
+        const { data, error } = await supabase
+          .from("inbound_items")
+          .select("id, effective_unit_price, settled_at, jan_code, created_at, order_id")
+          .in("order_id", wantOrderIds)
+          .order("created_at", { ascending: true });
+        if (error) throw error;
+        for (const row of (data ?? []) as StockRow[]) {
+          const oid = String((row as any).order_id ?? "").trim();
+          if (!oid) continue;
+          if (!inboundByOrderId.has(oid)) inboundByOrderId.set(oid, []);
+          inboundByOrderId.get(oid)!.push(row);
+        }
+      }
+    }
 
     for (const [amazonOrderId, txGroup] of byOrder) {
       // 経費/調整（在庫紐づけ不要）を先にスキップして処理済みにする
@@ -470,14 +526,7 @@ export async function POST(request: NextRequest) {
         `[reconcile-sales] order=${amazonOrderId} tx_rows=${normalTx.length} sum_amount=${totalAmount.toFixed(2)} principal_like=${principalSum.toFixed(2)}`
       );
 
-      const { data: stocksRaw, error: stocksError } = await supabase
-        .from("inbound_items")
-        .select("id, effective_unit_price, settled_at, jan_code, created_at")
-        .eq("order_id", amazonOrderId)
-        .order("created_at", { ascending: true });
-
-      if (stocksError) throw stocksError;
-      const stocks = (stocksRaw ?? []) as StockRow[];
+      const stocks = (inboundByOrderId.get(amazonOrderId) ?? []) as StockRow[];
       if (stocks.length === 0) {
         skippedCount += 1;
         continue;
@@ -538,6 +587,7 @@ export async function POST(request: NextRequest) {
         return null;
       };
 
+      const plannedUpdates: Array<{ tx_id: number; stock_id: number; unit_cost: number }> = [];
       for (const tx of txSorted) {
         const sellerSku = String(tx.sku ?? "").trim();
         let stock: StockRow | null = null;
@@ -559,14 +609,25 @@ export async function POST(request: NextRequest) {
           stock = stocks[0]!;
         }
 
-        const unitCost = toNumber(stock.effective_unit_price);
-        const { error: uErr } = await supabase
-          .from("sales_transactions")
-          .update({ stock_id: stock.id, unit_cost: unitCost })
-          .eq("id", tx.id);
-
-        if (uErr) throw uErr;
+        plannedUpdates.push({
+          tx_id: tx.id,
+          stock_id: stock.id,
+          unit_cost: toNumber(stock.effective_unit_price),
+        });
       }
+
+      const pool = createPromisePool({ concurrency: 5 });
+      await Promise.all(
+        plannedUpdates.map((u) =>
+          pool.run(async () => {
+            const { error: uErr } = await supabase
+              .from("sales_transactions")
+              .update({ stock_id: u.stock_id, unit_cost: u.unit_cost })
+              .eq("id", u.tx_id);
+            if (uErr) throw uErr;
+          })
+        )
+      );
 
       const { error: bulkSettleErr } = await supabase
         .from("inbound_items")

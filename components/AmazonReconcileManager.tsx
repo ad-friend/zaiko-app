@@ -268,7 +268,7 @@ export default function AmazonReconcileManager() {
       let message = `取得成功: ${total}件 (新規: ${inserted}件, スキップ: ${skipped}件)`;
 
       const RECONCILE_SALES_MAX_ROUNDS = 300;
-      const BATCH_SIZE_ORDERS = 20;
+      const BATCH_SIZE_ORDERS = 10;
       let totalReconciled = 0;
       let totalSkippedReconcile = 0;
 
@@ -316,7 +316,7 @@ export default function AmazonReconcileManager() {
     setFinanceResult(null);
     try {
       const RECONCILE_SALES_MAX_ROUNDS = 300;
-      const BATCH_SIZE_ORDERS = 20;
+      const BATCH_SIZE_ORDERS = 10;
       let totalReconciled = 0;
       let totalSkipped = 0;
 
