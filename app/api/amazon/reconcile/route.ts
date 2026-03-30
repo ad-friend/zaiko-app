@@ -171,7 +171,15 @@ export async function POST() {
 
       if (isSetProduct) {
         if (orderCond === "used" && orderQty >= 2) {
-          skippedUsedSafety++;
+          // 中古セット（複数個）は誤消込リスクが高いため、自動確定せず手動確認へ
+          const janForRow =
+            String(order.jan_code ?? "").trim() ||
+            uniqueJanFromSkuMappings(mapList) ||
+            String(mapList[0]?.jan_code ?? "").trim() ||
+            null;
+          const { error } = await updateAmazonOrderReconciliation(order.id, AMAZON_ORDER_STATUS_MANUAL_REQUIRED, janForRow);
+          if (error) throw error;
+          manualRequired++;
           continue;
         }
         try {
@@ -203,7 +211,15 @@ export async function POST() {
             collectedIds.push(...matching.slice(0, need).map((r) => r.id));
           }
           if (usedSafetyAbortSet) {
-            skippedUsedSafety++;
+            // 中古セットで候補が余る=誤消込リスクが高い → 手動へ
+            const janForRow =
+              String(order.jan_code ?? "").trim() ||
+              uniqueJanFromSkuMappings(mapList) ||
+              String(mapList[0]?.jan_code ?? "").trim() ||
+              null;
+            const { error } = await updateAmazonOrderReconciliation(order.id, AMAZON_ORDER_STATUS_MANUAL_REQUIRED, janForRow);
+            if (error) throw error;
+            manualRequired++;
             continue;
           }
           if (setOk && collectedIds.length > 0) {
@@ -282,16 +298,16 @@ export async function POST() {
           continue;
         }
 
-        if (matching.length >= 2) {
-          skippedUsedSafety++;
-          continue;
-        }
+        // 中古（Used）は「候補が1件だけ」のときだけ自動確定。それ以外は manual_required へ回す。
         if (matching.length === 1 && orderQty === 1) {
           await finalizeReconciled(matching);
-        } else {
-          skippedUsedSafety++;
           continue;
         }
+
+        const { error } = await updateAmazonOrderReconciliation(order.id, AMAZON_ORDER_STATUS_MANUAL_REQUIRED, jan);
+        if (error) throw error;
+        manualRequired++;
+        continue;
       } catch (e) {
         console.error("[amazon/reconcile] order row id=%s rollback or failure:", order.id, e);
         const { error: mErr } = await updateAmazonOrderReconciliation(order.id, AMAZON_ORDER_STATUS_MANUAL_REQUIRED, jan);
