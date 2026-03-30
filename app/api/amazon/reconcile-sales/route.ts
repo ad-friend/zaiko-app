@@ -87,6 +87,29 @@ async function markSalesTxReconciled(ids: number[]): Promise<void> {
   throw err1;
 }
 
+async function updateSalesTxWithOptionalStatus(ids: number[], patch: Record<string, unknown>): Promise<void> {
+  if (!ids.length) return;
+
+  const withStatus: Record<string, unknown> = { ...patch, status: "reconciled" };
+  const { error: err1 } = await supabase.from("sales_transactions").update(withStatus as any).in("id", ids);
+  if (!err1) return;
+
+  const code = (err1 as any)?.code;
+  const msg = (err1 as any)?.message ?? "";
+  if (code === "42703" || msg.includes("status")) {
+    const { error: err2 } = await supabase.from("sales_transactions").update(patch as any).in("id", ids);
+    if (err2) throw err2;
+    return;
+  }
+  throw err1;
+}
+
+function isRefundTxType(raw: string | null | undefined): boolean {
+  const t = String(raw ?? "").trim().toLowerCase();
+  if (!t) return false;
+  return t === "refund" || t.includes("refund") || t.includes("返金");
+}
+
 async function buildSkuToJanMap(sellerSkus: string[]): Promise<Map<string, string | null>> {
   const out = new Map<string, string | null>();
   const uniq = [...new Set(sellerSkus.map((s) => s.trim()).filter(Boolean))];
@@ -137,7 +160,7 @@ export async function POST() {
       .select("id, amazon_order_id, posted_date, amount, sku, amount_type, amount_description, transaction_type")
       .not("amazon_order_id", "is", null)
       .is("stock_id", null)
-      .eq("transaction_type", "Order");
+      .in("transaction_type", ["Order", "Refund"]);
 
     if (fetchError) throw fetchError;
     if (!unlinkedRows?.length) {
@@ -151,9 +174,46 @@ export async function POST() {
 
     const typed = unlinkedRows as TxRow[];
 
+    // 返金（Refund）は、在庫ではなく「紐づけ済みの元売上（Order）」から stock_id をコピーして自動紐づけする
+    const refundRows = typed.filter((r) => isRefundTxType(r.transaction_type));
+    if (refundRows.length) {
+      for (const r of refundRows) {
+        const orderId = String(r.amazon_order_id ?? "").trim();
+        const sku = String(r.sku ?? "").trim();
+        if (!orderId || !sku) continue;
+        // 経費扱いは Refund 側では想定しないが、要件の「競合しない分岐」のため最上流で除外
+        if (isExpenseSkipTx({ amount_type: r.amount_type, transaction_type: r.transaction_type })) {
+          await markSalesTxReconciled([r.id]);
+          continue;
+        }
+
+        const { data: orig, error: origErr } = await supabase
+          .from("sales_transactions")
+          .select("stock_id, unit_cost, posted_date")
+          .eq("amazon_order_id", orderId)
+          .eq("sku", sku)
+          .eq("transaction_type", "Order")
+          .not("stock_id", "is", null)
+          .order("posted_date", { ascending: true })
+          .limit(1);
+
+        if (origErr) throw origErr;
+        const first = (orig ?? [])[0] as { stock_id?: unknown; unit_cost?: unknown } | undefined;
+        const stockId = first?.stock_id != null ? Number(first.stock_id) : NaN;
+        if (!Number.isFinite(stockId) || stockId < 1) {
+          // 元売上が無い（まだ紐づいていない）→ 今回は何もしないでスキップ
+          continue;
+        }
+        const unitCost = first?.unit_cost != null ? Number(first.unit_cost) : 0;
+        await updateSalesTxWithOptionalStatus([r.id], { stock_id: stockId, unit_cost: Number.isFinite(unitCost) ? unitCost : 0 });
+      }
+    }
+
     /** order_id ごとにグループ化 */
     const byOrder = new Map<string, TxRow[]>();
     for (const r of typed) {
+      // Refund は上で処理済み（またはスキップ）なので、通常の在庫紐づけ対象には含めない
+      if (isRefundTxType(r.transaction_type)) continue;
       const oid = String(r.amazon_order_id ?? "").trim();
       if (!oid) continue;
       if (!byOrder.has(oid)) byOrder.set(oid, []);
