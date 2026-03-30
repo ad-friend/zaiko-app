@@ -79,9 +79,16 @@ export async function GET() {
     let list = (rows ?? []) as PendingFinanceDetail[];
 
     // 経費・調整として扱うものだけを除外（部分一致）。Order/Refund 等の通常データは絶対に落とさない。
-    list = list.filter((row) =>
-      !shouldExcludeByType((row as any).transaction_type, (row as any).amount_type, (row as any).amount_description)
-    );
+    list = list.filter((row) => {
+      const orderId = row.amazon_order_id?.trim() ?? "";
+      const sku = row.sku?.trim() ?? "";
+
+      // 「カードで adj_ から始まって見えるもの」は、注文IDもSKUも無い明細をまとめるための仮ID。
+      // 注文IDが無いだけの明細（SKUがある等）は残し、両方無い“注文に関係ない調整”だけ除外する。
+      if (!orderId && !sku) return false;
+
+      return !shouldExcludeByType((row as any).transaction_type, (row as any).amount_type, (row as any).amount_description);
+    });
 
     const groupMap = new Map<string, PendingFinanceDetail[]>();
 
