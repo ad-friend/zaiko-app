@@ -1,6 +1,6 @@
 /**
  * Amazon 決済トランザクション CSV/TSV の先頭説明行をスキップし、実ヘッダー行から始まる本文を返す。
- * サーバー（amazon-sales-import）とフロントの分割送信で同じ判定を使う。
+ * フロント（売上 CSV パース前）と同じ判定で先頭説明行をスキップする。
  */
 export function lineLooksLikeTransactionHeader(line: string): boolean {
   const t = line.replace(/^\uFEFF/, "").trim();

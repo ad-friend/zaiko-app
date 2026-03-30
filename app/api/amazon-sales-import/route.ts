@@ -1,13 +1,11 @@
 /**
  * Amazon 日付範囲別レポートのトランザクション CSV/TSV を sales_transactions に取り込む。
- * - 先頭のタイトル行をスキップしてからパース
+ * - フロントで PapaParse 済みの行オブジェクトを最大50件ずつ JSON POST する（タイムアウト回避）
  * - 1 CSV 行を金額列ごとに縦持ち（Finances API 相当: transaction_type=Order, amount_type=Charge/Fee）
  * - 同一 order_id × 内訳種別で分割発送行をマージ
  */
 import { NextRequest, NextResponse } from "next/server";
 import { createHash } from "crypto";
-import Papa from "papaparse";
-import { sliceFromTransactionHeader } from "@/lib/amazon-transaction-csv-header";
 import { supabase } from "@/lib/supabase";
 import { parseFlexiblePostedDateToIso } from "@/lib/settlement-posted-date";
 
@@ -67,15 +65,6 @@ function pickHeaderKey(headers: string[], candidates: string[]): string | null {
   return null;
 }
 
-function guessDelimiter(fileName: string, headerLine: string): "," | "\t" {
-  const lower = fileName.toLowerCase();
-  if (lower.endsWith(".tsv") || lower.endsWith(".tab")) return "\t";
-  if (lower.endsWith(".csv")) return ",";
-  const commaCount = (headerLine.match(/,/g) ?? []).length;
-  const tabCount = (headerLine.match(/\t/g) ?? []).length;
-  return tabCount > commaCount ? "\t" : ",";
-}
-
 function parseMoneyToNumber(raw: string): number | null {
   const cleaned = raw.trim().replace(/[^\d.-]/g, "");
   if (!cleaned) return null;
@@ -126,9 +115,35 @@ function hashMergedDetail(orderId: string, amountType: string, amountDescription
   return createHash("sha256").update(raw).digest("hex");
 }
 
-function hashStandaloneExpense(txType: string, amountType: string, postedIso: string, amount: number, seq: number): string {
-  const raw = ["AmazonTxCsvExpenseV1", txType.trim(), amountType.trim(), postedIso, String(amount), String(seq)].join("|");
+/** チャンク分割時に seq が各チャンクでリセットされるため chunkIndex を含める */
+function hashStandaloneExpense(
+  txType: string,
+  amountType: string,
+  postedIso: string,
+  amount: number,
+  seq: number,
+  chunkIndex: number
+): string {
+  const raw = ["AmazonTxCsvExpenseV2", txType.trim(), amountType.trim(), postedIso, String(amount), String(seq), String(chunkIndex)].join("|");
   return createHash("sha256").update(raw).digest("hex");
+}
+
+const MAX_ROWS_PER_REQUEST = 50;
+
+function coerceRowRecord(row: unknown): Record<string, string> | null {
+  if (row == null || typeof row !== "object" || Array.isArray(row)) return null;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(row as Record<string, unknown>)) {
+    if (typeof k !== "string" || !k.trim()) continue;
+    out[k] = v == null ? "" : String(v);
+  }
+  return out;
+}
+
+function normalizeHeaderList(headers: unknown): string[] | null {
+  if (!Array.isArray(headers)) return null;
+  const out = headers.filter((h): h is string => typeof h === "string" && h.trim().length > 0);
+  return out.length > 0 ? out : null;
 }
 
 /**
@@ -234,57 +249,59 @@ const AMOUNT_COLUMNS: AmountColumnDef[] = [
 export async function POST(request: NextRequest) {
   try {
     const body = (await request.json()) as {
-      csvText?: unknown;
+      rows?: unknown;
+      headers?: unknown;
       fileName?: unknown;
       batchMode?: unknown;
       chunkIndex?: unknown;
       totalChunks?: unknown;
+      skippedPrefixLines?: unknown;
+      rowOffsetBase?: unknown;
     };
-    const csvText = typeof body.csvText === "string" ? body.csvText : "";
+
     const fileName = typeof body.fileName === "string" ? body.fileName : "upload.csv";
     const batchMode = body.batchMode === true;
     const chunkIndex = typeof body.chunkIndex === "number" && Number.isFinite(body.chunkIndex) ? body.chunkIndex : null;
     const totalChunks = typeof body.totalChunks === "number" && Number.isFinite(body.totalChunks) ? body.totalChunks : null;
+    const skippedPrefixLines =
+      typeof body.skippedPrefixLines === "number" && Number.isFinite(body.skippedPrefixLines) && body.skippedPrefixLines >= 0
+        ? Math.floor(body.skippedPrefixLines)
+        : 0;
+    const rowOffsetBase =
+      typeof body.rowOffsetBase === "number" && Number.isFinite(body.rowOffsetBase) && body.rowOffsetBase >= 0
+        ? Math.floor(body.rowOffsetBase)
+        : 0;
 
-    if (!csvText.trim()) {
-      return NextResponse.json({ error: "csvText にファイル内容を渡してください。" }, { status: 400 });
+    if (!Array.isArray(body.rows) || body.rows.length === 0) {
+      return NextResponse.json(
+        { error: `rows に1〜${MAX_ROWS_PER_REQUEST}件のオブジェクト配列を渡してください（ブラウザでパース済みの行）。` },
+        { status: 400 }
+      );
+    }
+    if (body.rows.length > MAX_ROWS_PER_REQUEST) {
+      return NextResponse.json(
+        { error: `1リクエストあたり最大 ${MAX_ROWS_PER_REQUEST} 行までです（現在 ${body.rows.length} 行）。` },
+        { status: 400 }
+      );
     }
 
-    const { body: slicedText, skippedPrefixLines } = sliceFromTransactionHeader(csvText);
-
-    const firstNonEmptyLine =
-      slicedText
-        .split(/\r?\n/)
-        .map((l) => l.trim())
-        .find((l) => l.length > 0) ?? "";
-
-    if (!firstNonEmptyLine) {
-      return NextResponse.json({ error: "ヘッダー行が見つかりません（日付・オーダー番号を含む行がありません）。" }, { status: 400 });
+    const data: Record<string, string>[] = [];
+    for (const rawRow of body.rows) {
+      const coerced = coerceRowRecord(rawRow);
+      if (coerced) data.push(coerced);
+    }
+    if (data.length === 0) {
+      return NextResponse.json({ error: "rows に有効な行オブジェクトがありません。" }, { status: 400 });
     }
 
-    const delimiter = guessDelimiter(fileName, firstNonEmptyLine);
-
-    const parsed = Papa.parse<Record<string, string>>(slicedText, {
-      header: true,
-      delimiter: delimiter === "\t" ? "\t" : ",",
-      skipEmptyLines: "greedy",
-    });
-
-    if (parsed.errors?.length) {
-      const critical = parsed.errors.filter((e) => e.type === "FieldMismatch" || e.type === "Quotes");
-      if (critical.length) {
-        const msg = critical.map((e) => e.message).join("; ");
-        return NextResponse.json(
-          {
-            error: `CSV パースエラー: ${msg}`,
-            hint: skippedPrefixLines > 0 ? `先頭 ${skippedPrefixLines} 行をスキップ済みです。` : undefined,
-          },
-          { status: 400 }
-        );
-      }
+    const headerListFromBody = normalizeHeaderList(body.headers);
+    const headerKeysFromRows = data.length > 0 ? Object.keys(data[0]) : [];
+    const headers =
+      headerListFromBody ??
+      headerKeysFromRows.filter((h) => typeof h === "string" && h.trim().length > 0);
+    if (headers.length === 0) {
+      return NextResponse.json({ error: "headers（列名配列）が空です。PapaParse の meta.fields を渡してください。" }, { status: 400 });
     }
-
-    const headers = (parsed.meta.fields ?? []).filter((h): h is string => typeof h === "string" && h.trim().length > 0);
 
     const hDate = pickHeaderKey(headers, [
       "日付/時刻",
@@ -350,20 +367,20 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const data = Array.isArray(parsed.data) ? parsed.data : [];
     const rowErrors: string[] = [];
     const expanded: DetailRow[] = [];
 
     for (let i = 0; i < data.length; i++) {
       const r = data[i];
-      if (!r || typeof r !== "object") continue;
 
       const orderId = toTrimmedString(r[hOrder]);
       const dateRaw = toTrimmedString(r[hDate]);
       const typeRaw = hType ? toTrimmedString(r[hType]) : "";
 
+      const lineNo = rowOffsetBase + i + 2 + skippedPrefixLines;
+
       if (!dateRaw) {
-        rowErrors.push(`行 ${i + 2 + skippedPrefixLines}: 日付が空です（注文 ${orderId}）。`);
+        rowErrors.push(`行 ${lineNo}: 日付が空です（注文 ${orderId}）。`);
         continue;
       }
 
@@ -371,7 +388,7 @@ export async function POST(request: NextRequest) {
         parseFlexiblePostedDateToIso(dateRaw) ??
         (Date.parse(dateRaw) ? new Date(Date.parse(dateRaw)).toISOString() : null);
       if (!postedIso) {
-        rowErrors.push(`行 ${i + 2 + skippedPrefixLines}: 日付を解釈できません（${dateRaw}）。`);
+        rowErrors.push(`行 ${lineNo}: 日付を解釈できません（${dateRaw}）。`);
         continue;
       }
 
@@ -382,13 +399,13 @@ export async function POST(request: NextRequest) {
         // オーダー番号が空でも取り込みは許可（集計用）。
         // ただし金額が取れないと意味がないので total/amount にフォールバックする。
         if (!hTotalFallback) {
-          rowErrors.push(`行 ${i + 2 + skippedPrefixLines}: オーダー番号が空で、かつ金額列（total等）も見つかりません。`);
+          rowErrors.push(`行 ${lineNo}: オーダー番号が空で、かつ金額列（total等）も見つかりません。`);
           continue;
         }
         const rawCell = toTrimmedString(r[hTotalFallback]);
         const num = rawCell ? parseMoneyToNumber(rawCell) : null;
         if (num == null) {
-          rowErrors.push(`行 ${i + 2 + skippedPrefixLines}: オーダー番号が空ですが、金額が空/不正です。`);
+          rowErrors.push(`行 ${lineNo}: オーダー番号が空ですが、金額が空/不正です。`);
           continue;
         }
         const tt = normalizeTransactionType(typeRaw || "Adjustment");
@@ -409,9 +426,7 @@ export async function POST(request: NextRequest) {
         if (!rawCell) continue;
         const num = parseMoneyToNumber(rawCell);
         if (num == null) {
-          rowErrors.push(
-            `行 ${i + 2 + skippedPrefixLines}: 金額が数値として解釈できません（${orderId} / ${headerName}）。`
-          );
+          rowErrors.push(`行 ${lineNo}: 金額が数値として解釈できません（${orderId} / ${headerName}）。`);
           continue;
         }
 
@@ -482,6 +497,7 @@ export async function POST(request: NextRequest) {
     const mergedSplitPaymentOrders = ordersThatMerged.size;
     const mergedSplitPaymentExtraRows = mergeExtraRows;
 
+    const chunkIdxSafe = chunkIndex ?? 0;
     let expenseSeq = 0;
     const insertPayload: SalesTxUpsertRow[] = [...mergeMap.entries()].map(([key, v]) => {
       const orderId = key.split("\u0001")[0] ?? "";
@@ -498,18 +514,19 @@ export async function POST(request: NextRequest) {
         amazon_event_hash:
           orderId && txType === "Order"
             ? hashMergedDetail(orderId, v.amount_type, v.amount_description)
-            : hashStandaloneExpense(txType, v.amount_type, v.posted_iso, v.amount, expenseSeq),
+            : hashStandaloneExpense(txType, v.amount_type, v.posted_iso, v.amount, expenseSeq, chunkIdxSafe),
       };
     });
 
     console.log(
-      `[amazon-sales-import] skipped_prefix=${skippedPrefixLines} csv_rows=${data.length} expanded=${expanded.length} merged_out=${insertPayload.length} merged_orders=${mergedSplitPaymentOrders} merged_extra=${mergedSplitPaymentExtraRows}`
+      `[amazon-sales-import] chunk=${chunkIdxSafe}/${totalChunks ?? 1} skipped_prefix=${skippedPrefixLines} csv_rows=${data.length} expanded=${expanded.length} merged_out=${insertPayload.length} merged_orders=${mergedSplitPaymentOrders} merged_extra=${mergedSplitPaymentExtraRows}`
     );
 
     let upserted = 0;
     for (let i = 0; i < insertPayload.length; i += UPSERT_CHUNK) {
       const chunk = insertPayload.slice(i, i + UPSERT_CHUNK);
       const toUpsert = await mergeUpsertChunkWithExisting(chunk, batchMode, chunkIndex);
+      // amazon_event_hash 一意のため、再インポート時の上書き・分割チャンク間の合算に upsert を使用
       const { data: upData, error: upErr } = await supabase
         .from("sales_transactions")
         .upsert(toUpsert, { onConflict: "amazon_event_hash" })
