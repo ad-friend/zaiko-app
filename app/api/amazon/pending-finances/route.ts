@@ -30,20 +30,24 @@ export type PendingFinanceGroup = {
 export async function GET() {
   try {
     const shouldExcludeByType = (transactionType: unknown, amountType: unknown, amountDescription: unknown): boolean => {
-      const tt = String(transactionType ?? "");
-      const at = String(amountType ?? "");
-      const ad = String(amountDescription ?? "");
-      return (
-        tt.includes("PostageBilling") ||
-        at.includes("PostageBilling") ||
-        ad.includes("PostageBilling") ||
-        tt.includes("ServiceFee") ||
-        at.includes("ServiceFee") ||
-        ad.includes("ServiceFee") ||
-        tt.includes("adj_") ||
-        at.includes("adj_") ||
-        ad.includes("adj_")
-      );
+      // 手動消込UIでは「注文に紐づく売上/返金」だけを見たい。
+      // 取引タイプの表記揺れがあるため、Refund/返金/注文などで分岐せず、
+      // 「明らかに手数料・振込・FBA・送料課金系だけ」を部分一致で除外する。
+      const tt = String(transactionType ?? "").normalize("NFKC").toLowerCase();
+      const at = String(amountType ?? "").normalize("NFKC").toLowerCase();
+      const ad = String(amountDescription ?? "").normalize("NFKC").toLowerCase();
+
+      const hay = [tt, at, ad].join("\n");
+      const keywords = [
+        "transfer",
+        "振込み",
+        "振り込み",
+        "振込",
+        "servicefee",
+        "fba",
+        "postagebilling",
+      ];
+      return keywords.some((k) => hay.includes(k));
     };
 
     // status カラムが存在する場合は reconciled を除外する。
@@ -78,19 +82,13 @@ export async function GET() {
 
     let list = (rows ?? []) as PendingFinanceDetail[];
 
-    // 経費・調整として扱うものだけを除外（部分一致）。Order/Refund 等の通常データは絶対に落とさない。
+    // 手動消込の対象だけに最適化して除外:
+    // - 注文番号が無い行はアカウントレベルの経費等として扱い除外（adj_ グループも生成させない）
+    // - 取引タイプ/金額タイプに手数料・振込関連の文字列を含むものは除外
+    // - 金額の符号（±/0）では判定しない（返金等のマイナスも残す）
     list = list.filter((row) => {
       const orderId = row.amazon_order_id?.trim() ?? "";
-      const sku = row.sku?.trim() ?? "";
-      const txType = String((row as any).transaction_type ?? "");
-
-      // ここで落とすのは「経費/調整として扱うもの（PostageBilling/ServiceFee/adj_）」のみ。
-      // 以前は「注文IDもSKUも無い行」を一律で除外していたが、Refund 等でも注文ID/SKUが欠けるケースがあり得るため、
-      // そのような通常明細まで落とさないようにする。
-      //
-      // ただし「注文IDもSKUも無い」かつ transaction_type が Adjustment のような純調整は、一覧に出しても解決不能なことが多いので除外する。
-      if (!orderId && !sku && txType === "Adjustment") return false;
-
+      if (!orderId) return false;
       return !shouldExcludeByType((row as any).transaction_type, (row as any).amount_type, (row as any).amount_description);
     });
 
