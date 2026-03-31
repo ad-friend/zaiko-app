@@ -4,6 +4,11 @@
  */
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
+import {
+  classifyPendingFinanceGroup,
+  displayLabelForPendingFinanceKind,
+  type PendingFinanceGroupKind,
+} from "@/lib/pending-finance-group-kind";
 
 export type PendingFinanceDetail = {
   id: number;
@@ -25,6 +30,8 @@ export type PendingFinanceGroup = {
   net_amount: number;
   posted_date: string;
   raw_details: PendingFinanceDetail[];
+  group_kind: PendingFinanceGroupKind;
+  display_label: string;
 };
 
 export async function GET() {
@@ -119,6 +126,8 @@ export async function GET() {
       const representativeSku = first.sku?.trim() ?? null;
       const transactionType = first.transaction_type ?? "Unknown";
       const postedDate = first.posted_date ?? "";
+      const group_kind = classifyPendingFinanceGroup(details);
+      const display_label = displayLabelForPendingFinanceKind(group_kind, transactionType);
 
       groups.push({
         groupId,
@@ -128,6 +137,8 @@ export async function GET() {
         net_amount: netAmount,
         posted_date: postedDate,
         raw_details: details,
+        group_kind,
+        display_label,
       });
     }
 

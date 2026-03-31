@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { isPrincipalTaxOffsetQuad } from "@/lib/amazon-principal-tax-quad";
+import type { PendingFinanceGroupKind } from "@/lib/pending-finance-group-kind";
 
 export type PendingFinanceDetail = {
   id: number;
@@ -22,6 +24,8 @@ export type PendingFinanceGroupData = {
   net_amount: number;
   posted_date: string;
   raw_details: PendingFinanceDetail[];
+  group_kind?: PendingFinanceGroupKind;
+  display_label?: string;
 };
 
 export type CandidateStock = {
@@ -49,7 +53,11 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!isOpen || !data || data.transaction_type !== "Order") {
+    const details = data?.raw_details ?? [];
+    const isOffsetQuad =
+      data != null &&
+      (data.group_kind === "offset_principal_tax" || isPrincipalTaxOffsetQuad(details));
+    if (!isOpen || !data || data.transaction_type !== "Order" || isOffsetQuad) {
       setCandidateStocks([]);
       setSelectedStockId(null);
       setError(null);
@@ -68,11 +76,40 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
       })
       .catch(() => setCandidateStocks([]))
       .finally(() => setLoadingCandidates(false));
-  }, [isOpen, data?.groupId, data?.amazon_order_id, data?.sku, data?.transaction_type]);
+  }, [isOpen, data?.groupId, data?.amazon_order_id, data?.sku, data?.transaction_type, data?.group_kind, data?.raw_details]);
 
   const details = data?.raw_details ?? [];
   const netAmount = data?.net_amount ?? 0;
   const txType = data?.transaction_type ?? "";
+  const isOffsetQuad =
+    data != null &&
+    (data.group_kind === "offset_principal_tax" || isPrincipalTaxOffsetQuad(details));
+
+  const handlePrincipalTaxSettle = async (action: "offset" | "release_inbound") => {
+    if (!data) return;
+    const ids = details.map((d) => d.id);
+    if (ids.length !== 4 || ids.some((id) => !Number.isFinite(id))) {
+      setError("明細IDが不正です。");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/amazon/manual-finance-principal-tax-settle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, salesTransactionIds: ids }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? "処理に失敗しました");
+      onSuccess?.();
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "処理に失敗しました");
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   const handleConfirmOrder = async () => {
     if (!data || selectedStockId == null) return;
@@ -177,7 +214,36 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
 
             {/* 右: アクションエリア */}
             <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
-              {txType === "Order" && (
+              {isOffsetQuad && (
+                <>
+                  <h3 className="bg-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-700 border-b border-slate-200">
+                    Principal / Tax 相殺
+                  </h3>
+                  <div className="p-4 space-y-4">
+                    <p className="text-xs text-slate-600">
+                      注文内で Principal / Tax のプラスがマイナスと相殺しているだけの場合、在庫を触らずに未消込リストから外すことができます。在庫に紐づく注文引当を解除してから相殺する場合は下のボタンを選んでください。
+                    </p>
+                    {error && <p className="text-sm text-red-600">{error}</p>}
+                    <button
+                      type="button"
+                      onClick={() => void handlePrincipalTaxSettle("offset")}
+                      disabled={submitting}
+                      className="w-full inline-flex items-center justify-center rounded-lg bg-slate-700 text-white py-2.5 px-4 text-sm font-semibold hover:bg-slate-800 disabled:opacity-50 transition-colors shadow-sm"
+                    >
+                      {submitting ? "処理中..." : "相殺のみ完結（在庫は触らない）"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handlePrincipalTaxSettle("release_inbound")}
+                      disabled={submitting}
+                      className="w-full inline-flex items-center justify-center rounded-lg bg-amber-500 text-white py-2.5 px-4 text-sm font-semibold hover:bg-amber-600 disabled:opacity-50 transition-colors shadow-sm border border-amber-600/30"
+                    >
+                      {submitting ? "処理中..." : "在庫の注文引当を解除して復帰"}
+                    </button>
+                  </div>
+                </>
+              )}
+              {!isOffsetQuad && txType === "Order" && (
                 <>
                   <h3 className="bg-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-700 border-b border-slate-200">
                     紐付ける在庫の選択
@@ -223,7 +289,7 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                   </div>
                 </>
               )}
-              {txType === "Refund" && (
+              {!isOffsetQuad && txType === "Refund" && (
                 <>
                   <h3 className="bg-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-700 border-b border-slate-200">
                     返品処理
@@ -242,7 +308,8 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                   </div>
                 </>
               )}
-              {(txType === "Adjustment" || (txType !== "Order" && txType !== "Refund")) && (
+              {!isOffsetQuad &&
+                (txType === "Adjustment" || (txType !== "Order" && txType !== "Refund")) && (
                 <>
                   <h3 className="bg-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-700 border-b border-slate-200">
                     補填処理

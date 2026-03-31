@@ -712,14 +712,18 @@ export default function AmazonReconcileManager() {
                           <div className="mt-0.5 flex items-center gap-1.5 flex-wrap">
                             <span
                               className={`inline-flex shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${
-                                g.transaction_type === "Order"
-                                  ? "bg-blue-100 text-blue-700"
-                                  : g.transaction_type === "Refund"
-                                    ? "bg-amber-100 text-amber-700"
-                                    : "bg-slate-200 text-slate-700"
+                                g.group_kind === "offset_principal_tax"
+                                  ? "bg-violet-100 text-violet-800"
+                                  : g.group_kind === "adjustment_like"
+                                    ? "bg-emerald-100 text-emerald-800"
+                                    : g.group_kind === "order" || g.transaction_type === "Order"
+                                      ? "bg-blue-100 text-blue-700"
+                                      : g.group_kind === "refund" || g.transaction_type === "Refund"
+                                        ? "bg-amber-100 text-amber-700"
+                                        : "bg-slate-200 text-slate-700"
                               }`}
                             >
-                              {g.transaction_type}
+                              {g.display_label ?? g.transaction_type}
                             </span>
                             <span className="text-slate-500">
                               {g.posted_date ? new Date(g.posted_date).toLocaleDateString("ja-JP", { month: "numeric", day: "numeric" }) : "—"}
