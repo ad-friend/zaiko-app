@@ -760,16 +760,16 @@ export default function InboundPage() {
 
               <div className="rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden min-h-[400px]">
                 <div className="hidden md:block overflow-x-auto">
-                  <table className="w-full text-sm text-left">
+                  <table className="w-full table-fixed text-sm text-left">
                     <thead className="bg-slate-50/80 border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold tracking-wider">
                       <tr>
-                        <th className="px-3 py-3 w-[16%]">JAN / 状態</th>
-                        <th className="px-3 py-3 min-w-0 w-[28%]">商品情報</th>
-                        <th className="px-3 py-3 w-[12%] text-right">数量</th>
-                        <th className="px-3 py-3 w-[12%] text-right">基準価格</th>
+                        <th className="px-3 py-3 w-[22%]">JAN / 状態</th>
+                        <th className="px-3 py-3 min-w-0 w-[25%]">商品情報</th>
+                        <th className="px-3 py-3 w-[14%] text-right">数量</th>
+                        <th className="px-3 py-3 w-[11%] text-right">基準価格</th>
                         <th className="px-3 py-3 w-[12%] text-right">実質単価</th>
-                        <th className="px-3 py-3 w-[7%] text-center">按分</th>
-                        <th className="px-3 py-3 w-[6%]"></th>
+                        <th className="px-3 py-3 w-[8%] text-center">按分</th>
+                        <th className="px-3 py-3 w-[8%]"></th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 bg-white">
@@ -807,7 +807,7 @@ export default function InboundPage() {
                                         const v = e.target.value.trim().replace(/\D/g, "");
                                         if (v.length === 13 && !row.brand && !row.productName) handleJanBlurOrEnter(v, row.id);
                                     }}
-                                    className={`${inputClass} w-full font-mono text-xs h-9 shadow-sm ${isJanMissing ? "border-red-400 focus-visible:ring-red-200" : ""}`}
+                                    className={`${inputClass} w-full font-mono text-sm h-9 shadow-sm ${isJanMissing ? "border-red-400 focus-visible:ring-red-200" : ""}`}
                                     placeholder="JAN"
                                     />
                                     {row.inferredByAi && (
@@ -857,7 +857,7 @@ export default function InboundPage() {
                                   min={1}
                                   value={row.quantity}
                                   onChange={(e) => updateRow(row.id, { quantity: Math.max(1, Number(e.target.value) || 1) })}
-                                  className={`${inputClass} w-14 h-9 text-center font-medium shadow-sm [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none`}
+                                  className={`${inputClass} w-16 h-9 text-center font-medium shadow-sm [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none`}
                                 />
                                 <button type="button" onClick={() => updateRow(row.id, { quantity: row.quantity + 1 })} className="h-8 w-8 shrink-0 rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 inline-flex items-center justify-center font-medium">+</button>
                               </div>
