@@ -763,19 +763,17 @@ export default function InboundPage() {
                   <table className="w-full table-fixed text-sm text-left">
                     <thead className="bg-slate-50/80 border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold tracking-wider">
                       <tr>
-                        <th className="px-3 py-3 w-[22%]">JAN / 状態</th>
-                        <th className="px-3 py-3 min-w-0 w-[25%]">商品情報</th>
-                        <th className="px-3 py-3 w-[14%] text-right">数量</th>
-                        <th className="px-3 py-3 w-[11%] text-right">基準価格</th>
-                        <th className="px-3 py-3 w-[12%] text-right">実質単価</th>
-                        <th className="px-3 py-3 w-[8%] text-center">按分</th>
-                        <th className="px-3 py-3 w-[8%]"></th>
+                        <th className="px-3 py-3 w-[25%]">JAN / 状態</th>
+                        <th className="px-3 py-3 min-w-0 w-[30%]">商品情報</th>
+                        <th className="px-3 py-3 w-[20%] text-right">数量 / 基準価格</th>
+                        <th className="px-3 py-3 w-[20%] text-right">実質単価 / 按分</th>
+                        <th className="px-3 py-3 w-[5%]"></th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 bg-white">
                       {rows.length === 0 && (
                          <tr>
-                           <td colSpan={7} className="px-3 py-24 text-center text-slate-400">
+                           <td colSpan={5} className="px-3 py-24 text-center text-slate-400">
                              <div className="flex flex-col items-center justify-center gap-4">
                                <div className="h-16 w-16 rounded-full bg-slate-50 flex items-center justify-center border border-slate-100">
                                  <PlusIcon className="h-8 w-8 text-slate-300" />
@@ -850,43 +848,64 @@ export default function InboundPage() {
                                </div>
                             </td>
                             <td className="px-3 py-3 align-top">
-                              <div className="flex items-center justify-end gap-1">
-                                <button type="button" onClick={() => updateRow(row.id, { quantity: Math.max(1, row.quantity - 1) })} className="h-8 w-8 shrink-0 rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 inline-flex items-center justify-center font-medium">−</button>
-                                <input
-                                  type="number"
-                                  min={1}
-                                  value={row.quantity}
-                                  onChange={(e) => updateRow(row.id, { quantity: Math.max(1, Number(e.target.value) || 1) })}
-                                  className={`${inputClass} w-16 h-9 text-center font-medium shadow-sm [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none`}
-                                />
-                                <button type="button" onClick={() => updateRow(row.id, { quantity: row.quantity + 1 })} className="h-8 w-8 shrink-0 rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 inline-flex items-center justify-center font-medium">+</button>
+                              <div className="flex flex-col gap-2">
+                                <div className="flex items-center justify-end gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => updateRow(row.id, { quantity: Math.max(1, row.quantity - 1) })}
+                                    className="h-8 w-8 shrink-0 rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 inline-flex items-center justify-center font-medium"
+                                  >
+                                    −
+                                  </button>
+                                  <input
+                                    type="number"
+                                    min={1}
+                                    value={row.quantity}
+                                    onChange={(e) => updateRow(row.id, { quantity: Math.max(1, Number(e.target.value) || 1) })}
+                                    className={`${inputClass} w-16 h-9 text-center font-medium shadow-sm [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none`}
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => updateRow(row.id, { quantity: row.quantity + 1 })}
+                                    className="h-8 w-8 shrink-0 rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 inline-flex items-center justify-center font-medium"
+                                  >
+                                    +
+                                  </button>
+                                </div>
+
+                                <div className="relative">
+                                  <span className="absolute left-2 top-2.5 text-slate-400 text-xs">¥</span>
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    value={row.basePrice || ""}
+                                    onChange={(e) => updateRow(row.id, { basePrice: Number(e.target.value) || 0 })}
+                                    className={`${inputClass} w-full text-right pl-6 h-9 font-medium shadow-sm ${isPriceMissing ? "border-red-400 focus-visible:ring-red-200" : ""}`}
+                                    placeholder="0"
+                                  />
+                                </div>
                               </div>
                             </td>
-                            <td className="px-3 py-3 align-top">
-                              <div className="relative">
-                                <span className="absolute left-2 top-2.5 text-slate-400 text-xs">¥</span>
+
+                            <td className="px-3 py-3 align-top pt-3">
+                              <div className="text-right font-bold text-slate-800 tabular-nums">
+                                {effective > 0 ? Math.round(effective).toLocaleString() : "—"}
+                                <span className="text-[10px] text-slate-400 ml-1 font-normal">円</span>
+                              </div>
+                              <div className="flex items-center justify-end gap-1.5 mt-2">
+                                <label htmlFor={`fixed-${row.id}`} className="text-[10px] text-slate-500 font-medium">
+                                  按分対象
+                                </label>
                                 <input
-                                  type="number"
-                                  min={0}
-                                  value={row.basePrice || ""}
-                                  onChange={(e) => updateRow(row.id, { basePrice: Number(e.target.value) || 0 })}
-                                  className={`${inputClass} w-full text-right pl-6 h-9 font-medium shadow-sm ${isPriceMissing ? "border-red-400 focus-visible:ring-red-200" : ""}`}
-                                  placeholder="0"
+                                  id={`fixed-${row.id}`}
+                                  type="checkbox"
+                                  checked={row.fixedUnitPrice}
+                                  onChange={(e) => updateRow(row.id, { fixedUnitPrice: e.target.checked })}
+                                  className="h-5 w-5 rounded border-slate-300 text-primary focus:ring-primary/20 cursor-pointer shadow-sm"
                                 />
                               </div>
                             </td>
-                            <td className="px-3 py-3 align-top text-right font-bold text-slate-800 pt-3 tabular-nums">
-                              {effective > 0 ? Math.round(effective).toLocaleString() : "—"}
-                              <span className="text-[10px] text-slate-400 ml-1 font-normal">円</span>
-                            </td>
-                            <td className="px-3 py-3 align-top text-center pt-3">
-                               <input
-                                 type="checkbox"
-                                 checked={row.fixedUnitPrice}
-                                 onChange={(e) => updateRow(row.id, { fixedUnitPrice: e.target.checked })}
-                                 className="h-5 w-5 rounded border-slate-300 text-primary focus:ring-primary/20 cursor-pointer shadow-sm"
-                               />
-                            </td>
+
                             <td className="px-3 py-3 align-top pt-2 text-right">
                               <button
                                 onClick={() => removeRow(row.id)}
