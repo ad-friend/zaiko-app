@@ -763,12 +763,12 @@ export default function InboundPage() {
                   <table className="w-full text-sm text-left">
                     <thead className="bg-slate-50/80 border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold tracking-wider">
                       <tr>
-                        <th className="px-3 py-3 w-[11%]">JAN / 状態</th>
+                        <th className="px-3 py-3 w-[16%]">JAN / 状態</th>
                         <th className="px-3 py-3 min-w-0 w-[28%]">商品情報</th>
-                        <th className="px-3 py-3 w-[8%] text-right">数量</th>
+                        <th className="px-3 py-3 w-[12%] text-right">数量</th>
                         <th className="px-3 py-3 w-[12%] text-right">基準価格</th>
-                        <th className="px-3 py-3 w-[7%] text-center">按分</th>
                         <th className="px-3 py-3 w-[12%] text-right">実質単価</th>
+                        <th className="px-3 py-3 w-[7%] text-center">按分</th>
                         <th className="px-3 py-3 w-[6%]"></th>
                       </tr>
                     </thead>
@@ -870,10 +870,14 @@ export default function InboundPage() {
                                   min={0}
                                   value={row.basePrice || ""}
                                   onChange={(e) => updateRow(row.id, { basePrice: Number(e.target.value) || 0 })}
-                                  className={`${inputClass} w-full text-right pl-6 h-10 font-medium shadow-sm ${isPriceMissing ? "border-red-400 focus-visible:ring-red-200" : ""}`}
+                                  className={`${inputClass} w-full text-right pl-6 h-9 font-medium shadow-sm ${isPriceMissing ? "border-red-400 focus-visible:ring-red-200" : ""}`}
                                   placeholder="0"
                                 />
                               </div>
+                            </td>
+                            <td className="px-3 py-3 align-top text-right font-bold text-slate-800 pt-3 tabular-nums">
+                              {effective > 0 ? Math.round(effective).toLocaleString() : "—"}
+                              <span className="text-[10px] text-slate-400 ml-1 font-normal">円</span>
                             </td>
                             <td className="px-3 py-3 align-top text-center pt-3">
                                <input
@@ -882,10 +886,6 @@ export default function InboundPage() {
                                  onChange={(e) => updateRow(row.id, { fixedUnitPrice: e.target.checked })}
                                  className="h-5 w-5 rounded border-slate-300 text-primary focus:ring-primary/20 cursor-pointer shadow-sm"
                                />
-                            </td>
-                            <td className="px-3 py-3 align-top text-right font-bold text-slate-800 pt-3 tabular-nums">
-                              {effective > 0 ? Math.round(effective).toLocaleString() : "—"}
-                              <span className="text-[10px] text-slate-400 ml-1 font-normal">円</span>
                             </td>
                             <td className="px-3 py-3 align-top pt-2 text-right">
                               <button
@@ -980,7 +980,7 @@ export default function InboundPage() {
                            </div>
                         </div>
 
-                        <div className="mt-4 rounded-lg bg-slate-50/50 border border-slate-100 p-3 grid grid-cols-2 gap-4 items-center">
+                        <div className="mt-4 rounded-lg bg-slate-50/50 border border-slate-100 p-3 grid grid-cols-2 gap-4 items-start">
                            <div className="col-span-2 flex items-center justify-between gap-4 border-b border-slate-200/50 pb-3 mb-1">
                               <label className="text-[10px] text-slate-400 font-bold block">数量</label>
                               <div className="flex items-center gap-3">
@@ -1004,7 +1004,10 @@ export default function InboundPage() {
                              </div>
                            </div>
                            <div className="text-right">
-                              <div className="flex items-center justify-end gap-1.5 mb-1">
+                              <div className="text-sm font-bold text-slate-900">
+                                実質 <span className="text-lg text-primary">{effective > 0 ? Math.round(effective).toLocaleString() : "—"}</span> 円
+                              </div>
+                              <div className="flex items-center justify-end gap-1.5 mt-2">
                                 <label htmlFor={`fixed-${row.id}`} className="text-[10px] text-slate-500 font-medium">按分対象</label>
                                 <input
                                    id={`fixed-${row.id}`}
@@ -1012,10 +1015,7 @@ export default function InboundPage() {
                                    checked={row.fixedUnitPrice}
                                    onChange={(e) => updateRow(row.id, { fixedUnitPrice: e.target.checked })}
                                    className="h-4 w-4 rounded border-slate-300 text-primary focus:ring-primary/20"
-                                 />
-                              </div>
-                              <div className="text-sm font-bold text-slate-900">
-                                実質 <span className="text-lg text-primary">{effective > 0 ? Math.round(effective).toLocaleString() : "—"}</span> 円
+                                />
                               </div>
                            </div>
                         </div>
