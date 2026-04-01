@@ -300,7 +300,9 @@ export default function HistoryPage() {
         const vb = getSortValue(b, key);
         const isNum = typeof va === "number" && typeof vb === "number";
         if (isNum) {
-          return direction === "asc" ? (va as number) - (vb as number) : (vb as number) - (va as number);
+          const diff = direction === "asc" ? (va as number) - (vb as number) : (vb as number) - (va as number);
+          if (diff !== 0) return diff;
+          return a.id - b.id;
         }
         const sa = String(va);
         const sb = String(vb);

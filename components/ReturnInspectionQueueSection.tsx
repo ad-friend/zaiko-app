@@ -10,7 +10,10 @@ type ReturnInspectionRow = {
   product_name: string | null;
   condition_type: string | null;
   stock_status: string | null;
-  created_at: string | null;
+  /** 返品取り込みで保存した Amazon 注文番号 */
+  return_amazon_order_id: string | null;
+  /** 返品レポート由来の返品受付/発生日時 */
+  amazon_return_received_at: string | null;
 };
 
 const buttonClass =
@@ -18,6 +21,13 @@ const buttonClass =
 
 function initialListingCondition(raw: string | null | undefined): "new" | "used" {
   return normalizeStockCondition(raw) === "used" ? "used" : "new";
+}
+
+function formatAmazonReturnInstant(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString("ja-JP", { dateStyle: "medium", timeStyle: "short" });
 }
 
 function ReturnInspectionCard({
@@ -72,10 +82,23 @@ function ReturnInspectionCard({
             <p className="break-all font-mono font-semibold text-slate-800">{row.jan_code ?? "—"}</p>
           </div>
           <div className="min-w-0">
-            <p className="text-[10px] font-medium text-slate-400">登録日</p>
-            <p className="tabular-nums text-slate-700">
-              {row.created_at ? row.created_at.slice(0, 10) : "—"}
-            </p>
+            <p className="text-[10px] font-medium text-slate-400">注文番号（Amazon）</p>
+            {row.return_amazon_order_id ? (
+              <a
+                href={`https://sellercentral.amazon.co.jp/orders-v3/order/${row.return_amazon_order_id}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="break-all font-mono font-semibold text-sky-700 underline underline-offset-2 hover:text-sky-900"
+              >
+                {row.return_amazon_order_id}
+              </a>
+            ) : (
+              <p className="font-mono text-slate-700">—</p>
+            )}
+          </div>
+          <div className="min-w-0">
+            <p className="text-[10px] font-medium text-slate-400">返品日（レポート）</p>
+            <p className="tabular-nums text-slate-700">{formatAmazonReturnInstant(row.amazon_return_received_at)}</p>
           </div>
         </div>
         {row.product_name ? (

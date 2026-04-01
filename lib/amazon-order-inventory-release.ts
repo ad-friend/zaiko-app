@@ -14,7 +14,8 @@ export type ReleaseInboundForAmazonOrderMode = "cancel" | "return";
  */
 export async function releaseInboundItemsForAmazonOrder(
   amazon_order_id: string,
-  mode: ReleaseInboundForAmazonOrderMode = "cancel"
+  mode: ReleaseInboundForAmazonOrderMode = "cancel",
+  opts?: { returnReceivedAt?: string | null }
 ): Promise<ReleaseInboundForAmazonOrderResult> {
   const oid = String(amazon_order_id ?? "").trim();
   if (!oid) {
@@ -23,7 +24,13 @@ export async function releaseInboundItemsForAmazonOrder(
 
   const payload =
     mode === "return"
-      ? { order_id: null, settled_at: null, stock_status: STOCK_STATUS_RETURN_INSPECTION }
+      ? {
+          order_id: null,
+          settled_at: null,
+          stock_status: STOCK_STATUS_RETURN_INSPECTION,
+          return_amazon_order_id: oid,
+          amazon_return_received_at: opts?.returnReceivedAt ?? null,
+        }
       : { order_id: null, settled_at: null };
 
   const { error: invErr } = await supabase.from("inbound_items").update(payload).eq("order_id", oid);

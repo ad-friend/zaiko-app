@@ -3,7 +3,7 @@
  * 同一ファイル・過去データの再取り込みでも冪等（終端状態・DB 未登録はスキップ）。
  */
 import { NextRequest, NextResponse } from "next/server";
-import { parseAmazonReturnsDelimitedText } from "@/lib/amazon-returns-import-parse";
+import { parseAmazonReturnsDelimitedText, parseAmazonReturnDateToIso, pickEarlierIso } from "@/lib/amazon-returns-import-parse";
 import { handleOrderReturn } from "@/lib/amazon-return";
 import iconv from "iconv-lite";
 
@@ -75,11 +75,18 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    /** 注文ID単位で1回だけ処理（重複行は冪等にまとめる） */
-    const uniqueByOrder = new Map<string, string>();
+    /** 注文ID単位で1回だけ処理（重複行は冪等にまとめる）。返品日は同一注文で最も早い日時を採用 */
+    const uniqueByOrder = new Map<string, { disposition: string; returnReceivedAt: string | null }>();
     for (const r of parsed.rows) {
-      if (!uniqueByOrder.has(r.amazon_order_id)) {
-        uniqueByOrder.set(r.amazon_order_id, r.disposition);
+      const iso = parseAmazonReturnDateToIso(r.return_date_raw);
+      const prev = uniqueByOrder.get(r.amazon_order_id);
+      if (!prev) {
+        uniqueByOrder.set(r.amazon_order_id, { disposition: r.disposition, returnReceivedAt: iso });
+      } else {
+        uniqueByOrder.set(r.amazon_order_id, {
+          disposition: prev.disposition,
+          returnReceivedAt: pickEarlierIso(prev.returnReceivedAt, iso),
+        });
       }
     }
 
@@ -88,8 +95,8 @@ export async function POST(request: NextRequest) {
     let skipped_already_processed = 0;
     const errors: string[] = [...parsed.rowErrors];
 
-    for (const [orderId, disposition] of uniqueByOrder) {
-      const res = await handleOrderReturn(orderId, disposition);
+    for (const [orderId, { disposition, returnReceivedAt }] of uniqueByOrder) {
+      const res = await handleOrderReturn(orderId, disposition, returnReceivedAt);
       if (!res.ok) {
         errors.push(`${orderId}: ${res.message}`);
         continue;

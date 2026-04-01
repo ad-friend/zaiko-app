@@ -17,9 +17,10 @@ export async function GET() {
   try {
     const { data, error } = await supabase
       .from("inbound_items")
-      .select("id, jan_code, product_name, condition_type, stock_status, created_at")
+      .select("id, jan_code, product_name, condition_type, stock_status, return_amazon_order_id, amazon_return_received_at")
       .eq("stock_status", STOCK_STATUS_RETURN_INSPECTION)
-      .order("created_at", { ascending: true })
+      .order("amazon_return_received_at", { ascending: true, nullsFirst: false })
+      .order("id", { ascending: true })
       .limit(500);
 
     if (error) throw error;
@@ -50,6 +51,8 @@ export async function POST(request: NextRequest) {
         .update({
           stock_status: STOCK_STATUS_DISPOSED,
           exit_type: EXIT_TYPE_JUNK_RETURN,
+          return_amazon_order_id: null,
+          amazon_return_received_at: null,
         })
         .eq("id", id)
         .eq("stock_status", STOCK_STATUS_RETURN_INSPECTION)
@@ -78,6 +81,8 @@ export async function POST(request: NextRequest) {
       .update({
         condition_type,
         stock_status: STOCK_STATUS_AVAILABLE,
+        return_amazon_order_id: null,
+        amazon_return_received_at: null,
       })
       .eq("id", id)
       .eq("stock_status", STOCK_STATUS_RETURN_INSPECTION)

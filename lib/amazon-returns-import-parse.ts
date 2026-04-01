@@ -3,6 +3,8 @@ import Papa from "papaparse";
 export type AmazonReturnImportRow = {
   amazon_order_id: string;
   disposition: string;
+  /** レポートの返品日列の生文字列 */
+  return_date_raw: string;
 };
 
 function normalizeHeaderKey(s: string): string {
@@ -46,6 +48,25 @@ function guessDelimiter(fileName: string, headerLine: string): "," | "\t" {
 
 function toTrimmedString(v: unknown): string {
   return v == null ? "" : String(v).trim();
+}
+
+/** 返品レポートの日付文字列を ISO に正規化（失敗時は null） */
+export function parseAmazonReturnDateToIso(raw: string): string | null {
+  const s = String(raw ?? "").trim();
+  if (!s) return null;
+  const t = Date.parse(s);
+  if (Number.isFinite(t)) return new Date(t).toISOString();
+  const norm = s.split("/").join("-").split(".").join("-");
+  const t2 = Date.parse(norm);
+  if (Number.isFinite(t2)) return new Date(t2).toISOString();
+  return null;
+}
+
+/** より早い日時の ISO を採用 */
+export function pickEarlierIso(a: string | null, b: string | null): string | null {
+  if (!a) return b ?? null;
+  if (!b) return a;
+  return Date.parse(a) <= Date.parse(b) ? a : b;
 }
 
 function stripToHeaderLine(text: string, fileName: string): { stripped: string; skippedPrefixLines: number } {
@@ -118,6 +139,22 @@ export function parseAmazonReturnsDelimitedText(text: string, fileName: string):
     "処理区分",
   ]);
 
+  const returnDateHeader = pickHeaderKey(headers, [
+    "return-date",
+    "return date",
+    "returndate",
+    "return-request-date",
+    "return request date",
+    "returnauthorizationdate",
+    "return authorization date",
+    "authorization date",
+    "authorization-date",
+    "返品日",
+    "返品受付日",
+    "返品受付日時",
+    "返品日時",
+  ]);
+
   const rowErrors: string[] = [];
   const rows: AmazonReturnImportRow[] = [];
 
@@ -138,6 +175,7 @@ export function parseAmazonReturnsDelimitedText(text: string, fileName: string):
 
     const amazon_order_id = toTrimmedString(r[orderIdHeader]);
     const disposition = dispositionHeader ? toTrimmedString(r[dispositionHeader]) : "";
+    const return_date_raw = returnDateHeader ? toTrimmedString(r[returnDateHeader]) : "";
 
     if (!amazon_order_id) {
       rowErrors.push(`行 ${i + 2}: 注文IDが空です。`);
@@ -147,6 +185,7 @@ export function parseAmazonReturnsDelimitedText(text: string, fileName: string):
     rows.push({
       amazon_order_id,
       disposition,
+      return_date_raw,
     });
   }
 

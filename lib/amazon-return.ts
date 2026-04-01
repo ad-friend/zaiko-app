@@ -31,7 +31,8 @@ export type HandleOrderReturnResult =
  */
 export async function handleOrderReturn(
   amazon_order_id: string,
-  dispositionRaw?: string
+  dispositionRaw?: string,
+  returnReceivedAt?: string | null
 ): Promise<HandleOrderReturnResult> {
   const oid = String(amazon_order_id ?? "").trim();
   if (!oid) {
@@ -60,7 +61,9 @@ export async function handleOrderReturn(
     return { ok: true, outcome: "all_terminal_skipped" };
   }
 
-  const rel = await releaseInboundItemsForAmazonOrder(oid, "return");
+  const rel = await releaseInboundItemsForAmazonOrder(oid, "return", {
+    returnReceivedAt: returnReceivedAt ?? null,
+  });
   if (!rel.ok) {
     return { ok: false, message: rel.message };
   }
