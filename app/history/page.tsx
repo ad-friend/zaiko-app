@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Pencil, Save, X, ChevronLeft, Download, Upload, Search, ArrowUp, ArrowDown, ArrowUpDown, Calendar, Loader2, PackageMinus } from "lucide-react";
 import { normalizeToFullWidthKatakana } from "@/lib/kana";
 import { normalizeSupplierForMatch } from "@/lib/normalizeSupplier";
-import { getInventoryStatusDisplay } from "@/lib/inventory-status-display";
+import { getInventoryStatusDisplay, getInventoryStatusSortRank } from "@/lib/inventory-status-display";
 
 /** 在庫一覧1行。主軸はJANのためテーブルにはASIN列を表示しない（保存時ペイロード用に asin は取得のみ） */
 type RecordRow = {
@@ -249,6 +249,15 @@ export default function HistoryPage() {
         return row.brand ?? "";
       case "model_number":
         return row.model_number ?? "";
+      case "order_id":
+        return row.order_id ?? "";
+      case "inventory_progress":
+        return getInventoryStatusSortRank({
+          order_id: row.order_id,
+          settled_at: row.settled_at,
+          exit_type: row.exit_type,
+          stock_status: row.stock_status,
+        });
       case "base_price":
         return row.base_price ?? 0;
       case "effective_unit_price":
@@ -296,7 +305,8 @@ export default function HistoryPage() {
         const sa = String(va);
         const sb = String(vb);
         const cmp = sa.localeCompare(sb, "ja");
-        return direction === "asc" ? cmp : -cmp;
+        if (cmp !== 0) return direction === "asc" ? cmp : -cmp;
+        return a.id - b.id;
       });
     }
     return list;
@@ -1240,13 +1250,43 @@ export default function HistoryPage() {
                           {sortConfig.key === "effective_unit_price" ? (sortConfig.direction === "asc" ? <ArrowUp className="h-3.5 w-3.5 shrink-0" /> : <ArrowDown className="h-3.5 w-3.5 shrink-0" />) : <ArrowUpDown className="h-3.5 w-3.5 shrink-0 opacity-50" />}
                         </button>
                       </th>
-                      <th className="px-0.5 py-2 text-left align-middle text-slate-500">
-                        進捗
+                      <th className="px-0.5 py-2 text-left align-middle">
+                        <button
+                          type="button"
+                          onClick={() => requestSort("inventory_progress")}
+                          className="inline-flex w-full items-center gap-0.5 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded text-slate-500"
+                        >
+                          進捗
+                          {sortConfig.key === "inventory_progress" ? (
+                            sortConfig.direction === "asc" ? (
+                              <ArrowUp className="h-3.5 w-3.5 shrink-0" />
+                            ) : (
+                              <ArrowDown className="h-3.5 w-3.5 shrink-0" />
+                            )
+                          ) : (
+                            <ArrowUpDown className="h-3.5 w-3.5 shrink-0 opacity-50" />
+                          )}
+                        </button>
                       </th>
                       <th className="px-0.5 py-2 text-center align-middle text-slate-500">
-                        <abbr title="Amazon注文番号" className="cursor-help no-underline">
-                          注文
-                        </abbr>
+                        <button
+                          type="button"
+                          onClick={() => requestSort("order_id")}
+                          className="inline-flex items-center justify-center gap-1 whitespace-nowrap hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 rounded mx-auto"
+                        >
+                          <abbr title="Amazon注文番号" className="cursor-help no-underline">
+                            注文
+                          </abbr>
+                          {sortConfig.key === "order_id" ? (
+                            sortConfig.direction === "asc" ? (
+                              <ArrowUp className="h-3.5 w-3.5 shrink-0" />
+                            ) : (
+                              <ArrowDown className="h-3.5 w-3.5 shrink-0" />
+                            )
+                          ) : (
+                            <ArrowUpDown className="h-3.5 w-3.5 shrink-0 opacity-50" />
+                          )}
+                        </button>
                       </th>
                       <th className="bg-white px-0.5 py-2 text-center align-middle text-slate-500 shadow-[-6px_0_10px_-4px_rgba(15,23,42,0.1)]">
                         操作

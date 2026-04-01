@@ -94,6 +94,23 @@ export function getInventoryStatusDisplay(row: InventoryRowForStatus): Inventory
   };
 }
 
+/**
+ * ソート用の進捗ランク（表示ロジックと同じ優先順位）。
+ * 昇順: 販売中 → 引当済 → 販売済 → 返品検品 → イレギュラー/廃棄
+ */
+export function getInventoryStatusSortRank(row: InventoryRowForStatus): number {
+  const hasExit = nonempty(row.exit_type);
+  const stock = String(row.stock_status ?? "").trim().toLowerCase();
+  if (hasExit || stock === STOCK_STATUS_DISPOSED) return 50;
+  if (stock === STOCK_STATUS_RETURN_INSPECTION) return 40;
+
+  const hasOrder = nonempty(row.order_id);
+  const hasSettled = nonempty(row.settled_at);
+  if (hasOrder && hasSettled) return 30;
+  if (hasOrder && !hasSettled) return 20;
+  return 10;
+}
+
 /** CSV 等で「在庫ステータス」列に使う短文 */
 export function getInventoryStatusLabel(row: InventoryRowForStatus): string {
   return getInventoryStatusDisplay(row).label;
