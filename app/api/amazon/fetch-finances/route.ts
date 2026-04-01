@@ -243,7 +243,7 @@ export async function POST(request: NextRequest) {
     endDay.setUTCDate(endDay.getUTCDate() + 1);
     let postedBefore = endDay.toISOString().slice(0, 19) + "Z";
 
-    const maxDate = new Date(Date.now() - 3 * 60 * 1000); // 余裕を持って3分前に設定
+    const maxDate = new Date(Date.now() - 5 * 60 * 1000); // 余裕を持って5分前に設定（SP-APIの遅延対策）
     if (new Date(postedBefore) > maxDate) {
       postedBefore = maxDate.toISOString().slice(0, 19) + "Z";
     }

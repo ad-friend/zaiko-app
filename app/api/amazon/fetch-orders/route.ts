@@ -35,9 +35,21 @@ function parseDateRange(startDate: string | null, endDate: string | null): { cre
     endDay.setUTCDate(endDay.getUTCDate() + 1);
     createdBefore = endDay.toISOString().slice(0, 19) + "Z";
   } else {
-    createdBefore = new Date().toISOString().slice(0, 19) + "Z";
+    // SP-APIの「2分ルール」回避: Now を直接渡さず、少し過去（5分前）を指定する
+    const d = new Date();
+    d.setMinutes(d.getMinutes() - 5);
+    createdBefore = d.toISOString().slice(0, 19) + "Z";
   }
   return { createdAfter, createdBefore };
+}
+
+function parseMinutesRange(minutesRaw: string | null): number | null {
+  const n = minutesRaw == null ? NaN : Number(String(minutesRaw).trim());
+  if (!Number.isFinite(n)) return null;
+  const m = Math.floor(n);
+  if (m < 1) return null;
+  // 極端に大きいと負荷が跳ねるので上限を設ける（毎分ジョブ向け）
+  return Math.min(m, 60 * 24);
 }
 
 function createSpClient() {
@@ -72,7 +84,19 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const startDate = searchParams.get("startDate");
     const endDate = searchParams.get("endDate");
-    const { createdAfter, createdBefore } = parseDateRange(startDate, endDate);
+    const minutes = parseMinutesRange(searchParams.get("minutes"));
+    let { createdAfter, createdBefore } = parseDateRange(startDate, endDate);
+    if (minutes != null && !startDate) {
+      const d = new Date();
+      d.setMinutes(d.getMinutes() - minutes);
+      createdAfter = d.toISOString().slice(0, 19) + "Z";
+    }
+    // 念のため逆転防止（createdBefore は Now-5分）
+    if (new Date(createdAfter) >= new Date(createdBefore)) {
+      const b = new Date(createdBefore);
+      b.setMinutes(b.getMinutes() - 1);
+      createdAfter = b.toISOString().slice(0, 19) + "Z";
+    }
 
     const spClient = createSpClient();
 

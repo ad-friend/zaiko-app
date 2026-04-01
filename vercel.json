@@ -1,0 +1,13 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/run?jobKey=orders_poll",
+      "schedule": "*/1 * * * *"
+    },
+    {
+      "path": "/api/cron/run?jobKey=finances_daily&reconcile=1",
+      "schedule": "0 18 * * *"
+    }
+  ]
+}
+

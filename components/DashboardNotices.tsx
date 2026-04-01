@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Bell, ExternalLink, Loader2 } from "lucide-react";
+import { Bell, ChevronDown, ExternalLink, Loader2 } from "lucide-react";
 import type { DashboardNoticeRow } from "@/lib/dashboard-types";
 
 const MAX_ORDER_LINKS = 28;
@@ -14,6 +14,109 @@ function asStringArray(v: unknown): string[] {
 function asNumber(v: unknown, fallback: number): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function CronJobNotice({
+  notice,
+  onDismissed,
+}: {
+  notice: DashboardNoticeRow;
+  onDismissed: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const p = notice.payload ?? {};
+  const jobKey = String((p as any).job_key ?? "").trim();
+  const summary = String((p as any).summary ?? "").trim();
+  const fetched = asNumber((p as any).fetched, 0);
+  const errorCode = String((p as any).error_code ?? "").trim();
+  const errorMessage = String((p as any).error_message ?? "").trim();
+  const metrics = (p as any).metrics && typeof (p as any).metrics === "object" ? (p as any).metrics : null;
+
+  const dismiss = async () => {
+    setBusy(true);
+    setLocalError(null);
+    try {
+      const res = await fetch("/api/dashboard/notices/dismiss", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: notice.id }),
+      });
+      const j = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) throw new Error(j.error ?? "更新に失敗しました");
+      onDismissed();
+    } catch (e) {
+      setLocalError(e instanceof Error ? e.message : "更新に失敗しました");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const oneLine = summary || `${jobKey || "cron"}: ${notice.notice_type} / 取得 ${fetched}件`;
+
+  return (
+    <div className="mb-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full text-left"
+        aria-expanded={open}
+      >
+        <div className="flex items-start gap-3">
+          <div className={`mt-0.5 shrink-0 rounded-lg p-2 ${notice.notice_type === "cron_job_error" ? "bg-red-100 text-red-700" : "bg-emerald-100 text-emerald-700"}`}>
+            <Bell className="h-5 w-5" aria-hidden />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-semibold text-slate-900">{oneLine}</p>
+            <p className="mt-0.5 text-[11px] text-slate-500">
+              {notice.created_at ? new Date(notice.created_at).toLocaleString("ja-JP") : ""}
+            </p>
+          </div>
+          <ChevronDown className={`h-5 w-5 shrink-0 text-slate-400 transition-transform ${open ? "rotate-180" : ""}`} aria-hidden />
+        </div>
+      </button>
+
+      {open ? (
+        <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50/60 p-3 text-xs text-slate-700">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <div className="min-w-0 flex-1 space-y-2">
+              <p className="font-mono text-[11px] text-slate-600">job_key: {jobKey || "—"}</p>
+              {errorCode || errorMessage ? (
+                <div className="rounded-md border border-red-200 bg-red-50 px-2.5 py-2 text-red-800">
+                  <p className="font-semibold">エラー</p>
+                  {errorCode ? <p className="mt-1 font-mono">code: {errorCode}</p> : null}
+                  {errorMessage ? <p className="mt-1 whitespace-pre-wrap break-words">{errorMessage}</p> : null}
+                </div>
+              ) : null}
+              {metrics ? (
+                <details className="rounded-md border border-slate-200 bg-white px-2.5 py-2">
+                  <summary className="cursor-pointer select-none text-[11px] font-semibold text-slate-700">
+                    詳細（metrics）
+                  </summary>
+                  <pre className="mt-2 max-h-64 overflow-auto rounded bg-slate-900 p-2 text-[10px] text-slate-100">
+                    {JSON.stringify(metrics, null, 2)}
+                  </pre>
+                </details>
+              ) : null}
+              {localError ? <p className="text-xs font-medium text-red-700">{localError}</p> : null}
+            </div>
+            <div className="shrink-0">
+              <button
+                type="button"
+                onClick={() => void dismiss()}
+                disabled={busy}
+                className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-slate-800 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-slate-900 disabled:opacity-50 sm:w-auto"
+              >
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : null}
+                確認（非表示）
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function AmazonDuplicateImportNotice({
@@ -135,10 +238,14 @@ type Props = {
 
 export default function DashboardNotices({ notices, onAfterDismiss }: Props) {
   const duplicateNotices = notices.filter((n) => n.notice_type === "amazon_order_import_duplicate_lines");
-  if (duplicateNotices.length === 0) return null;
+  const cronNotices = notices.filter((n) => n.notice_type === "cron_job_success" || n.notice_type === "cron_job_error");
+  if (duplicateNotices.length === 0 && cronNotices.length === 0) return null;
 
   return (
     <section className="mb-2" aria-label="ダッシュボードお知らせ">
+      {cronNotices.map((n) => (
+        <CronJobNotice key={n.id} notice={n} onDismissed={onAfterDismiss} />
+      ))}
       {duplicateNotices.map((n) => (
         <AmazonDuplicateImportNotice key={n.id} notice={n} onDismissed={onAfterDismiss} />
       ))}
