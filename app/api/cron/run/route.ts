@@ -162,7 +162,7 @@ async function runFinancesDaily(req: NextRequest): Promise<{ fetched: number; su
   return { fetched, summary, metrics: { startDate, endDate, totalFetched: total, rowsInserted: inserted, rowsSkipped: skipped, message: safeString(json?.message ?? "") } };
 }
 
-async function runAutoReconcile(req: NextRequest, maxRounds = 120, batchSizeOrders = 10): Promise<{ reconciled: number; skipped: number }> {
+async function runAutoReconcile(req: NextRequest, maxRounds = 120): Promise<{ reconciled: number; skipped: number }> {
   const origin = originFromRequest(req);
   let reconciled = 0;
   let skipped = 0;
@@ -170,7 +170,7 @@ async function runAutoReconcile(req: NextRequest, maxRounds = 120, batchSizeOrde
     const res = await fetch(`${origin}/api/amazon/reconcile-sales`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ batchSizeOrders }),
+      body: "{}",
     });
     const { json, raw } = await fetchJsonAnySafe(res);
     if (!res.ok) {

@@ -268,7 +268,6 @@ export default function AmazonReconcileManager() {
       let message = `取得成功: ${total}件 (新規: ${inserted}件, スキップ: ${skipped}件)`;
 
       const RECONCILE_SALES_MAX_ROUNDS = 300;
-      const BATCH_SIZE_ORDERS = 10;
       let totalReconciled = 0;
       let totalSkippedReconcile = 0;
 
@@ -276,7 +275,7 @@ export default function AmazonReconcileManager() {
         const reconcileRes = await fetch("/api/amazon/reconcile-sales", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: stringifyPayload({ batchSizeOrders: BATCH_SIZE_ORDERS }),
+          body: "{}",
         });
         const reconcileParsed = await readJsonAnySafe(reconcileRes);
         const reconcileData = reconcileParsed.json as any;
@@ -316,7 +315,6 @@ export default function AmazonReconcileManager() {
     setFinanceResult(null);
     try {
       const RECONCILE_SALES_MAX_ROUNDS = 300;
-      const BATCH_SIZE_ORDERS = 10;
       let totalReconciled = 0;
       let totalSkipped = 0;
       let lastServerMessage = "";
@@ -325,7 +323,7 @@ export default function AmazonReconcileManager() {
         const res = await fetch("/api/amazon/reconcile-sales", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: stringifyPayload({ batchSizeOrders: BATCH_SIZE_ORDERS }),
+          body: "{}",
         });
         const { json, raw } = await readJsonAnySafe(res);
         const data = json as any;

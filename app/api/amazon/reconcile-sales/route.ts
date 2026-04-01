@@ -9,10 +9,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { earliestPostedDateIso } from "@/lib/settlement-posted-date";
 
-type ReconcileSalesRequestBody = {
-  /** 1回の実行で処理する注文数（amazon_order_id）上限 */
-  batchSizeOrders?: number;
-};
+/** 1リクエストあたり処理する注文（amazon_order_id）数（サーバー固定。クライアントの指定は無視） */
+const RECONCILE_SALES_BATCH_ORDERS = 25;
 
 type TxRow = {
   id: number;
@@ -448,10 +446,11 @@ function createPromisePool(opts: { concurrency: number }) {
 
 export async function POST(request: NextRequest) {
   try {
-    const body = (await request.json().catch(() => ({}))) as ReconcileSalesRequestBody;
-    const batchSizeOrders = clampInt(body?.batchSizeOrders, 20, 1, 50);
+    await request.json().catch(() => ({}));
 
-    const { orderIds, hadUnlinkedRows, distinctOrdersSeen } = await fetchEligibleOrderIdsForBatch(batchSizeOrders);
+    const { orderIds, hadUnlinkedRows, distinctOrdersSeen } = await fetchEligibleOrderIdsForBatch(
+      RECONCILE_SALES_BATCH_ORDERS
+    );
     if (!orderIds.length) {
       let message: string;
       if (!hadUnlinkedRows) {
