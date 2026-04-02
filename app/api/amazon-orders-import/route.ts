@@ -213,6 +213,7 @@ export async function POST(request: NextRequest) {
       const payload: Record<string, unknown> = {
         amazon_order_id: amazonOrderId,
         sku,
+        line_index: 0,
         condition_id: null as string | null,
         reconciliation_status: "pending",
         quantity: qty,
@@ -273,10 +274,10 @@ export async function POST(request: NextRequest) {
     const chunkOrderIds = [...new Set(validRows.map((r) => String(r.amazon_order_id)))];
     const { data: existingStatuses } = await supabase
       .from("amazon_orders")
-      .select("amazon_order_id, sku, reconciliation_status")
+      .select("amazon_order_id, sku, line_index, reconciliation_status")
       .in("amazon_order_id", chunkOrderIds);
     applyPreservedReconciliationStatusForUpsert(
-      validRows as Array<{ amazon_order_id: string; sku: string; reconciliation_status?: string }>,
+      validRows as Array<{ amazon_order_id: string; sku: string; line_index?: number; reconciliation_status?: string }>,
       existingStatuses ?? []
     );
 
@@ -284,12 +285,13 @@ export async function POST(request: NextRequest) {
       collapseDuplicateAmazonOrderRows(validRows);
 
     for (const r of rowsToUpsert) {
+      if (r.line_index == null) r.line_index = 0;
       r.jan_code = resolveJanFromLocalMaps(String(r.sku), r.asin as string | null, asinToJan, skuToJan);
     }
 
     const { data, error } = await supabase
       .from("amazon_orders")
-      .upsert(rowsToUpsert, { onConflict: "amazon_order_id,sku" })
+      .upsert(rowsToUpsert, { onConflict: "amazon_order_id,sku,line_index" })
       .select("id");
 
     if (error) {

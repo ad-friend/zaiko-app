@@ -35,21 +35,31 @@ export function shouldPreserveReconciliationStatusOnSync(status: string | null |
   );
 }
 
-type UpsertOrderRow = { amazon_order_id: string; sku: string; reconciliation_status?: string };
+type UpsertOrderRow = { amazon_order_id: string; sku: string; line_index?: number; reconciliation_status?: string };
+
+function lineIndexKey(r: UpsertOrderRow): number {
+  const n = Number(r.line_index);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+}
 
 /** 既存 amazon_orders 行のステータスを見て、upsert 直前の reconciliation_status を決める */
 export function applyPreservedReconciliationStatusForUpsert<
   T extends UpsertOrderRow,
 >(
   rows: T[],
-  existing: Array<{ amazon_order_id: string; sku: string; reconciliation_status: string | null }> | null | undefined
+  existing:
+    | Array<{ amazon_order_id: string; sku: string; line_index?: number | null; reconciliation_status: string | null }>
+    | null
+    | undefined
 ): void {
   const map = new Map<string, string>();
   for (const e of existing ?? []) {
-    map.set(`${e.amazon_order_id}\t${e.sku}`, String(e.reconciliation_status ?? "").trim());
+    const li = e.line_index != null && Number.isFinite(Number(e.line_index)) ? Math.floor(Number(e.line_index)) : 0;
+    map.set(`${e.amazon_order_id}\t${e.sku}\t${li}`, String(e.reconciliation_status ?? "").trim());
   }
   for (const r of rows) {
-    const prev = map.get(`${r.amazon_order_id}\t${r.sku}`);
+    const li = lineIndexKey(r);
+    const prev = map.get(`${r.amazon_order_id}\t${r.sku}\t${li}`);
     if (shouldPreserveReconciliationStatusOnSync(prev)) {
       r.reconciliation_status = prev!;
     } else {

@@ -127,6 +127,7 @@ export async function GET(request: NextRequest) {
     const rows: Array<{
       amazon_order_id: string;
       sku: string;
+      line_index: number;
       quantity: number;
       condition_id: string;
       reconciliation_status: string;
@@ -184,7 +185,7 @@ export async function GET(request: NextRequest) {
         // ここにあった continue; を削除したため、スキップされずに空のまま保存されます
       }
 
-      for (const item of orderItems) {
+      orderItems.forEach((item, lineIndex) => {
         const sku = String(item.SellerSKU ?? "").trim();
         const qty = Math.max(1, Number(item.QuantityOrdered) || 1);
         const conditionId = normalizeConditionId(item.ConditionId);
@@ -193,13 +194,14 @@ export async function GET(request: NextRequest) {
         rows.push({
           amazon_order_id: amazonOrderId,
           sku: sku || "UNKNOWN",
+          line_index: lineIndex,
           quantity: qty,
           condition_id: conditionId,
           reconciliation_status: "pending",
           jan_code: null,
           asin,
         });
-      }
+      });
 
       await sleep(300);
     }
@@ -224,7 +226,7 @@ export async function GET(request: NextRequest) {
     const distinctOrderIds = [...new Set(rows.map((r) => r.amazon_order_id))];
     const { data: existingStatuses } = await supabase
       .from("amazon_orders")
-      .select("amazon_order_id, sku, reconciliation_status")
+      .select("amazon_order_id, sku, line_index, reconciliation_status")
       .in("amazon_order_id", distinctOrderIds);
     applyPreservedReconciliationStatusForUpsert(rows, existingStatuses ?? []);
 
@@ -236,7 +238,7 @@ export async function GET(request: NextRequest) {
           updated_at: new Date().toISOString(),
         })),
         {
-          onConflict: "amazon_order_id,sku",
+          onConflict: "amazon_order_id,sku,line_index",
           ignoreDuplicates: false,
         }
       )
@@ -247,7 +249,7 @@ export async function GET(request: NextRequest) {
         return NextResponse.json(
           {
             error:
-              "amazon_orders テーブルが存在しません。docs/amazon_orders_table.sql を実行し、かつ (amazon_order_id, sku) の UNIQUE 制約を追加してください。",
+              "amazon_orders テーブルが存在しません。docs/amazon_orders_table.sql および docs/migration_amazon_orders_line_index.sql を実行し、(amazon_order_id, sku, line_index) の UNIQUE を確認してください。",
           },
           { status: 500 }
         );

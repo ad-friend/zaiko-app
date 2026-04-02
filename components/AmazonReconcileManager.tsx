@@ -13,6 +13,8 @@ type AmazonOrder = {
   order_row_id?: string;
   amazon_order_id: string;
   sku: string;
+  /** 同一注文・同一SKUの明細行番号（fetch-orders の列順。未移行DBでは省略可） */
+  line_index?: number;
   condition_id: string;
   reconciliation_status: string;
   quantity: number;
@@ -164,21 +166,15 @@ export default function AmazonReconcileManager() {
     setCandidateCountByOrderId((prev) => ({ ...prev, [orderKey]: count }));
   }, []);
 
-  const handleOrderConditionUpdated = useCallback(
-    (rowId: string, condition_id: string, amazon_order_id: string, sku: string) => {
-      setManualOrders((prev) =>
-        prev.map((o) => {
-          const oid = resolveOrderRowIdString(o);
-          const samePk = rowId.length > 0 && oid != null && oid === rowId;
-          const sameBiz =
-            String(o.amazon_order_id).trim() === String(amazon_order_id).trim() &&
-            String(o.sku).trim() === String(sku).trim();
-          return samePk || sameBiz ? { ...o, condition_id } : o;
-        })
-      );
-    },
-    []
-  );
+  const handleOrderConditionUpdated = useCallback((rowId: string, condition_id: string) => {
+    setManualOrders((prev) =>
+      prev.map((o) => {
+        const oid = resolveOrderRowIdString(o);
+        const samePk = rowId.length > 0 && oid != null && oid === rowId;
+        return samePk ? { ...o, condition_id } : o;
+      })
+    );
+  }, []);
 
   const handleOrderDeleted = useCallback((removedId: string) => {
     setManualOrders((prev) => prev.filter((o) => o.id !== removedId));
@@ -780,7 +776,7 @@ function ManualOrderCard({
   order: AmazonOrder;
   onConfirmed: () => void;
   onCandidatesLoaded?: (orderKey: string, candidateCount: number) => void;
-  onConditionUpdated?: (rowId: string, condition_id: string, amazon_order_id: string, sku: string) => void;
+  onConditionUpdated?: (rowId: string, condition_id: string) => void;
   onDeleted?: (rowId: string) => void;
   onCancellationExcluded?: (amazon_order_id: string) => void;
 }) {
@@ -799,6 +795,75 @@ function ManualOrderCard({
   const [rescueQuery, setRescueQuery] = useState("");
   const [rescueLoading, setRescueLoading] = useState(false);
   const [rescueError, setRescueError] = useState<string | null>(null);
+
+  const qty = Math.max(1, Number(order.quantity) || 1);
+  const [setMode, setSetMode] = useState(false);
+  const [sellerSkuForSet, setSellerSkuForSet] = useState(order.sku);
+  const [setComposition, setSetComposition] = useState<{
+    is_set: boolean;
+    total_units: number;
+    slots: { jan_code: string; label: string }[];
+  } | null>(null);
+  const [setCompositionLoading, setSetCompositionLoading] = useState(false);
+  const [setCompositionError, setSetCompositionError] = useState<string | null>(null);
+  const [multiSelected, setMultiSelected] = useState<(number | null)[]>(() => Array.from({ length: qty }, () => null));
+
+  useEffect(() => {
+    setSellerSkuForSet(order.sku);
+  }, [order.sku, order.id]);
+
+  useEffect(() => {
+    if (!setMode) {
+      setMultiSelected(Array.from({ length: qty }, () => null));
+    }
+  }, [order.id, qty, setMode]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!setMode) {
+      setSetComposition(null);
+      setSetCompositionError(null);
+      return;
+    }
+    const sku = sellerSkuForSet.trim();
+    if (!sku) {
+      setSetComposition(null);
+      return;
+    }
+    setSetCompositionLoading(true);
+    setSetCompositionError(null);
+    fetch(
+      `/api/amazon/set-composition?sku=${encodeURIComponent(sku)}&platform=Amazon&order_qty=${encodeURIComponent(String(qty))}`
+    )
+      .then(async (r) => {
+        const j = (await r.json().catch(() => ({}))) as { error?: string; is_set?: boolean; total_units?: number; slots?: { jan_code: string; label: string }[] };
+        if (!r.ok) throw new Error(typeof j.error === "string" ? j.error : "構成の取得に失敗しました");
+        return j;
+      })
+      .then((j) => {
+        if (cancelled) return;
+        const total = Math.max(0, Number(j.total_units) || 0);
+        const slots = Array.isArray(j.slots) ? j.slots : [];
+        setSetComposition({
+          is_set: Boolean(j.is_set),
+          total_units: total,
+          slots,
+        });
+        setMultiSelected(Array.from({ length: total }, () => null));
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setSetCompositionError(e instanceof Error ? e.message : "エラー");
+          setSetComposition(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setSetCompositionLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [setMode, sellerSkuForSet, qty, order.id]);
 
   useEffect(() => {
     setConditionId(order.condition_id);
@@ -830,6 +895,8 @@ function ManualOrderCard({
     setError(null);
     const params = new URLSearchParams({ amazon_order_id: order.amazon_order_id });
     if (order.sku) params.set("sku", order.sku);
+    const rowIdForCandidates = resolveOrderRowIdString(order);
+    if (rowIdForCandidates) params.set("order_row_id", rowIdForCandidates);
     fetch(`/api/amazon/orders/candidates?${params}`)
       .then(async (res) => {
         if (!res.ok) return [];
@@ -916,7 +983,7 @@ function ManualOrderCard({
           : rowUuid ?? "";
       setConditionId(saved);
       setSelectedId(null);
-      onConditionUpdated?.(serverRowId, saved, order.amazon_order_id, order.sku);
+      onConditionUpdated?.(serverRowId, saved);
       setCandidatesRefreshKey((k) => k + 1);
       setConditionMessage({
         type: "ok",
@@ -990,20 +1057,48 @@ function ManualOrderCard({
     }
   };
 
+  const rowUuidForPayload = resolveOrderRowIdString(order);
+
   const confirmSelection = async () => {
-    if (selectedId == null) return;
+    if (!setMode && qty <= 1 && selectedId == null) return;
     setSubmitting(true);
     setError(null);
     try {
+      const base: Record<string, unknown> = {
+        amazon_order_id: order.amazon_order_id,
+        sku: order.sku,
+      };
+      if (rowUuidForPayload) base.amazon_order_db_id = rowUuidForPayload;
+
+      let body: Record<string, unknown> = base;
+      if (setMode) {
+        if (!setComposition?.is_set) {
+          throw new Error("この出品SKUはマスタ上セット構成ではありません。");
+        }
+        const ids = multiSelected.filter((x): x is number => x != null);
+        if (ids.length !== setComposition.total_units) {
+          throw new Error(`セット構成どおり ${setComposition.total_units} 件すべて選択してください。`);
+        }
+        body = {
+          ...base,
+          set_reconcile: true,
+          seller_sku: sellerSkuForSet.trim(),
+          inbound_item_ids: ids,
+        };
+      } else if (qty > 1) {
+        const ids = multiSelected.filter((x): x is number => x != null);
+        if (ids.length !== qty) {
+          throw new Error(`在庫を ${qty} 件選択してください。`);
+        }
+        body = { ...base, inbound_item_ids: ids };
+      } else {
+        body = { ...base, inbound_item_id: selectedId as number };
+      }
+
       const res = await fetch("/api/amazon/reconcile/manual", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          amazon_order_id: order.amazon_order_id,
-          inbound_item_id: selectedId,
-          amazon_order_db_id: order.id,
-          sku: order.sku,
-        }),
+        body: JSON.stringify(body),
       });
       const { json, raw } = await readJsonAnySafe(res);
       const data = json as any;
@@ -1018,6 +1113,18 @@ function ManualOrderCard({
       setSubmitting(false);
     }
   };
+
+  const confirmDisabled =
+    submitting ||
+    conditionSaving ||
+    (setMode
+      ? !setComposition?.is_set ||
+        setCompositionLoading ||
+        multiSelected.length !== setComposition.total_units ||
+        multiSelected.some((x) => x == null)
+      : qty > 1
+        ? multiSelected.length !== qty || multiSelected.some((x) => x == null)
+        : selectedId == null);
 
   const runRescueSearch = async () => {
     const q = rescueQuery.trim();
@@ -1149,6 +1256,39 @@ function ManualOrderCard({
             <p className="text-[10px] font-medium text-slate-400">数量</p>
             <p className="mt-0.5 text-sm font-semibold tabular-nums text-slate-900">{order.quantity}</p>
           </div>
+        </div>
+
+        <div className="flex flex-col gap-2 text-xs text-slate-700">
+          <label className="flex cursor-pointer items-center gap-2">
+            <input
+              type="checkbox"
+              checked={setMode}
+              onChange={(e) => {
+                setSetMode(e.target.checked);
+                setSelectedId(null);
+              }}
+              disabled={submitting || conditionSaving}
+              className="rounded border-slate-300"
+            />
+            <span>セットとして消込（構成SKUごとに在庫を選択）</span>
+          </label>
+          {setMode ? (
+            <div className="space-y-1 pl-6">
+              <span className="block text-[10px] font-medium text-slate-500">セット用 出品SKU</span>
+              <input
+                type="text"
+                value={sellerSkuForSet}
+                onChange={(e) => setSellerSkuForSet(e.target.value)}
+                disabled={submitting || conditionSaving}
+                className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 font-mono text-xs text-slate-800"
+              />
+              {setCompositionLoading ? <p className="text-[11px] text-slate-500">構成を取得中…</p> : null}
+              {setCompositionError ? <p className="text-[11px] font-medium text-red-700">{setCompositionError}</p> : null}
+              {setComposition && !setComposition.is_set && !setCompositionLoading ? (
+                <p className="text-[11px] font-medium text-amber-800">このSKUはマスタ上セットではありません。</p>
+              ) : null}
+            </div>
+          ) : null}
         </div>
 
         {createdLabel && (
@@ -1297,23 +1437,91 @@ function ManualOrderCard({
           </div>
         ) : (
           <div className="space-y-2 border-t border-slate-100 pt-3">
-            <label className="block text-xs font-bold text-slate-700">在庫候補を選択</label>
-            <select
-              value={selectedId ?? ""}
-              onChange={(e) => setSelectedId(e.target.value ? Number(e.target.value) : null)}
-              className="w-full rounded-md border-2 border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-800 focus:border-amber-400 focus:outline-none focus:ring-2 focus:ring-amber-400/30"
-            >
-              <option value="">選択してください</option>
-              {mergedCandidates.map((c: InboundCandidate) => (
-                <option key={c.id} value={c.id}>
-                  ID:{c.id} {c.product_name ?? ""} ({c.created_at?.slice(0, 10)})
-                </option>
-              ))}
-            </select>
+            <span className="block text-xs font-bold text-slate-700">在庫候補を選択</span>
+            {setMode ? (
+              setCompositionLoading ? (
+                <p className="text-xs text-slate-500">構成に合わせて選択欄を表示します…</p>
+              ) : setComposition?.is_set ? (
+                <div className="space-y-2">
+                  {multiSelected.map((slotVal, i) => {
+                    const wantJan = (setComposition.slots[i]?.jan_code ?? "").trim();
+                    const pool =
+                      wantJan.length > 0
+                        ? mergedCandidates.filter((c) => (c.jan_code ?? "").trim() === wantJan)
+                        : mergedCandidates;
+                    const label = setComposition.slots[i]?.label?.trim() || `スロット ${i + 1}`;
+                    return (
+                      <div key={i} className="space-y-0.5">
+                        <label className="block text-[10px] font-medium text-slate-500">{label}</label>
+                        <select
+                          value={slotVal ?? ""}
+                          onChange={(e) => {
+                            const v = e.target.value ? Number(e.target.value) : null;
+                            setMultiSelected((prev) => {
+                              const next = [...prev];
+                              next[i] = v;
+                              return next;
+                            });
+                          }}
+                          className="w-full rounded-md border-2 border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-800 focus:border-amber-400 focus:outline-none focus:ring-2 focus:ring-amber-400/30"
+                        >
+                          <option value="">選択してください</option>
+                          {pool.map((c: InboundCandidate) => (
+                            <option key={c.id} value={c.id}>
+                              ID:{c.id} {c.product_name ?? ""} ({c.created_at?.slice(0, 10)})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null
+            ) : qty > 1 ? (
+              <div className="space-y-2">
+                {multiSelected.map((slotVal, i) => (
+                  <div key={i} className="space-y-0.5">
+                    <label className="block text-[10px] font-medium text-slate-500">{i + 1}点目</label>
+                    <select
+                      value={slotVal ?? ""}
+                      onChange={(e) => {
+                        const v = e.target.value ? Number(e.target.value) : null;
+                        setMultiSelected((prev) => {
+                          const next = [...prev];
+                          next[i] = v;
+                          return next;
+                        });
+                      }}
+                      className="w-full rounded-md border-2 border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-800 focus:border-amber-400 focus:outline-none focus:ring-2 focus:ring-amber-400/30"
+                    >
+                      <option value="">選択してください</option>
+                      {mergedCandidates.map((c: InboundCandidate) => (
+                        <option key={c.id} value={c.id}>
+                          ID:{c.id} {c.product_name ?? ""} ({c.created_at?.slice(0, 10)})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <select
+                value={selectedId ?? ""}
+                onChange={(e) => setSelectedId(e.target.value ? Number(e.target.value) : null)}
+                className="w-full rounded-md border-2 border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-800 focus:border-amber-400 focus:outline-none focus:ring-2 focus:ring-amber-400/30"
+              >
+                <option value="">選択してください</option>
+                {mergedCandidates.map((c: InboundCandidate) => (
+                  <option key={c.id} value={c.id}>
+                    ID:{c.id} {c.product_name ?? ""} ({c.created_at?.slice(0, 10)})
+                  </option>
+                ))}
+              </select>
+            )}
             <button
               type="button"
-              onClick={confirmSelection}
-              disabled={selectedId == null || submitting || conditionSaving}
+              onClick={() => void confirmSelection()}
+              disabled={confirmDisabled}
               className={`${buttonClass} h-10 w-full bg-amber-600 text-sm font-bold text-white shadow-sm hover:bg-amber-700 disabled:bg-slate-300 disabled:text-slate-500`}
             >
               {submitting ? "確定中…" : "この在庫で確定"}

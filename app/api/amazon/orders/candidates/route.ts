@@ -45,6 +45,8 @@ export async function GET(request: NextRequest) {
     const amazonOrderId = searchParams.get("amazon_order_id")?.trim() ?? "";
     const sku = searchParams.get("sku")?.trim() ?? "";
     const janCode = searchParams.get("jan_code")?.trim() ?? "";
+    const orderRowId = searchParams.get("order_row_id")?.trim() ?? "";
+    const ORDER_ROW_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
     if (!amazonOrderId && !janCode) {
       return NextResponse.json({ error: "amazon_order_id または jan_code を指定してください。" }, { status: 400 });
@@ -56,17 +58,32 @@ export async function GET(request: NextRequest) {
     let orderRowFound = false;
 
     if (amazonOrderId) {
-      const q = supabase
-        .from("amazon_orders")
-        .select("asin, jan_code, sku, condition_id")
-        .eq("amazon_order_id", amazonOrderId);
-      if (sku) q.eq("sku", sku);
-      const { data: orderRow } = await q.maybeSingle();
-      if (orderRow) {
-        orderRowFound = true;
-        asin = orderRow.asin?.trim() ?? null;
-        if (!jan) jan = orderRow.jan_code?.trim() || (orderRow.sku?.trim().match(/^\d{13}$/) ? orderRow.sku.trim() : null);
-        condNorm = normalizeOrderCondition(orderRow.condition_id);
+      if (orderRowId && ORDER_ROW_UUID_RE.test(orderRowId)) {
+        const { data: orderRow } = await supabase
+          .from("amazon_orders")
+          .select("asin, jan_code, sku, condition_id, amazon_order_id")
+          .eq("id", orderRowId)
+          .maybeSingle();
+        if (orderRow && String(orderRow.amazon_order_id ?? "").trim() === amazonOrderId) {
+          orderRowFound = true;
+          asin = orderRow.asin?.trim() ?? null;
+          if (!jan) jan = orderRow.jan_code?.trim() || (orderRow.sku?.trim().match(/^\d{13}$/) ? orderRow.sku.trim() : null);
+          condNorm = normalizeOrderCondition(orderRow.condition_id);
+        }
+      } else {
+        let q = supabase
+          .from("amazon_orders")
+          .select("asin, jan_code, sku, condition_id")
+          .eq("amazon_order_id", amazonOrderId);
+        if (sku) q = q.eq("sku", sku);
+        const { data: orderRows } = await q.order("line_index", { ascending: true }).limit(1);
+        const orderRow = orderRows?.[0];
+        if (orderRow) {
+          orderRowFound = true;
+          asin = orderRow.asin?.trim() ?? null;
+          if (!jan) jan = orderRow.jan_code?.trim() || (orderRow.sku?.trim().match(/^\d{13}$/) ? orderRow.sku.trim() : null);
+          condNorm = normalizeOrderCondition(orderRow.condition_id);
+        }
       }
     }
 
