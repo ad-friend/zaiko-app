@@ -44,6 +44,8 @@ export function tryCreateAmazonSpClient(): SpClientInstance | null {
 /** fetch-orders と同じ New/Used 正規化（OrderItems.ConditionId 用） */
 export function normalizeOrderItemConditionId(conditionId: string | null | undefined): "New" | "Used" {
   const c = String(conditionId ?? "").trim().toLowerCase();
+  // SP-API の ConditionId が数値（例: "11"）で返るケースがある
+  if (c === "11") return "New";
   if (c === "new" || c === "newitem" || c === "new_item") return "New";
   return "Used";
 }

@@ -108,7 +108,11 @@ export default function AmazonReconcileManager() {
     d.setDate(d.getDate() - 3);
     return d.toISOString().slice(0, 10);
   });
-  const [orderEndDate, setOrderEndDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [orderEndDate, setOrderEndDate] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    return d.toISOString().slice(0, 10);
+  });
   const [isFetching, setIsFetching] = useState(false);
   const [fetchResult, setFetchResult] = useState<string | null>(null);
 
