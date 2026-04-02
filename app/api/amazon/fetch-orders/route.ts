@@ -29,17 +29,22 @@ function parseDateRange(startDate: string | null, endDate: string | null): { cre
     const day = String(d.getDate()).padStart(2, "0");
     createdAfter = `${y}-${m}-${day}T00:00:00Z`;
   }
-  let createdBefore: string;
+  // SP-APIの「2分ルール」回避: Now を直接渡さず、少し過去（5分前）を指定する（常にクランプする）
+  const safeNow = new Date();
+  safeNow.setMinutes(safeNow.getMinutes() - 5);
+  const safeBefore = safeNow.toISOString().slice(0, 19) + "Z";
+
+  let createdBeforeFromEndDate: string | null = null;
   if (endDate && /^\d{4}-\d{2}-\d{2}$/.test(endDate.trim())) {
     const endDay = new Date(endDate.trim() + "T00:00:00Z");
     endDay.setUTCDate(endDay.getUTCDate() + 1);
-    createdBefore = endDay.toISOString().slice(0, 19) + "Z";
-  } else {
-    // SP-APIの「2分ルール」回避: Now を直接渡さず、少し過去（5分前）を指定する
-    const d = new Date();
-    d.setMinutes(d.getMinutes() - 5);
-    createdBefore = d.toISOString().slice(0, 19) + "Z";
+    createdBeforeFromEndDate = endDay.toISOString().slice(0, 19) + "Z";
   }
+
+  const createdBefore =
+    createdBeforeFromEndDate && new Date(createdBeforeFromEndDate) < new Date(safeBefore)
+      ? createdBeforeFromEndDate
+      : safeBefore;
   return { createdAfter, createdBefore };
 }
 
