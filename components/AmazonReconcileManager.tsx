@@ -26,11 +26,41 @@ type AmazonOrder = {
 type InboundCandidate = {
   id: number;
   jan_code: string | null;
-  product_name: string | null;
+  brand: string | null;
+  model_number: string | null;
+  effective_unit_price: number;
   condition_type: string | null;
   created_at: string;
   order_id: string | null;
 };
+
+function mergeInboundById(base: InboundCandidate[], extra: InboundCandidate[]): InboundCandidate[] {
+  const m = new Map<number, InboundCandidate>();
+  for (const c of base) m.set(c.id, c);
+  for (const c of extra) m.set(c.id, c);
+  return [...m.values()].sort((a, b) => a.id - b.id);
+}
+
+/** プルダウン表示: ID・メーカー・型番・原価（品名は出さない） */
+function formatInboundOptionLabel(c: InboundCandidate): string {
+  const brand = (c.brand ?? "").trim() || "—";
+  const model = (c.model_number ?? "").trim() || "—";
+  const price = Number.isFinite(c.effective_unit_price) ? c.effective_unit_price : 0;
+  return `ID:${c.id} / ${brand} / ${model} / 原価:${price}`;
+}
+
+function normalizeInboundCandidate(r: Record<string, unknown>): InboundCandidate {
+  return {
+    id: Number(r.id),
+    jan_code: r.jan_code != null ? String(r.jan_code) : null,
+    brand: r.brand != null ? String(r.brand) : null,
+    model_number: r.model_number != null ? String(r.model_number) : null,
+    effective_unit_price: Number(r.effective_unit_price ?? 0),
+    condition_type: r.condition_type != null ? String(r.condition_type) : null,
+    created_at: r.created_at != null ? String(r.created_at) : "",
+    order_id: r.order_id != null ? String(r.order_id) : null,
+  };
+}
 
 /** DB 主キー amazon_orders.id（UUID 文字列） */
 function resolveOrderRowIdString(o: Pick<AmazonOrder, "id" | "order_row_id">): string | null {
@@ -799,6 +829,11 @@ function ManualOrderCard({
   const [rescueQuery, setRescueQuery] = useState("");
   const [rescueLoading, setRescueLoading] = useState(false);
   const [rescueError, setRescueError] = useState<string | null>(null);
+  /** 数量>1・非セット時: スロットごとのレスキュー検索ヒット */
+  const [rescueExtraBySlot, setRescueExtraBySlot] = useState<Record<number, InboundCandidate[]>>({});
+  const [rescueQueryBySlot, setRescueQueryBySlot] = useState<Record<number, string>>({});
+  const [rescueLoadingSlot, setRescueLoadingSlot] = useState<number | null>(null);
+  const [rescueErrorBySlot, setRescueErrorBySlot] = useState<Record<number, string | null>>({});
 
   const qty = Math.max(1, Number(order.quantity) || 1);
   const [setMode, setSetMode] = useState(false);
@@ -876,21 +911,49 @@ function ManualOrderCard({
   const orderCondNorm = normalizeOrderCondition(conditionId);
   const isUsedDisplay = orderCondNorm === "used";
 
-  const mergedCandidates = useMemo(() => {
-    const m = new Map<number, InboundCandidate>();
-    for (const c of candidates) m.set(c.id, c);
-    for (const c of rescueExtra) m.set(c.id, c);
-    return [...m.values()].sort((a, b) => a.id - b.id);
-  }, [candidates, rescueExtra]);
+  const mergedCandidates = useMemo(() => mergeInboundById(candidates, rescueExtra), [candidates, rescueExtra]);
 
-  useEffect(() => {
-    onCandidatesLoaded?.(orderStableKey(order), mergedCandidates.length);
-  }, [mergedCandidates.length, order, onCandidatesLoaded]);
+  const isPerSlotRescue = qty > 1 && !setMode;
+
+  const showNoStockStyle =
+    !loadingCandidates && (isPerSlotRescue ? candidates.length === 0 : mergedCandidates.length === 0);
+
+  const poolForMultiSlot = useCallback(
+    (slotIndex: number) => {
+      const extra = rescueExtraBySlot[slotIndex] ?? [];
+      const merged = mergeInboundById(candidates, extra);
+      const takenElsewhere = new Set<number>();
+      multiSelected.forEach((id, j) => {
+        if (j !== slotIndex && id != null) takenElsewhere.add(id);
+      });
+      return merged.filter((c) => !takenElsewhere.has(c.id) || multiSelected[slotIndex] === c.id);
+    },
+    [candidates, rescueExtraBySlot, multiSelected]
+  );
+
+  const poolForSetSlot = useCallback(
+    (slotIndex: number, wantJan: string) => {
+      const base =
+        wantJan.length > 0
+          ? mergedCandidates.filter((c) => (c.jan_code ?? "").trim() === wantJan)
+          : mergedCandidates;
+      const takenElsewhere = new Set<number>();
+      multiSelected.forEach((id, j) => {
+        if (j !== slotIndex && id != null) takenElsewhere.add(id);
+      });
+      return base.filter((c) => !takenElsewhere.has(c.id) || multiSelected[slotIndex] === c.id);
+    },
+    [mergedCandidates, multiSelected]
+  );
 
   useEffect(() => {
     setRescueExtra([]);
     setRescueQuery("");
     setRescueError(null);
+    setRescueExtraBySlot({});
+    setRescueQueryBySlot({});
+    setRescueErrorBySlot({});
+    setRescueLoadingSlot(null);
   }, [order.id, order.amazon_order_id, order.sku, candidatesRefreshKey]);
 
   useEffect(() => {
@@ -910,8 +973,9 @@ function ManualOrderCard({
       .then((data) => {
         const list = Array.isArray(data) ? data : [];
         if (!cancelled) {
-          setCandidates(list);
-          onCandidatesLoaded?.(orderStableKey(order), list.length);
+          const normalized = list.map((r) => normalizeInboundCandidate(r as Record<string, unknown>));
+          setCandidates(normalized);
+          onCandidatesLoaded?.(orderStableKey(order), normalized.length);
         }
       })
       .catch(() => {
@@ -1130,14 +1194,23 @@ function ManualOrderCard({
         ? multiSelected.length !== qty || multiSelected.some((x) => x == null)
         : selectedId == null);
 
-  const runRescueSearch = async () => {
-    const q = rescueQuery.trim();
+  const runRescueSearch = async (slotIndex: number | "global" = "global") => {
+    const q =
+      slotIndex === "global"
+        ? rescueQuery.trim()
+        : (rescueQueryBySlot[slotIndex] ?? "").trim();
     if (q.length < 1) {
-      setRescueError("検索語を入力してください");
+      if (slotIndex === "global") setRescueError("検索語を入力してください");
+      else setRescueErrorBySlot((prev) => ({ ...prev, [slotIndex]: "検索語を入力してください" }));
       return;
     }
-    setRescueLoading(true);
-    setRescueError(null);
+    if (slotIndex === "global") {
+      setRescueLoading(true);
+      setRescueError(null);
+    } else {
+      setRescueLoadingSlot(slotIndex);
+      setRescueErrorBySlot((prev) => ({ ...prev, [slotIndex]: null }));
+    }
     try {
       const params = new URLSearchParams({ search: q, amazon_order_id: order.amazon_order_id });
       const res = await fetch(`/api/amazon/candidate-stocks?${params}`);
@@ -1156,31 +1229,41 @@ function ManualOrderCard({
       type ApiCand = {
         id: number;
         sku: string | null;
+        brand: string | null;
+        model_number: string | null;
         condition: string | null;
-        product_name: string | null;
+        unit_cost: number;
         created_at: string | null;
         amazon_order_id: string | null;
       };
       const mapped: InboundCandidate[] = (list as ApiCand[]).map((r) => ({
         id: r.id,
         jan_code: r.sku,
-        product_name: r.product_name,
+        brand: r.brand ?? null,
+        model_number: r.model_number ?? null,
+        effective_unit_price: Number(r.unit_cost ?? 0),
         condition_type: r.condition,
         created_at: r.created_at ?? "",
         order_id: r.amazon_order_id,
       }));
-      setRescueExtra(mapped);
-      if (mapped.length === 0) {
-        setRescueError("該当する在庫がありませんでした");
+      if (slotIndex === "global") {
+        setRescueExtra(mapped);
+        if (mapped.length === 0) setRescueError("該当する在庫がありませんでした");
+      } else {
+        setRescueExtraBySlot((prev) => ({ ...prev, [slotIndex]: mapped }));
+        if (mapped.length === 0) {
+          setRescueErrorBySlot((prev) => ({ ...prev, [slotIndex]: "該当する在庫がありませんでした" }));
+        }
       }
     } catch (e) {
-      setRescueError(e instanceof Error ? e.message : "検索に失敗しました");
+      const msg = e instanceof Error ? e.message : "検索に失敗しました";
+      if (slotIndex === "global") setRescueError(msg);
+      else setRescueErrorBySlot((prev) => ({ ...prev, [slotIndex]: msg }));
     } finally {
-      setRescueLoading(false);
+      if (slotIndex === "global") setRescueLoading(false);
+      else setRescueLoadingSlot(null);
     }
   };
-
-  const noCandidates = !loadingCandidates && mergedCandidates.length === 0;
 
   const createdLabel =
     order.created_at != null && String(order.created_at).trim() !== ""
@@ -1200,7 +1283,7 @@ function ManualOrderCard({
   return (
     <div
       className={`min-w-0 w-full rounded-lg border-2 p-4 lg:p-5 shadow-sm transition-shadow ${
-        noCandidates
+        showNoStockStyle
           ? "border-red-200/90 bg-red-50/40 hover:shadow-md"
           : "border-slate-200/90 bg-white hover:shadow-md hover:border-slate-300"
       }`}
@@ -1400,7 +1483,7 @@ function ManualOrderCard({
 
         {loadingCandidates ? (
           <p className="text-xs font-medium text-slate-500">在庫候補を取得中…</p>
-        ) : noCandidates ? (
+        ) : !isPerSlotRescue && mergedCandidates.length === 0 ? (
           <div className="space-y-2 rounded-lg border border-red-100 bg-red-50/50 p-3">
             <p className="text-xs font-semibold text-red-800 flex items-start gap-1.5 leading-snug">
               <span className="shrink-0" aria-hidden>
@@ -1417,7 +1500,7 @@ function ManualOrderCard({
                   onKeyDown={(e) => {
                     if (e.key === "Enter") {
                       e.preventDefault();
-                      void runRescueSearch();
+                      void runRescueSearch("global");
                     }
                   }}
                   placeholder="例: 4901234567890 または 商品名の一部"
@@ -1426,7 +1509,7 @@ function ManualOrderCard({
                 />
                 <button
                   type="button"
-                  onClick={() => void runRescueSearch()}
+                  onClick={() => void runRescueSearch("global")}
                   disabled={rescueLoading || submitting}
                   className={`${buttonClass} h-9 shrink-0 bg-sky-700 text-white hover:bg-sky-800 text-xs px-4 disabled:bg-slate-300`}
                 >
@@ -1439,6 +1522,84 @@ function ManualOrderCard({
               ) : null}
             </div>
           </div>
+        ) : isPerSlotRescue ? (
+          <div className="space-y-2 border-t border-slate-100 pt-3">
+            <span className="block text-xs font-bold text-slate-700">在庫候補を選択（点数ごと）</span>
+            {candidates.length === 0 ? (
+              <p className="text-[11px] text-amber-900 bg-amber-50/90 border border-amber-100 rounded-md px-2 py-1.5 leading-snug">
+                自動候補がありません。各点数のレスキューで JAN・商品名などを検索し、プルダウンに追加してください。
+              </p>
+            ) : null}
+            {multiSelected.map((slotVal, i) => (
+              <div key={i} className="space-y-1.5 rounded-md border border-slate-100 bg-slate-50/60 p-2.5">
+                <label className="block text-[10px] font-medium text-slate-500">{i + 1}点目</label>
+                <select
+                  value={slotVal ?? ""}
+                  onChange={(e) => {
+                    const v = e.target.value ? Number(e.target.value) : null;
+                    setMultiSelected((prev) => {
+                      const next = [...prev];
+                      if (v != null) {
+                        for (let j = 0; j < next.length; j++) {
+                          if (j !== i && next[j] === v) next[j] = null;
+                        }
+                      }
+                      next[i] = v;
+                      return next;
+                    });
+                  }}
+                  className="w-full rounded-md border-2 border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-800 focus:border-amber-400 focus:outline-none focus:ring-2 focus:ring-amber-400/30"
+                >
+                  <option value="">選択してください</option>
+                  {poolForMultiSlot(i).map((c: InboundCandidate) => (
+                    <option key={c.id} value={c.id}>
+                      {formatInboundOptionLabel(c)}
+                    </option>
+                  ))}
+                </select>
+                <div className="flex flex-col gap-1.5 sm:flex-row sm:items-stretch">
+                  <input
+                    type="text"
+                    value={rescueQueryBySlot[i] ?? ""}
+                    onChange={(e) => setRescueQueryBySlot((prev) => ({ ...prev, [i]: e.target.value }))}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        void runRescueSearch(i);
+                      }
+                    }}
+                    placeholder={`${i + 1}点目用: JAN / 商品名`}
+                    disabled={rescueLoadingSlot !== null || submitting}
+                    className="min-w-0 flex-1 rounded-md border border-sky-200 bg-white px-2.5 py-2 text-xs text-slate-800 placeholder:text-slate-400 focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-300/40"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void runRescueSearch(i)}
+                    disabled={rescueLoadingSlot !== null || submitting}
+                    className={`${buttonClass} h-9 shrink-0 bg-sky-700 text-white hover:bg-sky-800 text-xs px-4 disabled:bg-slate-300`}
+                  >
+                    {rescueLoadingSlot === i ? "検索中…" : "検索"}
+                  </button>
+                </div>
+                {rescueErrorBySlot[i] ? (
+                  <p className="text-[11px] font-medium text-red-700">{rescueErrorBySlot[i]}</p>
+                ) : null}
+                {(rescueExtraBySlot[i]?.length ?? 0) > 0 ? (
+                  <p className="text-[11px] text-sky-800/90">
+                    この点数に {rescueExtraBySlot[i]!.length} 件をプルダウンへ反映しました
+                  </p>
+                ) : null}
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={() => void confirmSelection()}
+              disabled={confirmDisabled}
+              className={`${buttonClass} h-10 w-full bg-amber-600 text-sm font-bold text-white shadow-sm hover:bg-amber-700 disabled:bg-slate-300 disabled:text-slate-500`}
+            >
+              {submitting ? "確定中…" : "この在庫で確定"}
+            </button>
+          </div>
         ) : (
           <div className="space-y-2 border-t border-slate-100 pt-3">
             <span className="block text-xs font-bold text-slate-700">在庫候補を選択</span>
@@ -1449,10 +1610,7 @@ function ManualOrderCard({
                 <div className="space-y-2">
                   {multiSelected.map((slotVal, i) => {
                     const wantJan = (setComposition.slots[i]?.jan_code ?? "").trim();
-                    const pool =
-                      wantJan.length > 0
-                        ? mergedCandidates.filter((c) => (c.jan_code ?? "").trim() === wantJan)
-                        : mergedCandidates;
+                    const pool = poolForSetSlot(i, wantJan);
                     const label = setComposition.slots[i]?.label?.trim() || `スロット ${i + 1}`;
                     return (
                       <div key={i} className="space-y-0.5">
@@ -1463,6 +1621,11 @@ function ManualOrderCard({
                             const v = e.target.value ? Number(e.target.value) : null;
                             setMultiSelected((prev) => {
                               const next = [...prev];
+                              if (v != null) {
+                                for (let j = 0; j < next.length; j++) {
+                                  if (j !== i && next[j] === v) next[j] = null;
+                                }
+                              }
                               next[i] = v;
                               return next;
                             });
@@ -1472,7 +1635,7 @@ function ManualOrderCard({
                           <option value="">選択してください</option>
                           {pool.map((c: InboundCandidate) => (
                             <option key={c.id} value={c.id}>
-                              ID:{c.id} {c.product_name ?? ""} ({c.created_at?.slice(0, 10)})
+                              {formatInboundOptionLabel(c)}
                             </option>
                           ))}
                         </select>
@@ -1481,33 +1644,6 @@ function ManualOrderCard({
                   })}
                 </div>
               ) : null
-            ) : qty > 1 ? (
-              <div className="space-y-2">
-                {multiSelected.map((slotVal, i) => (
-                  <div key={i} className="space-y-0.5">
-                    <label className="block text-[10px] font-medium text-slate-500">{i + 1}点目</label>
-                    <select
-                      value={slotVal ?? ""}
-                      onChange={(e) => {
-                        const v = e.target.value ? Number(e.target.value) : null;
-                        setMultiSelected((prev) => {
-                          const next = [...prev];
-                          next[i] = v;
-                          return next;
-                        });
-                      }}
-                      className="w-full rounded-md border-2 border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-800 focus:border-amber-400 focus:outline-none focus:ring-2 focus:ring-amber-400/30"
-                    >
-                      <option value="">選択してください</option>
-                      {mergedCandidates.map((c: InboundCandidate) => (
-                        <option key={c.id} value={c.id}>
-                          ID:{c.id} {c.product_name ?? ""} ({c.created_at?.slice(0, 10)})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                ))}
-              </div>
             ) : (
               <select
                 value={selectedId ?? ""}
@@ -1517,7 +1653,7 @@ function ManualOrderCard({
                 <option value="">選択してください</option>
                 {mergedCandidates.map((c: InboundCandidate) => (
                   <option key={c.id} value={c.id}>
-                    ID:{c.id} {c.product_name ?? ""} ({c.created_at?.slice(0, 10)})
+                    {formatInboundOptionLabel(c)}
                   </option>
                 ))}
               </select>
@@ -1539,7 +1675,7 @@ function ManualOrderCard({
                   onKeyDown={(e) => {
                     if (e.key === "Enter") {
                       e.preventDefault();
-                      void runRescueSearch();
+                      void runRescueSearch("global");
                     }
                   }}
                   placeholder="例: 4901234567890 または 商品名の一部"
@@ -1548,7 +1684,7 @@ function ManualOrderCard({
                 />
                 <button
                   type="button"
-                  onClick={() => void runRescueSearch()}
+                  onClick={() => void runRescueSearch("global")}
                   disabled={rescueLoading || submitting}
                   className={`${buttonClass} h-9 shrink-0 bg-sky-700 text-white hover:bg-sky-800 text-xs px-4 disabled:bg-slate-300`}
                 >

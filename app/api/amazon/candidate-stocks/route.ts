@@ -18,25 +18,27 @@ function orderIdAvailabilityOr(amazonOrderId: string): string {
 const toRow = (row: {
   id: number;
   jan_code: string | null;
+  brand: string | null;
+  model_number: string | null;
   condition_type: string | null;
   effective_unit_price: unknown;
   order_id: string | null;
-  product_name: string | null;
   created_at: string | null;
 }) => ({
   id: row.id,
   sku: row.jan_code?.trim() ?? null,
+  brand: row.brand?.trim() ?? null,
+  model_number: row.model_number?.trim() ?? null,
   condition: row.condition_type ?? null,
   unit_cost: Number(row.effective_unit_price ?? 0),
   amazon_order_id: row.order_id ?? null,
-  product_name: row.product_name ?? null,
   created_at: row.created_at ?? null,
 });
 
 function buildRescueBase(amazonOrderId: string) {
   let q = supabase
     .from("inbound_items")
-    .select("id, jan_code, condition_type, effective_unit_price, order_id, product_name, created_at")
+    .select("id, jan_code, brand, model_number, condition_type, effective_unit_price, order_id, created_at")
     .is("settled_at", null)
     .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
     .is("exit_type", null);
@@ -55,10 +57,11 @@ async function searchInboundRescue(search: string, amazonOrderId: string): Promi
   Array<{
     id: number;
     sku: string | null;
+    brand: string | null;
+    model_number: string | null;
     condition: string | null;
     unit_cost: number;
     amazon_order_id: string | null;
-    product_name: string | null;
     created_at: string | null;
   }>
 > {
@@ -109,10 +112,11 @@ export async function GET(request: NextRequest) {
     const results: Array<{
       id: number;
       sku: string | null;
+      brand: string | null;
+      model_number: string | null;
       condition: string | null;
       unit_cost: number;
       amazon_order_id: string | null;
-      product_name: string | null;
       created_at: string | null;
     }> = [];
 
@@ -120,7 +124,7 @@ export async function GET(request: NextRequest) {
     if (amazonOrderId) {
       const { data: linked, error: errA } = await supabase
         .from("inbound_items")
-        .select("id, jan_code, condition_type, effective_unit_price, order_id, product_name, created_at")
+        .select("id, jan_code, brand, model_number, condition_type, effective_unit_price, order_id, created_at")
         .eq("order_id", amazonOrderId)
         .is("settled_at", null)
         .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
@@ -171,7 +175,7 @@ export async function GET(request: NextRequest) {
       if (janFromMaster) {
         const { data: unlinked, error: errB } = await supabase
           .from("inbound_items")
-          .select("id, jan_code, condition_type, effective_unit_price, order_id, product_name, created_at")
+          .select("id, jan_code, brand, model_number, condition_type, effective_unit_price, order_id, created_at")
           .is("settled_at", null)
           .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
           .or('order_id.is.null,order_id.eq.""')
@@ -191,7 +195,7 @@ export async function GET(request: NextRequest) {
       if (results.length === countBeforeConditionB) {
         const { data: unlinked, error: errFallback } = await supabase
           .from("inbound_items")
-          .select("id, jan_code, condition_type, effective_unit_price, order_id, product_name, created_at")
+          .select("id, jan_code, brand, model_number, condition_type, effective_unit_price, order_id, created_at")
           .is("settled_at", null)
           .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
           .or('order_id.is.null,order_id.eq.""')

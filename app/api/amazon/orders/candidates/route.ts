@@ -25,7 +25,9 @@ function conditionTypeOrFilter(norm: NormalizedListingCondition): string {
 type Row = {
   id: number;
   jan_code: string | null;
-  product_name: string | null;
+  brand: string | null;
+  model_number: string | null;
+  effective_unit_price: number | string | null;
   condition_type: string | null;
   created_at: string | null;
   order_id: string | null;
@@ -34,7 +36,7 @@ type Row = {
 function baseInboundSelect() {
   return supabase
     .from("inbound_items")
-    .select("id, jan_code, product_name, condition_type, created_at, order_id")
+    .select("id, jan_code, brand, model_number, effective_unit_price, condition_type, created_at, order_id")
     .is("settled_at", null)
     .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION);
 }
@@ -128,7 +130,17 @@ export async function GET(request: NextRequest) {
       if (!errJan && byJan?.length) data = byJan;
     }
 
-    return NextResponse.json(data);
+    const payload = (data ?? []).map((r) => ({
+      id: r.id,
+      jan_code: r.jan_code,
+      brand: r.brand,
+      model_number: r.model_number,
+      effective_unit_price: Number(r.effective_unit_price ?? 0),
+      condition_type: r.condition_type,
+      created_at: r.created_at,
+      order_id: r.order_id,
+    }));
+    return NextResponse.json(payload);
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "候補の取得に失敗しました。";
     return NextResponse.json({ error: message }, { status: 500 });

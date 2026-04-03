@@ -82,6 +82,12 @@ export async function POST(request: NextRequest) {
     if (inboundIds.length === 0) {
       return NextResponse.json({ error: "inbound_item_id または inbound_item_ids を指定してください。" }, { status: 400 });
     }
+    if (inboundIds.length > 1) {
+      const uniq = new Set(inboundIds);
+      if (uniq.size !== inboundIds.length) {
+        return NextResponse.json({ error: "同じ在庫IDを重複して選べません。" }, { status: 400 });
+      }
+    }
 
     let orderRow: AmazonOrderRowForManual | null = null;
 
