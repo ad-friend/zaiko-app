@@ -20,6 +20,8 @@ function requireCronAuth(req: NextRequest): { ok: true } | { ok: false; res: Nex
   }
   const auth = req.headers.get("authorization") ?? "";
   if (auth !== `Bearer ${secret}`) {
+    console.log("【DEBUG】サーバー側の正解:", secret);
+    console.log("【DEBUG】送られてきた値:", auth);
     return { ok: false, res: NextResponse.json({ error: "Unauthorized" }, { status: 401 }) };
   }
   return { ok: true };
