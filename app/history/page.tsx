@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pencil, Save, X, ChevronLeft, Download, Upload, Search, ArrowUp, ArrowDown, ArrowUpDown, Calendar, Loader2, PackageMinus } from "lucide-react";
 import { normalizeToFullWidthKatakana } from "@/lib/kana";
 import { normalizeSupplierForMatch } from "@/lib/normalizeSupplier";
@@ -97,13 +97,113 @@ type EditDraft = {
   effective_unit_price: number;
 };
 
+const PAGE_SIZE = 200;
+const FETCH_CHUNK = 500;
+
+type RecordsListJson = {
+  rows?: RecordRow[];
+  total?: number;
+  page?: number;
+  pageSize?: number;
+  error?: string;
+};
+
+function normalizeRecordRow(r: RecordRow & { exit_type?: string | null; stock_status?: string | null }): RecordRow {
+  return {
+    ...r,
+    exit_type: r.exit_type ?? null,
+    stock_status: r.stock_status ?? null,
+  };
+}
+
+function buildRecordsQuery(params: {
+  page: number;
+  pageSize?: number;
+  years?: number;
+  q: string;
+  sortKey: string | null;
+  sortDir: "asc" | "desc";
+}): string {
+  const u = new URLSearchParams();
+  u.set("page", String(params.page));
+  u.set("pageSize", String(params.pageSize ?? PAGE_SIZE));
+  if (params.years != null) u.set("years", String(params.years));
+  const qt = params.q.trim();
+  if (qt) u.set("q", qt);
+  if (params.sortKey) {
+    u.set("sort", params.sortKey);
+    u.set("dir", params.sortDir);
+  }
+  return `/api/records?${u.toString()}`;
+}
+
+/** 検索・ソート条件に一致する全件（ページングで結合）。CSV・一括編集・5年CSV用 */
+async function fetchAllRecordsMatching(opts: {
+  years?: number;
+  q: string;
+  sortKey: string | null;
+  sortDir: "asc" | "desc";
+}): Promise<RecordRow[]> {
+  const out: RecordRow[] = [];
+  let page = 1;
+  let total = Infinity;
+  while (true) {
+    const url = buildRecordsQuery({
+      page,
+      pageSize: FETCH_CHUNK,
+      years: opts.years,
+      q: opts.q,
+      sortKey: opts.sortKey,
+      sortDir: opts.sortDir,
+    });
+    const res = await fetch(url);
+    const j = (await res.json()) as RecordsListJson;
+    if (!res.ok) {
+      throw new Error(j.error || "在庫データの取得に失敗しました");
+    }
+    const chunk = Array.isArray(j.rows) ? j.rows : [];
+    if (page === 1) total = typeof j.total === "number" ? j.total : chunk.length;
+    for (const r of chunk) {
+      out.push(normalizeRecordRow(r as RecordRow & { exit_type?: string | null; stock_status?: string | null }));
+    }
+    if (chunk.length < FETCH_CHUNK || out.length >= total) break;
+    page += 1;
+    if (page > 2000) break;
+  }
+  return out;
+}
+
+function buildPageSlots(current: number, totalPages: number): Array<number | "ellipsis"> {
+  if (totalPages <= 0) return [];
+  if (totalPages === 1) return [1];
+  const raw = new Set<number>();
+  raw.add(1);
+  raw.add(totalPages);
+  for (let p = current - 2; p <= current + 2; p++) {
+    if (p >= 1 && p <= totalPages) raw.add(p);
+  }
+  const sorted = [...raw].sort((a, b) => a - b);
+  const out: Array<number | "ellipsis"> = [];
+  for (let i = 0; i < sorted.length; i++) {
+    if (i > 0 && sorted[i] - sorted[i - 1] > 1) out.push("ellipsis");
+    out.push(sorted[i]);
+  }
+  return out;
+}
+
 export default function HistoryPage() {
   const [rows, setRows] = useState<RecordRow[]>([]);
   // 🌟 追加：仕入先マスターのデータを保持する
   const [suppliers, setSuppliers] = useState<SupplierMaster[]>([]);
-  
+
+  const [total, setTotal] = useState(0);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [debouncedQ, setDebouncedQ] = useState("");
+  const [jumpInput, setJumpInput] = useState("");
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [csvExportLoading, setCsvExportLoading] = useState(false);
 
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [lastCheckedId, setLastCheckedId] = useState<number | null>(null);
@@ -126,46 +226,90 @@ export default function HistoryPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [sortConfig, setSortConfig] = useState<{ key: string | null; direction: "asc" | "desc" }>({ key: null, direction: "asc" });
 
-  const fetchRecords = useCallback(async () => {
-    try {
-      // 🌟 変更点：在庫データと仕入先マスターデータを「同時に」取得する
-      const [recordsRes, suppliersRes] = await Promise.all([
-        fetch("/api/records"),
-        fetch("/api/suppliers") // これで仕入先一覧（ID, name, kana 等）を取得
-      ]);
-      
-      if (!recordsRes.ok) throw new Error("在庫データの取得に失敗しました");
-      const recordsData = await recordsRes.json();
-      if (!Array.isArray(recordsData)) {
-        const msg =
-          typeof recordsData === "object" && recordsData !== null && "error" in recordsData
-            ? String((recordsData as { error?: string }).error ?? "")
-            : "";
-        throw new Error(msg || "在庫データの形式が不正です");
-      }
-      const list = recordsData;
-      setRows(
-        list.map((r: RecordRow & { exit_type?: string | null; stock_status?: string | null }) => ({
-          ...r,
-          exit_type: r.exit_type ?? null,
-          stock_status: r.stock_status ?? null,
-        }))
-      );
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQ(searchTerm), 300);
+    return () => clearTimeout(t);
+  }, [searchTerm]);
 
-      if (suppliersRes.ok) {
-        const suppliersData = await suppliersRes.json();
-        setSuppliers(suppliersData);
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [debouncedQ, sortConfig.key, sortConfig.direction]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const url = buildRecordsQuery({
+          page: currentPage,
+          pageSize: PAGE_SIZE,
+          q: debouncedQ,
+          sortKey: sortConfig.key,
+          sortDir: sortConfig.direction,
+        });
+        const recordsRes = await fetch(url);
+        const recordsData = (await recordsRes.json()) as RecordsListJson;
+        if (!recordsRes.ok) {
+          throw new Error(recordsData.error || "在庫データの取得に失敗しました");
+        }
+        const list = Array.isArray(recordsData.rows) ? recordsData.rows : [];
+        if (cancelled) return;
+        setRows(
+          list.map((r) => normalizeRecordRow(r as RecordRow & { exit_type?: string | null; stock_status?: string | null }))
+        );
+        setTotal(typeof recordsData.total === "number" ? recordsData.total : list.length);
+      } catch (e: unknown) {
+        if (!cancelled) setError(e instanceof Error ? e.message : "エラーが発生しました");
+      } finally {
+        if (!cancelled) setLoading(false);
       }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentPage, debouncedQ, sortConfig.key, sortConfig.direction]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("/api/suppliers");
+        if (res.ok) setSuppliers(await res.json());
+      } catch {
+        /* ignore */
+      }
+    })();
+  }, []);
+
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  useEffect(() => {
+    if (currentPage > totalPages) setCurrentPage(totalPages);
+  }, [totalPages, currentPage]);
+
+  const reloadCurrentPage = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const url = buildRecordsQuery({
+        page: currentPage,
+        pageSize: PAGE_SIZE,
+        q: debouncedQ,
+        sortKey: sortConfig.key,
+        sortDir: sortConfig.direction,
+      });
+      const recordsRes = await fetch(url);
+      const recordsData = (await recordsRes.json()) as RecordsListJson;
+      if (!recordsRes.ok) throw new Error(recordsData.error || "在庫データの取得に失敗しました");
+      const list = Array.isArray(recordsData.rows) ? recordsData.rows : [];
+      setRows(list.map((r) => normalizeRecordRow(r as RecordRow & { exit_type?: string | null; stock_status?: string | null })));
+      setTotal(typeof recordsData.total === "number" ? recordsData.total : list.length);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "エラーが発生しました");
     } finally {
       setLoading(false);
     }
-  }, []);
-
-  useEffect(() => {
-    fetchRecords();
-  }, [fetchRecords]);
+  }, [currentPage, debouncedQ, sortConfig.key, sortConfig.direction]);
 
   const submitInventoryAdjustment = useCallback(async () => {
     const jan = invJan.trim();
@@ -197,14 +341,14 @@ export default function HistoryPage() {
       setInventoryModalOpen(false);
       setInvJan("");
       setInvQuantity("1");
-      await fetchRecords();
+      await reloadCurrentPage();
       alert(`在庫調整を反映しました（${(data as { updated?: number }).updated ?? q} 件）`);
     } catch (e) {
       alert(e instanceof Error ? e.message : "在庫調整に失敗しました");
     } finally {
       setInventorySubmitting(false);
     }
-  }, [invJan, invCondition, invQuantity, invReason, fetchRecords]);
+  }, [invJan, invCondition, invQuantity, invReason, reloadCurrentPage]);
 
   // 🌟 追加：「カナ」を渡すと、マスターから「正式名称（name）」を探して返す関数
   const getSupplierName = useCallback((kanaOrName: string | null | undefined): string => {
@@ -269,50 +413,26 @@ export default function HistoryPage() {
     }
   };
 
-  const processedRows = (() => {
-    let list = rows;
-    const term = searchTerm.trim().toLowerCase();
-    if (term) {
-      list = list.filter((r) => {
-        const condRaw = (r.condition_type ?? "").toLowerCase();
-        const condLabel = statusLabel(r.condition_type).toLowerCase();
-        const oid = (r.order_id ?? "").toLowerCase();
-        const asin = (r.asin ?? "").toLowerCase();
-        return (
-          String(r.id).includes(term) ||
-          (r.jan_code ?? "").toLowerCase().includes(term) ||
-          (r.brand ?? "").toLowerCase().includes(term) ||
-          (r.product_name ?? "").toLowerCase().includes(term) ||
-          (r.model_number ?? "").toLowerCase().includes(term) ||
-          getSupplierName(r.header?.supplier).toLowerCase().includes(term) ||
-          (r.header?.supplier ?? "").toLowerCase().includes(term) ||
-          condRaw.includes(term) ||
-          condLabel.includes(term) ||
-          oid.includes(term) ||
-          asin.includes(term)
-        );
-      });
-    }
+  /** API が並べ替え済み。進捗列のみ現在ページ内でクライアントソート */
+  const processedRows = useMemo(() => {
     const { key, direction } = sortConfig;
-    if (key) {
-      list = [...list].sort((a, b) => {
-        const va = getSortValue(a, key);
-        const vb = getSortValue(b, key);
-        const isNum = typeof va === "number" && typeof vb === "number";
-        if (isNum) {
-          const diff = direction === "asc" ? (va as number) - (vb as number) : (vb as number) - (va as number);
-          if (diff !== 0) return diff;
-          return a.id - b.id;
-        }
-        const sa = String(va);
-        const sb = String(vb);
-        const cmp = sa.localeCompare(sb, "ja");
-        if (cmp !== 0) return direction === "asc" ? cmp : -cmp;
+    if (key !== "inventory_progress") return rows;
+    return [...rows].sort((a, b) => {
+      const va = getSortValue(a, key);
+      const vb = getSortValue(b, key);
+      const isNum = typeof va === "number" && typeof vb === "number";
+      if (isNum) {
+        const diff = direction === "asc" ? (va as number) - (vb as number) : (vb as number) - (va as number);
+        if (diff !== 0) return diff;
         return a.id - b.id;
-      });
-    }
-    return list;
-  })();
+      }
+      const sa = String(va);
+      const sb = String(vb);
+      const cmp = sa.localeCompare(sb, "ja");
+      if (cmp !== 0) return direction === "asc" ? cmp : -cmp;
+      return a.id - b.id;
+    });
+  }, [rows, sortConfig.key, sortConfig.direction, getSupplierName]);
 
   const formatDate = (iso: string) => {
     if (!iso) return "—";
@@ -368,20 +488,16 @@ export default function HistoryPage() {
   const toggleSelect = (id: number, shiftKey: boolean) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
-      
-      // Shiftキー範囲選択ロジック
+
       if (shiftKey && lastCheckedId !== null) {
-        const currentIndex = rows.findIndex(r => r.id === id);
-        const lastIndex = rows.findIndex(r => r.id === lastCheckedId);
-        
+        const currentIndex = processedRows.findIndex((r) => r.id === id);
+        const lastIndex = processedRows.findIndex((r) => r.id === lastCheckedId);
+
         if (currentIndex !== -1 && lastIndex !== -1) {
           const start = Math.min(currentIndex, lastIndex);
           const end = Math.max(currentIndex, lastIndex);
-          const targetValue = !prev.has(id); // クリックした行の状態に合わせるか、常に選択にするか。
-          // 通常Shift選択は「選択範囲をActiveにする」なので、addする方向で実装
-          
           for (let i = start; i <= end; i++) {
-             next.add(rows[i].id);
+            next.add(processedRows[i].id);
           }
           return next;
         }
@@ -389,21 +505,30 @@ export default function HistoryPage() {
 
       if (next.has(id)) next.delete(id);
       else next.add(id);
-      
+
       setLastCheckedId(id);
       return next;
     });
   };
 
   const toggleSelectAll = () => {
-    if (rows.length === 0) return;
-    if (selectedIds.size >= rows.length) {
-        setSelectedIds(new Set());
-        setLastCheckedId(null);
+    const pageIds = processedRows.map((r) => r.id);
+    if (pageIds.length === 0) return;
+    const allPageSelected = pageIds.every((pid) => selectedIds.has(pid));
+    if (allPageSelected) {
+      setSelectedIds((prev) => {
+        const n = new Set(prev);
+        for (const pid of pageIds) n.delete(pid);
+        return n;
+      });
     } else {
-        setSelectedIds(new Set(rows.map((r) => r.id)));
-        setLastCheckedId(null);
+      setSelectedIds((prev) => {
+        const n = new Set(prev);
+        for (const pid of pageIds) n.add(pid);
+        return n;
+      });
     }
+    setLastCheckedId(null);
   };
 
   const startIndividualEdit = (row: RecordRow) => {
@@ -495,12 +620,36 @@ export default function HistoryPage() {
     } finally {
       setSaving(false);
     }
-  }, [editingId, editDraft]);
+  }, [editingId, editDraft, rows, suppliers]);
 
-  const startBulkEdit = () => {
-    // deep copy for snapshot including header
-    setBulkSnapshot(rows.map(r => ({...r, header: r.header ? {...r.header} : null})));
-    setIsBulkEditing(true);
+  const startBulkEdit = async () => {
+    setSaving(true);
+    try {
+      let all = await fetchAllRecordsMatching({
+        q: debouncedQ,
+        sortKey: sortConfig.key,
+        sortDir: sortConfig.direction,
+      });
+      if (sortConfig.key === "inventory_progress") {
+        all = [...all].sort((a, b) => {
+          const va = getSortValue(a, sortConfig.key!);
+          const vb = getSortValue(b, sortConfig.key!);
+          const diff =
+            sortConfig.direction === "asc"
+              ? (va as number) - (vb as number)
+              : (vb as number) - (va as number);
+          if (diff !== 0) return diff;
+          return a.id - b.id;
+        });
+      }
+      setBulkSnapshot(all.map((r) => ({ ...r, header: r.header ? { ...r.header } : null })));
+      setRows(all);
+      setIsBulkEditing(true);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "一覧の取得に失敗しました");
+    } finally {
+      setSaving(false);
+    }
   };
 
   const cancelBulkEdit = () => {
@@ -550,13 +699,13 @@ export default function HistoryPage() {
       if (!res.ok) throw new Error("一括更新に失敗しました");
       setBulkSnapshot(null);
       setIsBulkEditing(false);
-      await fetchRecords();
+      await reloadCurrentPage();
     } catch (e) {
       alert(e instanceof Error ? e.message : "一括更新に失敗しました");
     } finally {
       setSaving(false);
     }
-  }, [rows, fetchRecords]);
+  }, [rows, reloadCurrentPage]);
 
   // RecordRowのフィールド更新用
   const updateRowField = useCallback((id: number, field: keyof RecordRow, value: string | number) => {
@@ -588,14 +737,14 @@ export default function HistoryPage() {
           return;
         }
         setSelectedIds(new Set());
-        await fetchRecords();
+        await reloadCurrentPage();
       } catch (e) {
         alert(e instanceof Error ? e.message : "削除に失敗しました");
       } finally {
         setSaving(false);
       }
     }
-  }, [bulkAction, selectedIds, fetchRecords]);
+  }, [bulkAction, selectedIds, reloadCurrentPage]);
 
   const escapeCsv = (v: string | number | null | undefined): string => {
     const s = v === null || v === undefined ? "" : String(v);
@@ -603,46 +752,71 @@ export default function HistoryPage() {
     return s;
   };
 
-  const handleCsvExport = useCallback(() => {
-    const header = "id,jan_code,brand,product_name,model_number,supplier,genre,base_price,effective_unit_price,created_at,registered_at,status";
-    const lines = processedRows.map((r) =>
-      [
-        r.id,
-        r.jan_code ?? "",
-        r.brand ?? "",
-        r.product_name ?? "",
-        r.model_number ?? "",
-        // 🌟 CSV出力時も、カナではなく「正式名称」を出力する
-        getSupplierName(r.header?.supplier), 
-        r.header?.genre ?? "",
-        r.base_price ?? "",
-        r.effective_unit_price ?? "",
-        r.created_at ?? "",
-        r.registered_at ?? "",
-        statusLabel(r.condition_type),
-      ].map((x) => escapeCsv(x)).join(",")
-    );
-    const csv = [header, ...lines].join("\r\n");
-    const bom = "\uFEFF";
-    const blob = new Blob([bom + csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `inventory_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-  },[processedRows, getSupplierName]); // 🌟 依存配列に追加
+  const handleCsvExport = useCallback(async () => {
+    setCsvExportLoading(true);
+    try {
+      let data = await fetchAllRecordsMatching({
+        q: debouncedQ,
+        sortKey: sortConfig.key,
+        sortDir: sortConfig.direction,
+      });
+      if (sortConfig.key === "inventory_progress") {
+        data = [...data].sort((a, b) => {
+          const va = getSortValue(a, sortConfig.key!);
+          const vb = getSortValue(b, sortConfig.key!);
+          const diff =
+            sortConfig.direction === "asc"
+              ? (va as number) - (vb as number)
+              : (vb as number) - (va as number);
+          if (diff !== 0) return diff;
+          return a.id - b.id;
+        });
+      }
+      const header =
+        "id,jan_code,brand,product_name,model_number,supplier,genre,base_price,effective_unit_price,created_at,registered_at,status";
+      const lines = data.map((r) =>
+        [
+          r.id,
+          r.jan_code ?? "",
+          r.brand ?? "",
+          r.product_name ?? "",
+          r.model_number ?? "",
+          getSupplierName(r.header?.supplier),
+          r.header?.genre ?? "",
+          r.base_price ?? "",
+          r.effective_unit_price ?? "",
+          r.created_at ?? "",
+          r.registered_at ?? "",
+          statusLabel(r.condition_type),
+        ]
+          .map((x) => escapeCsv(x))
+          .join(",")
+      );
+      const csv = [header, ...lines].join("\r\n");
+      const bom = "\uFEFF";
+      const blob = new Blob([bom + csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `inventory_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "CSV出力に失敗しました");
+    } finally {
+      setCsvExportLoading(false);
+    }
+  }, [debouncedQ, sortConfig.key, sortConfig.direction, getSupplierName]);
 
   const downloadCsv5Years = useCallback(async () => {
     setCsv5YearsLoading(true);
     try {
-      const res = await fetch("/api/records?years=5");
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error((errData as { error?: string }).error || "データの取得に失敗しました");
-      }
-      const data: RecordRow[] = await res.json();
-      if (!Array.isArray(data)) throw new Error("不正なレスポンスです");
+      const data = await fetchAllRecordsMatching({
+        years: 5,
+        q: "",
+        sortKey: null,
+        sortDir: "desc",
+      });
 
       const header =
         "id,jan_code,brand,product_name,model_number,supplier,genre,base_price,effective_unit_price,created_at,registered_at,status";
@@ -933,14 +1107,14 @@ export default function HistoryPage() {
         throw new Error(errData.error || "CSV取込に失敗しました");
       }
       setCsvImportPreview(null);
-      await fetchRecords();
+      await reloadCurrentPage();
       alert(`${csvImportPreview.length} 件を取込ました`);
     } catch (e) {
       alert(e instanceof Error ? e.message : "CSV取込に失敗しました");
     } finally {
       setSaving(false);
     }
-  }, [csvImportPreview, fetchRecords, slashedToIsoDate]);
+  }, [csvImportPreview, reloadCurrentPage, slashedToIsoDate]);
 
   const closeCsvImportPreview = useCallback(() => {
     setCsvImportPreview(null);
@@ -970,6 +1144,91 @@ export default function HistoryPage() {
       touroku: formatCsvPreviewDateDisplay(rawTouroku),
     };
   };
+
+  const rangeStart = total === 0 ? 0 : (currentPage - 1) * PAGE_SIZE + 1;
+  const rangeEnd = Math.min(currentPage * PAGE_SIZE, total);
+  const pagerSlots = buildPageSlots(currentPage, totalPages);
+
+  const goJumpPage = () => {
+    const n = parseInt(jumpInput.trim(), 10);
+    if (!Number.isFinite(n)) return;
+    const p = Math.min(Math.max(1, Math.floor(n)), totalPages);
+    setCurrentPage(p);
+    setJumpInput("");
+  };
+
+  const inventoryPager = (
+    <div className="flex flex-wrap items-center justify-end gap-2 py-2 text-xs text-slate-600">
+      <span className="tabular-nums shrink-0">
+        {rangeStart}–{rangeEnd} / {total} 件
+        {selectedIds.size > 0 ? ` · 選択 ${selectedIds.size} 件` : null}
+      </span>
+      <button
+        type="button"
+        aria-label="前のページ"
+        disabled={currentPage <= 1 || loading}
+        onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+        className={`${buttonClass} h-8 px-3 text-xs disabled:opacity-40 bg-white border border-slate-200`}
+      >
+        前へ
+      </button>
+      <div className="flex flex-wrap items-center gap-1">
+        {pagerSlots.map((slot, i) =>
+          slot === "ellipsis" ? (
+            <span key={`ellipsis-${i}`} className="px-1 text-slate-400">
+              …
+            </span>
+          ) : (
+            <button
+              key={slot}
+              type="button"
+              aria-label={`${slot} ページへ`}
+              aria-current={slot === currentPage ? "page" : undefined}
+              disabled={slot === currentPage || loading}
+              onClick={() => setCurrentPage(slot)}
+              className={`min-w-[2rem] rounded border px-2 py-1 text-xs font-medium transition-colors disabled:opacity-100 ${
+                slot === currentPage
+                  ? "border-primary bg-primary/10 text-primary"
+                  : "border-slate-200 bg-white hover:bg-slate-50 text-slate-700"
+              }`}
+            >
+              {slot}
+            </button>
+          )
+        )}
+      </div>
+      <button
+        type="button"
+        aria-label="次のページ"
+        disabled={currentPage >= totalPages || loading}
+        onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+        className={`${buttonClass} h-8 px-3 text-xs disabled:opacity-40 bg-white border border-slate-200`}
+      >
+        次へ
+      </button>
+      <span className="flex items-center gap-1 border-l border-slate-200 pl-2 ml-1">
+        <input
+          type="number"
+          min={1}
+          max={totalPages}
+          value={jumpInput}
+          onChange={(e) => setJumpInput(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && goJumpPage()}
+          placeholder="ページ"
+          className={`${inputClass} h-8 w-16 py-1 text-xs`}
+          aria-label="移動先ページ番号"
+        />
+        <button
+          type="button"
+          onClick={goJumpPage}
+          disabled={loading}
+          className={`${buttonClass} h-8 px-3 text-xs bg-white border border-slate-200`}
+        >
+          移動
+        </button>
+      </span>
+    </div>
+  );
 
   return (
     <div className="flex-1 flex flex-col">
@@ -1012,7 +1271,7 @@ export default function HistoryPage() {
                     type="text"
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
-                    placeholder="ID・JAN・ASIN・注文番号・商品名・仕入先・コンディションで検索..."
+                    placeholder="ID・JAN・ASIN・注文番号・商品名・仕入先カナ・コンディションで検索（DB）…"
                     className={`${inputClass} pl-10 rounded-lg border-0 focus-visible:ring-0`}
                   />
                 </div>
@@ -1021,16 +1280,18 @@ export default function HistoryPage() {
               <div className="flex flex-wrap items-center gap-3 px-6 py-3 border-b border-slate-100 bg-white shrink-0">
                 {!isBulkEditing ? (
                   <>
-                    {rows.length > 0 && (
+                    {total > 0 && (
                       <div className="flex items-center gap-3">
                         <label className="flex items-center gap-2 cursor-pointer text-sm text-slate-600">
                           <input
                             type="checkbox"
-                            checked={selectedIds.size === rows.length}
+                            checked={
+                              processedRows.length > 0 && processedRows.every((r) => selectedIds.has(r.id))
+                            }
                             onChange={toggleSelectAll}
                             className="rounded border-slate-300 text-primary focus:ring-primary"
                           />
-                          全選択/解除
+                          ページ内を全選択/解除
                         </label>
                         <select
                           value={bulkAction}
@@ -1051,7 +1312,7 @@ export default function HistoryPage() {
                     )}
                     <div
                       className={
-                        rows.length > 0
+                        total > 0
                           ? "ml-auto flex flex-wrap items-center gap-3"
                           : "ml-auto flex w-full flex-wrap items-center justify-end gap-3"
                       }
@@ -1065,11 +1326,12 @@ export default function HistoryPage() {
                       />
                       <button
                         type="button"
-                        onClick={handleCsvExport}
-                        className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300`}
+                        onClick={() => void handleCsvExport()}
+                        disabled={csvExportLoading || total === 0}
+                        className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300 disabled:opacity-50`}
                       >
                         <Download className="mr-2 h-4 w-4" />
-                        CSV出力（Download）
+                        {csvExportLoading ? "CSV出力中..." : "CSV出力（Download）"}
                       </button>
                       <button
                         type="button"
@@ -1080,13 +1342,14 @@ export default function HistoryPage() {
                         <Upload className="mr-2 h-4 w-4" />
                         CSV取込（Upload）
                       </button>
-                      {rows.length > 0 && (
+                      {total > 0 && (
                         <button
                           type="button"
-                          onClick={startBulkEdit}
-                          className={`${buttonClass} bg-white text-primary border border-primary/20 hover:bg-primary/5`}
+                          onClick={() => void startBulkEdit()}
+                          disabled={saving}
+                          className={`${buttonClass} bg-white text-primary border border-primary/20 hover:bg-primary/5 disabled:opacity-50`}
                         >
-                          一括編集
+                          {saving ? "読込中..." : "一括編集"}
                         </button>
                       )}
                     </div>
@@ -1123,12 +1386,14 @@ export default function HistoryPage() {
                 {error}
               </div>
             )}
-            {!loading && !error && rows.length === 0 && (
+            {!loading && !error && total === 0 && (
               <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/50 py-16 text-center">
                 <p className="text-sm font-medium text-slate-600">データがありません</p>
               </div>
             )}
-            {!loading && !error && rows.length > 0 && (
+            {!loading && !error && total > 0 && (
+              <>
+                {inventoryPager}
               <div className="relative w-full max-h-[calc(100vh-280px)] overflow-y-auto overflow-x-hidden border border-slate-200 rounded-md">
                 <table className="w-full table-fixed border-collapse text-left text-[11px] leading-snug sm:text-xs">
                     <colgroup>
@@ -1646,9 +1911,11 @@ export default function HistoryPage() {
                   </tbody>
                   </table>
               </div>
+              {inventoryPager}
+              </>
             )}
 
-            {!loading && !error && rows.length > 0 && isBulkEditing && (
+            {!loading && !error && isBulkEditing && (
               <div className="flex items-center gap-3 pt-4 mt-4 border-t border-slate-100">
                 <div className="ml-auto flex items-center gap-3">
                     <button

@@ -54,36 +54,174 @@ const SELECT_WITH_REGISTERED = `
   )
 `;
 
-const SELECT_WITHOUT_REGISTERED = `
-  id,
-  jan_code,
-  asin,
-  product_name,
-  brand,
-  model_number,
-  condition_type,
-  base_price,
-  effective_unit_price,
-  created_at,
-  order_id,
-  settled_at,
-  exit_type,
-  stock_status,
-  inbound_headers (
-    id,
-    purchase_date,
-    supplier,
-    genre,
-    created_at
-  )
-`;
+export const LIST_MAX_ROWS = 50000;
+const DEFAULT_PAGE_SIZE = 200;
+const MAX_PAGE_SIZE = 500;
 
-const LIST_MAX_ROWS = 50000;
+function escapeIlikePattern(s: string): string {
+  return s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_%");
+}
+
+function mapDbRow(row: Record<string, unknown>): RecordRow {
+  const r = row;
+  return {
+    id: Number(r.id),
+    jan_code: r.jan_code != null ? String(r.jan_code) : null,
+    asin: r.asin != null ? String(r.asin) : null,
+    product_name: r.product_name != null ? String(r.product_name) : null,
+    brand: r.brand != null ? String(r.brand) : null,
+    model_number: r.model_number != null ? String(r.model_number) : null,
+    condition_type: r.condition_type != null ? String(r.condition_type) : null,
+    base_price: Number(r.base_price ?? 0),
+    effective_unit_price: Number(r.effective_unit_price ?? 0),
+    created_at: r.created_at != null ? String(r.created_at) : "",
+    registered_at: (r.registered_at || r.created_at)
+      ? new Date(String(r.registered_at || r.created_at)).toLocaleDateString("ja-JP", {
+          timeZone: "Asia/Tokyo",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+        })
+          .replace(/\//g, "-")
+      : "",
+    order_id: r.order_id != null ? String(r.order_id) : null,
+    settled_at: r.settled_at != null ? String(r.settled_at) : null,
+    exit_type: r.exit_type != null ? String(r.exit_type) : null,
+    stock_status: r.stock_status != null ? String(r.stock_status) : null,
+    header: Array.isArray(r.inbound_headers)
+      ? (r.inbound_headers[0] as RecordRow["header"])
+      : ((r.inbound_headers as RecordRow["header"]) ?? null),
+  };
+}
+
+function ilikeValue(raw: string): string {
+  const esc = escapeIlikePattern(raw.trim());
+  return `%${esc}%`;
+}
+
+function buildSearchOrClause(q: string, includeHeaderSupplier: boolean): string | null {
+  const t = q.trim();
+  if (!t) return null;
+  const p = ilikeValue(t);
+  const parts: string[] = [
+    `jan_code.ilike.${p}`,
+    `product_name.ilike.${p}`,
+    `brand.ilike.${p}`,
+    `model_number.ilike.${p}`,
+    `order_id.ilike.${p}`,
+    `asin.ilike.${p}`,
+    `condition_type.ilike.${p}`,
+  ];
+  if (includeHeaderSupplier) {
+    parts.push(`inbound_headers.supplier.ilike.${p}`);
+  }
+  if (/^\d+$/.test(t) && t.length <= 15) {
+    parts.push(`id.eq.${t}`);
+  }
+  const lower = t.toLowerCase();
+  if (t.includes("新品") || lower === "new") parts.push("condition_type.eq.new");
+  if (t.includes("中古") || lower === "used") parts.push("condition_type.eq.used");
+  return parts.join(",");
+}
+
+type SortKey =
+  | "id"
+  | "registered_at"
+  | "created_at"
+  | "supplier"
+  | "genre"
+  | "jan_code"
+  | "product_name"
+  | "brand"
+  | "model_number"
+  | "order_id"
+  | "base_price"
+  | "effective_unit_price"
+  | "condition_type"
+  | "inventory_progress";
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyOrdering(q: any, sortKey: SortKey | null, sortDir: "asc" | "desc"): any {
+  const ascending = sortDir === "asc";
+  const nullsFirst = false;
+
+  if (!sortKey || sortKey === "inventory_progress") {
+    return q
+      .order("created_at", { ascending: false, nullsFirst: false })
+      .order("id", { ascending: false });
+  }
+
+  switch (sortKey) {
+    case "created_at":
+      return q
+        .order("purchase_date", { ascending, nullsFirst, foreignTable: "inbound_headers" })
+        .order("id", { ascending });
+    case "supplier":
+      return q
+        .order("supplier", { ascending, nullsFirst, foreignTable: "inbound_headers" })
+        .order("id", { ascending });
+    case "genre":
+      return q
+        .order("genre", { ascending, nullsFirst, foreignTable: "inbound_headers" })
+        .order("id", { ascending });
+    case "registered_at":
+      return q.order("registered_at", { ascending, nullsFirst }).order("id", { ascending });
+    case "id":
+    case "jan_code":
+    case "product_name":
+    case "brand":
+    case "model_number":
+    case "order_id":
+    case "base_price":
+    case "effective_unit_price":
+    case "condition_type":
+      return q.order(sortKey, { ascending, nullsFirst }).order("id", { ascending });
+    default:
+      return q
+        .order("created_at", { ascending: false, nullsFirst: false })
+        .order("id", { ascending: false });
+  }
+}
+
+async function runListQuery(
+  cutoffIso: string,
+  page: number,
+  pageSize: number,
+  searchOr: string | null,
+  sortKey: SortKey | null,
+  sortDirRaw: "asc" | "desc"
+): Promise<{ rows: RecordRow[]; total: number; error: Error | null }> {
+  let listQuery = supabase
+    .from("inbound_items")
+    .select(SELECT_WITH_REGISTERED, { count: "exact" })
+    .gte("created_at", cutoffIso);
+
+  if (searchOr) {
+    listQuery = listQuery.or(searchOr);
+  }
+
+  listQuery = applyOrdering(listQuery, sortKey, sortDirRaw);
+
+  const from = (page - 1) * pageSize;
+  const to = from + pageSize - 1;
+  listQuery = listQuery.range(from, to);
+
+  const { data, error, count } = await listQuery;
+
+  if (error) {
+    return { rows: [], total: 0, error: new Error(error.message) };
+  }
+
+  const rows = (data || []).map((row) => mapDbRow(row as Record<string, unknown>));
+  const total = count ?? rows.length;
+  return { rows, total, error: null };
+}
 
 export async function GET(request: NextRequest) {
   try {
-    const yearsParam = request.nextUrl.searchParams.get("years");
-    /** 既定を長めにし、CSVで古い仕入日が付与された行も一覧に含める（!inner の埋め込みは使わず左結合相当の通常 select） */
+    const sp = request.nextUrl.searchParams;
+
+    const yearsParam = sp.get("years");
     let years = 30;
     if (yearsParam !== null && yearsParam !== "") {
       const n = parseInt(yearsParam, 10);
@@ -94,46 +232,57 @@ export async function GET(request: NextRequest) {
     cutoff.setUTCFullYear(cutoff.getUTCFullYear() - years);
     const cutoffIso = cutoff.toISOString();
 
-    const { data, error } = await supabase
-      .from("inbound_items")
-      .select(SELECT_WITH_REGISTERED)
-      .gte("created_at", cutoffIso)
-      .order("created_at", { ascending: false, nullsFirst: false })
-      .order("id", { ascending: false })
-      .limit(LIST_MAX_ROWS);
+    let page = parseInt(sp.get("page") ?? "1", 10);
+    if (!Number.isFinite(page) || page < 1) page = 1;
 
-    // エラーがあればここでキャッチ処理へ飛ばす
-    if (error) throw error;
+    let pageSize = parseInt(sp.get("pageSize") ?? String(DEFAULT_PAGE_SIZE), 10);
+    if (!Number.isFinite(pageSize) || pageSize < 1) pageSize = DEFAULT_PAGE_SIZE;
+    pageSize = Math.min(pageSize, MAX_PAGE_SIZE);
 
-    // 取得したデータを画面用に整形する
-    const rows = (data || []).map((row: any) => ({
-      id: row.id,
-      jan_code: row.jan_code ?? null,
-      asin: row.asin ?? null,
-      product_name: row.product_name ?? null,
-      brand: row.brand ?? null,
-      model_number: row.model_number ?? null,
-      condition_type: row.condition_type ?? null,
-      base_price: Number(row.base_price ?? 0),
-      effective_unit_price: Number(row.effective_unit_price ?? 0),
-      created_at: row.created_at ?? "",
-      registered_at: (row.registered_at || row.created_at)
-        ? new Date(row.registered_at || row.created_at).toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo", year: "numeric", month: "2-digit", day: "2-digit" }).replace(/\//g, "-")
-        : "",
-      order_id: row.order_id ?? null,
-      settled_at: row.settled_at ?? null,
-      exit_type: row.exit_type ?? null,
-      stock_status: row.stock_status ?? null,
-      header: Array.isArray(row.inbound_headers) ? row.inbound_headers[0] : row.inbound_headers ?? null,
-    }));
+    const qRaw = sp.get("q") ?? "";
 
-    // 画面にデータを返す
-    return NextResponse.json(rows);
-    
-  } catch (e: any) {
-    // 💡 さっき消えてしまっていたのはココです！ try とセットになる catch ブロック
+    const sortKeyRaw = sp.get("sort") ?? "";
+    const sortDirRaw = (sp.get("dir") ?? "desc").toLowerCase() === "asc" ? "asc" : "desc";
+    const allowedSort = new Set<SortKey>([
+      "id",
+      "registered_at",
+      "created_at",
+      "supplier",
+      "genre",
+      "jan_code",
+      "product_name",
+      "brand",
+      "model_number",
+      "order_id",
+      "base_price",
+      "effective_unit_price",
+      "condition_type",
+      "inventory_progress",
+    ]);
+    const sortKey: SortKey | null =
+      sortKeyRaw && allowedSort.has(sortKeyRaw as SortKey) ? (sortKeyRaw as SortKey) : null;
+
+    let searchOr = buildSearchOrClause(qRaw, true);
+    let result = await runListQuery(cutoffIso, page, pageSize, searchOr, sortKey, sortDirRaw);
+
+    if (result.error && searchOr?.includes("inbound_headers.supplier")) {
+      searchOr = buildSearchOrClause(qRaw, false);
+      result = await runListQuery(cutoffIso, page, pageSize, searchOr, sortKey, sortDirRaw);
+    }
+
+    if (result.error) throw result.error;
+
+    return NextResponse.json({
+      rows: result.rows,
+      total: result.total,
+      page,
+      pageSize,
+      listMaxRows: LIST_MAX_ROWS,
+    });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
     console.error("[records] GET error:", e);
-    return NextResponse.json({ error: e.message }, { status: 500 });
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
