@@ -99,10 +99,14 @@ export default function AmazonListingReportPage() {
         <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
           <h2 className="text-lg font-bold text-slate-800 mb-3">ファイル選択</h2>
           <p className="text-sm text-slate-600 mb-4">
-            必須列: <span className="font-mono">seller-sku</span>、<span className="font-mono">asin1</span>、
-            <span className="font-mono">item-condition</span>
+            必須列: <span className="font-mono">seller-sku</span>（出品者SKU）と、ASIN 列（
+            <span className="font-mono">asin1</span> / <span className="font-mono">商品ID</span> など）。
             <br />
-            <span className="font-mono">item-condition</span> が 11 のとき新品（New）、それ以外は中古（Used）として保存します。
+            コンディション列（<span className="font-mono">item-condition</span> / コンディション）がある場合: 11
+            は新品（New）、それ以外は中古（Used）。<strong>列が無いレポートは全行 New</strong> として保存します。
+            <br />
+            日次の自動取得は SP-API の出品詳細相当（<span className="font-mono">GET_MERCHANT_LISTINGS_ALL_DATA</span>
+            ・en_US）です。コンディション列が無い場合も同様に全行 New です。
             <br />
             処理の最後に、最終更新から 2 ヶ月以上経過した行を自動削除します。
           </p>

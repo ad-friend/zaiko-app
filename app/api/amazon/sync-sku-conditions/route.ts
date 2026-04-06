@@ -84,6 +84,8 @@ function parseActiveListingsTsv(text: string): {
     "asin",
     "ASIN 1",
     "asin 1",
+    "商品ID",
+    "商品id",
   ]);
   const conditionHeader = pickHeaderKey(headers, [
     "item-condition",
@@ -92,14 +94,20 @@ function parseActiveListingsTsv(text: string): {
     "コンディション",
   ]);
 
-  if (!skuHeader || !asinHeader || !conditionHeader) {
+  if (!skuHeader || !asinHeader) {
     return {
       rows: [],
       parseErrors: [
         ...parseErrors,
-        "必須列が見つかりません。次のいずれかの列が必要です: seller-sku（出品者SKU）/ asin1・ASIN 1・asin / item-condition（コンディション）。",
+        "必須列が見つかりません。次のいずれかの列が必要です: seller-sku（出品者SKU）/ asin1・ASIN 1・asin・商品ID。",
       ],
     };
+  }
+
+  if (!conditionHeader) {
+    parseErrors.push(
+      "コンディション列がありません。全行を新品(New)として登録します。"
+    );
   }
 
   const data = Array.isArray(parsed.data) ? parsed.data : [];
@@ -111,11 +119,13 @@ function parseActiveListingsTsv(text: string): {
     const sku = toTrimmedString(r[skuHeader]);
     if (!sku) continue;
     const asinRaw = toTrimmedString(r[asinHeader]);
-    const condRaw = toTrimmedString(r[conditionHeader]);
+    const condition_id: "New" | "Used" = conditionHeader
+      ? conditionFromItemCondition(toTrimmedString(r[conditionHeader]))
+      : "New";
     bySku.set(sku, {
       sku,
       asin: asinRaw || null,
-      condition_id: conditionFromItemCondition(condRaw),
+      condition_id,
     });
   }
 

@@ -133,6 +133,10 @@ function toTrimmedString(v: unknown): string {
   return v == null ? "" : String(v).trim();
 }
 
+/**
+ * GET_MERCHANT_LISTINGS_ALL_DATA の TSV（セラーセントラルでは「出品詳細レポート」相当）。
+ * item-condition 列が無い場合は全行 New。ある場合は 11=New、それ以外 Used。
+ */
 function parseListingReportTsv(text: string): {
   rows: Array<{ sku: string; asin: string | null; condition_id: "New" | "Used" }>;
   parseErrors: string[];
@@ -145,11 +149,17 @@ function parseListingReportTsv(text: string): {
   const skuIdx = idx("seller-sku");
   const asinIdx = idx("asin1");
   const condIdx = idx("item-condition");
-  if (skuIdx < 0 || asinIdx < 0 || condIdx < 0) {
+  if (skuIdx < 0 || asinIdx < 0) {
     return {
       rows: [],
-      parseErrors: ["必須列が見つかりません（seller-sku / asin1 / item-condition）。レポート種別・言語設定を確認してください。"],
+      parseErrors: [
+        "必須列が見つかりません（seller-sku / asin1）。出品詳細(GET_MERCHANT_LISTINGS_ALL_DATA)・言語 en_US を確認してください。",
+      ],
     };
+  }
+  const parseErrors: string[] = [];
+  if (condIdx < 0) {
+    parseErrors.push("item-condition 列がありません。全行を新品(New)として登録します。");
   }
   const bySku = new Map<string, { sku: string; asin: string | null; condition_id: "New" | "Used" }>();
   for (let i = 1; i < lines.length; i++) {
@@ -157,10 +167,11 @@ function parseListingReportTsv(text: string): {
     const sku = toTrimmedString(cols[skuIdx]);
     if (!sku) continue;
     const asin = toTrimmedString(cols[asinIdx]) || null;
-    const cond = conditionFromItemCondition(toTrimmedString(cols[condIdx]));
-    bySku.set(sku, { sku, asin, condition_id: cond });
+    const condition_id: "New" | "Used" =
+      condIdx >= 0 ? conditionFromItemCondition(toTrimmedString(cols[condIdx])) : "New";
+    bySku.set(sku, { sku, asin, condition_id });
   }
-  return { rows: [...bySku.values()], parseErrors: [] };
+  return { rows: [...bySku.values()], parseErrors };
 }
 
 async function upsertSkuConditions(rows: Array<{ sku: string; asin: string | null; condition_id: "New" | "Used" }>): Promise<{ upserted: number; deletedStale: number }> {
@@ -185,6 +196,7 @@ async function upsertSkuConditions(rows: Array<{ sku: string; asin: string | nul
 async function runListingReportDaily(): Promise<{ fetched: number; summary: string; metrics: Record<string, unknown> }> {
   const sp = createSpClient();
   const marketplaceId = "A1VC38T7YXB528";
+  /** セラーセントラル「出品詳細レポート（Active Listings）」に相当 */
   const reportType = "GET_MERCHANT_LISTINGS_ALL_DATA";
   const created = (await sp.callAPI({
     operation: "createReport",
