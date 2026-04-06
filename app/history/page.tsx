@@ -1,10 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Pencil, Save, X, ChevronLeft, Download, Upload, Search, ArrowUp, ArrowDown, ArrowUpDown, Calendar, Loader2, PackageMinus } from "lucide-react";
 import { normalizeToFullWidthKatakana } from "@/lib/kana";
 import { normalizeSupplierForMatch } from "@/lib/normalizeSupplier";
-import { getInventoryStatusDisplay, getInventoryStatusSortRank } from "@/lib/inventory-status-display";
+import { getInventoryStatusDisplay } from "@/lib/inventory-status-display";
 
 /** 在庫一覧1行。主軸はJANのためテーブルにはASIN列を表示しない（保存時ペイロード用に asin は取得のみ） */
 type RecordRow = {
@@ -23,6 +23,7 @@ type RecordRow = {
   settled_at: string | null;
   exit_type: string | null;
   stock_status: string | null;
+  inventory_progress_rank?: number;
   header: {
     id: number;
     purchase_date: string;
@@ -372,68 +373,6 @@ export default function HistoryPage() {
     });
   };
 
-  const getSortValue = (row: RecordRow, key: string): string | number => {
-    switch (key) {
-      case "id":
-        return row.id;
-      case "registered_at":
-        return row.registered_at ?? row.created_at ?? "";
-      case "created_at":
-        return row.header?.purchase_date ?? row.created_at ?? "";
-      case "supplier":
-        // 🌟 変更点：ソートする時も、正式名称で並び替えるようにする
-        return getSupplierName(row.header?.supplier);
-      case "genre":
-        return row.header?.genre ?? "";
-      case "jan_code":
-        return row.jan_code ?? "";
-      case "product_name":
-        return row.product_name ?? "";
-      case "brand":
-        return row.brand ?? "";
-      case "model_number":
-        return row.model_number ?? "";
-      case "order_id":
-        return row.order_id ?? "";
-      case "inventory_progress":
-        return getInventoryStatusSortRank({
-          order_id: row.order_id,
-          settled_at: row.settled_at,
-          exit_type: row.exit_type,
-          stock_status: row.stock_status,
-        });
-      case "base_price":
-        return row.base_price ?? 0;
-      case "effective_unit_price":
-        return row.effective_unit_price ?? 0;
-      case "condition_type":
-        return row.condition_type ?? "";
-      default:
-        return "";
-    }
-  };
-
-  /** API が並べ替え済み。進捗列のみ現在ページ内でクライアントソート */
-  const processedRows = useMemo(() => {
-    const { key, direction } = sortConfig;
-    if (key !== "inventory_progress") return rows;
-    return [...rows].sort((a, b) => {
-      const va = getSortValue(a, key);
-      const vb = getSortValue(b, key);
-      const isNum = typeof va === "number" && typeof vb === "number";
-      if (isNum) {
-        const diff = direction === "asc" ? (va as number) - (vb as number) : (vb as number) - (va as number);
-        if (diff !== 0) return diff;
-        return a.id - b.id;
-      }
-      const sa = String(va);
-      const sb = String(vb);
-      const cmp = sa.localeCompare(sb, "ja");
-      if (cmp !== 0) return direction === "asc" ? cmp : -cmp;
-      return a.id - b.id;
-    });
-  }, [rows, sortConfig.key, sortConfig.direction, getSupplierName]);
-
   const formatDate = (iso: string) => {
     if (!iso) return "—";
     try {
@@ -490,14 +429,14 @@ export default function HistoryPage() {
       const next = new Set(prev);
 
       if (shiftKey && lastCheckedId !== null) {
-        const currentIndex = processedRows.findIndex((r) => r.id === id);
-        const lastIndex = processedRows.findIndex((r) => r.id === lastCheckedId);
+        const currentIndex = rows.findIndex((r) => r.id === id);
+        const lastIndex = rows.findIndex((r) => r.id === lastCheckedId);
 
         if (currentIndex !== -1 && lastIndex !== -1) {
           const start = Math.min(currentIndex, lastIndex);
           const end = Math.max(currentIndex, lastIndex);
           for (let i = start; i <= end; i++) {
-            next.add(processedRows[i].id);
+            next.add(rows[i].id);
           }
           return next;
         }
@@ -512,7 +451,7 @@ export default function HistoryPage() {
   };
 
   const toggleSelectAll = () => {
-    const pageIds = processedRows.map((r) => r.id);
+    const pageIds = rows.map((r) => r.id);
     if (pageIds.length === 0) return;
     const allPageSelected = pageIds.every((pid) => selectedIds.has(pid));
     if (allPageSelected) {
@@ -625,23 +564,11 @@ export default function HistoryPage() {
   const startBulkEdit = async () => {
     setSaving(true);
     try {
-      let all = await fetchAllRecordsMatching({
+      const all = await fetchAllRecordsMatching({
         q: debouncedQ,
         sortKey: sortConfig.key,
         sortDir: sortConfig.direction,
       });
-      if (sortConfig.key === "inventory_progress") {
-        all = [...all].sort((a, b) => {
-          const va = getSortValue(a, sortConfig.key!);
-          const vb = getSortValue(b, sortConfig.key!);
-          const diff =
-            sortConfig.direction === "asc"
-              ? (va as number) - (vb as number)
-              : (vb as number) - (va as number);
-          if (diff !== 0) return diff;
-          return a.id - b.id;
-        });
-      }
       setBulkSnapshot(all.map((r) => ({ ...r, header: r.header ? { ...r.header } : null })));
       setRows(all);
       setIsBulkEditing(true);
@@ -755,23 +682,11 @@ export default function HistoryPage() {
   const handleCsvExport = useCallback(async () => {
     setCsvExportLoading(true);
     try {
-      let data = await fetchAllRecordsMatching({
+      const data = await fetchAllRecordsMatching({
         q: debouncedQ,
         sortKey: sortConfig.key,
         sortDir: sortConfig.direction,
       });
-      if (sortConfig.key === "inventory_progress") {
-        data = [...data].sort((a, b) => {
-          const va = getSortValue(a, sortConfig.key!);
-          const vb = getSortValue(b, sortConfig.key!);
-          const diff =
-            sortConfig.direction === "asc"
-              ? (va as number) - (vb as number)
-              : (vb as number) - (va as number);
-          if (diff !== 0) return diff;
-          return a.id - b.id;
-        });
-      }
       const header =
         "id,jan_code,brand,product_name,model_number,supplier,genre,base_price,effective_unit_price,created_at,registered_at,status";
       const lines = data.map((r) =>
@@ -1286,7 +1201,7 @@ export default function HistoryPage() {
                           <input
                             type="checkbox"
                             checked={
-                              processedRows.length > 0 && processedRows.every((r) => selectedIds.has(r.id))
+                              rows.length > 0 && rows.every((r) => selectedIds.has(r.id))
                             }
                             onChange={toggleSelectAll}
                             className="rounded border-slate-300 text-primary focus:ring-primary"
@@ -1562,7 +1477,7 @@ export default function HistoryPage() {
 
                   </thead>
                   <tbody className="divide-y divide-slate-100 bg-white">
-                    {processedRows.map((row) => {
+                    {rows.map((row) => {
                       const isIndividualEdit = editingId === row.id;
                       const isEditMode = isIndividualEdit || isBulkEditing;
                       const displayDate = formatDate(row.header?.purchase_date ?? row.created_at);

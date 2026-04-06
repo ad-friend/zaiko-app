@@ -20,6 +20,8 @@ export type RecordRow = {
   /** 在庫調整理由（damaged 等） */
   exit_type?: string | null;
   stock_status?: string | null;
+  /** DB 生成列。進捗ソート用（getInventoryStatusSortRank と同一ロジック） */
+  inventory_progress_rank?: number;
   header: {
     id: number;
     purchase_date: string;
@@ -45,6 +47,7 @@ const SELECT_WITH_REGISTERED = `
   settled_at,
   exit_type,
   stock_status,
+  inventory_progress_rank,
   inbound_headers (
     id,
     purchase_date,
@@ -88,6 +91,8 @@ function mapDbRow(row: Record<string, unknown>): RecordRow {
     settled_at: r.settled_at != null ? String(r.settled_at) : null,
     exit_type: r.exit_type != null ? String(r.exit_type) : null,
     stock_status: r.stock_status != null ? String(r.stock_status) : null,
+    inventory_progress_rank:
+      r.inventory_progress_rank != null ? Number(r.inventory_progress_rank) : undefined,
     header: Array.isArray(r.inbound_headers)
       ? (r.inbound_headers[0] as RecordRow["header"])
       : ((r.inbound_headers as RecordRow["header"]) ?? null),
@@ -145,13 +150,17 @@ function applyOrdering(q: any, sortKey: SortKey | null, sortDir: "asc" | "desc")
   const ascending = sortDir === "asc";
   const nullsFirst = false;
 
-  if (!sortKey || sortKey === "inventory_progress") {
+  if (!sortKey) {
     return q
       .order("created_at", { ascending: false, nullsFirst: false })
       .order("id", { ascending: false });
   }
 
   switch (sortKey) {
+    case "inventory_progress":
+      return q
+        .order("inventory_progress_rank", { ascending, nullsFirst: false })
+        .order("id", { ascending });
     case "created_at":
       return q
         .order("purchase_date", { ascending, nullsFirst, foreignTable: "inbound_headers" })

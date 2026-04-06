@@ -13,6 +13,7 @@ const MARKETPLACE_ID_JP = "A1VC38T7YXB528";
 
 function normalizeConditionId(conditionId: string | null | undefined): "New" | "Used" {
   const c = String(conditionId ?? "").trim().toLowerCase();
+  if (c === "") return "New";
   // SP-API の ConditionId が数値（例: "11"）で返るケースがある
   // 11 は New（新品）として扱う
   if (c === "11") return "New";
