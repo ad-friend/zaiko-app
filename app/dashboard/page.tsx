@@ -102,8 +102,6 @@ export default function DashboardPage() {
 
         {data && (
           <>
-            <DashboardNotices notices={data.notices ?? []} onAfterDismiss={() => void load()} />
-
             <QuickInventoryAdjustment />
 
             <p className="mb-4 text-sm font-medium text-slate-600">
@@ -222,6 +220,12 @@ export default function DashboardPage() {
                 </div>
               </div>
             </section>
+
+            <DashboardNotices
+              className="mt-8"
+              notices={data.notices ?? []}
+              onAfterDismiss={() => void load()}
+            />
           </>
         )}
       </main>

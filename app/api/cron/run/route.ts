@@ -2,10 +2,21 @@
  * Vercel Cron 用エンドポイント（サーバ側で処理を完走させる）
  * - Authorization: Bearer ${CRON_SECRET}
  * - GET /api/cron/run?jobKey=orders_poll
+ * - GET /api/cron/run?jobKey=finances_poll（財務チャンク・要 cron_continuation_state）
+ * - GET /api/cron/run?jobKey=listing_report_poll（出品レポート段階実行）
+ * - GET /api/cron/run?jobKey=reconcile_poll（自動消込の短いバッチ）
+ * - GET /api/cron/run?jobKey=finances_daily&reconcile=1（日次5通知・消込のみ。財務/出品は上記ポールに依存）
  */
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { gunzipSync } from "zlib";
+import {
+  clampFinancialQueryBounds,
+  createAmazonFinancesSpClient,
+  fetchFinancialEventsChunk,
+  upsertSalesTransactionRows,
+} from "@/lib/amazon-financial-events";
+import { deleteCronState, getCronState, setCronState } from "@/lib/cron-continuation-state";
 
 type JobStatus = "running" | "success" | "error";
 
@@ -82,15 +93,29 @@ async function cleanupOldDashboardNotices(days = 90): Promise<void> {
   if (error) console.error("[cron/run] dashboard_notices cleanup failed:", error.message);
 }
 
-function dayBoundsTokyoYesterdayIso(): { label: string; startIso: string; endExclusiveIso: string } {
+type TokyoYesterdayBounds = {
+  label: string;
+  /** 東京の「昨日」の yyyy-MM-dd（state_key 用） */
+  dateKey: string;
+  startIso: string;
+  endExclusiveIso: string;
+};
+
+function dayBoundsTokyoYesterday(): TokyoYesterdayBounds {
   const tz = "Asia/Tokyo";
-  const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });
-  const todayTokyo = fmt.format(new Date()); // yyyy-MM-dd
+  const fmtEn = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });
+  const todayTokyo = fmtEn.format(new Date());
   const todayTokyoMidnight = new Date(`${todayTokyo}T00:00:00+09:00`);
   const startTokyo = new Date(todayTokyoMidnight.getTime() - 24 * 60 * 60 * 1000);
   const label = new Intl.DateTimeFormat("ja-JP", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(startTokyo);
-  return { label, startIso: startTokyo.toISOString(), endExclusiveIso: todayTokyoMidnight.toISOString() };
+  const dateKey = fmtEn.format(startTokyo);
+  return { label, dateKey, startIso: startTokyo.toISOString(), endExclusiveIso: todayTokyoMidnight.toISOString() };
 }
+
+const FINANCES_POLL_MAX_PAGES = 15;
+/** レポートオプション変更時はキーを変え、進行中の旧 reportId と混ざらないようにする */
+const LISTING_STATE_KEY = "listing:GET_MERCHANT_LISTINGS_ALL_DATA:custom_en_US";
+const MAX_LISTING_POLL_ATTEMPTS = 500;
 
 function createSpClient() {
   const clientId = process.env.SP_API_CLIENT_ID;
@@ -134,7 +159,7 @@ function toTrimmedString(v: unknown): string {
 }
 
 /**
- * GET_MERCHANT_LISTINGS_ALL_DATA の TSV（セラーセントラルでは「出品詳細レポート」相当）。
+ * GET_MERCHANT_LISTINGS_ALL_DATA の TSV（reportOptions.custom=true でカスタム出力を要求）。
  * item-condition 列が無い場合は全行 New。ある場合は 11=New、それ以外 Used。
  */
 function parseListingReportTsv(text: string): {
@@ -193,56 +218,164 @@ async function upsertSkuConditions(rows: Array<{ sku: string; asin: string | nul
   return { upserted, deletedStale: count ?? 0 };
 }
 
-async function runListingReportDaily(): Promise<{ fetched: number; summary: string; metrics: Record<string, unknown> }> {
+async function runFinancesPoll(): Promise<{ fetched: number; summary: string; metrics: Record<string, unknown> }> {
+  const day = dayBoundsTokyoYesterday();
+  const stateKey = `finances:${day.dateKey}`;
+  const payload = await getCronState(stateKey);
+
+  let postedAfter: string;
+  let postedBefore: string;
+  let startNextToken: string | null = null;
+
+  if (!payload || String(payload.dateKey ?? "") !== day.dateKey) {
+    const c = clampFinancialQueryBounds(day.startIso, day.endExclusiveIso);
+    postedAfter = c.postedAfter;
+    postedBefore = c.postedBefore;
+    startNextToken = null;
+  } else {
+    postedAfter = String(payload.postedAfter ?? day.startIso);
+    postedBefore = String(payload.postedBefore ?? day.endExclusiveIso);
+    const nt = payload.nextToken;
+    startNextToken = nt != null && String(nt).length > 0 ? String(nt) : null;
+    const c = clampFinancialQueryBounds(postedAfter, postedBefore);
+    postedAfter = c.postedAfter;
+    postedBefore = c.postedBefore;
+  }
+
+  const spClient = createAmazonFinancesSpClient();
+  const chunk = await fetchFinancialEventsChunk(spClient, {
+    postedAfter,
+    postedBefore,
+    startNextToken,
+    maxPages: FINANCES_POLL_MAX_PAGES,
+  });
+
+  const upsert = await upsertSalesTransactionRows(chunk.rows);
+  if (upsert.tableMissing) {
+    throw new Error("sales_transactions テーブルがありません。docs/sales_transactions_table.sql を実行してください。");
+  }
+
+  if (chunk.complete) {
+    await deleteCronState(stateKey);
+  } else {
+    await setCronState(stateKey, {
+      dateKey: day.dateKey,
+      dayLabel: day.label,
+      postedAfter,
+      postedBefore,
+      nextToken: chunk.nextToken,
+    });
+  }
+
+  const summary = chunk.complete
+    ? `財務ポール: 区間完走 (${day.dateKey}) / insert ${upsert.inserted} skip ${upsert.skipped} / 行 ${chunk.rows.length}`
+    : `財務ポール: 継続中 (${day.dateKey}) / ページ ${chunk.pagesFetched} / insert ${upsert.inserted}`;
+
+  return {
+    fetched: chunk.rows.length,
+    summary,
+    metrics: {
+      step: "finances_poll",
+      dateKey: day.dateKey,
+      dayLabel: day.label,
+      pagesFetched: chunk.pagesFetched,
+      rowsFlattened: chunk.rows.length,
+      rowsInserted: upsert.inserted,
+      rowsSkipped: upsert.skipped,
+      windowComplete: chunk.complete,
+      hasMoreToken: Boolean(chunk.nextToken),
+    },
+  };
+}
+
+async function runListingReportPollStep(): Promise<{ fetched: number; summary: string; metrics: Record<string, unknown> }> {
   const sp = createSpClient();
   const marketplaceId = "A1VC38T7YXB528";
-  /** セラーセントラル「出品詳細レポート（Active Listings）」に相当 */
   const reportType = "GET_MERCHANT_LISTINGS_ALL_DATA";
-  const created = (await sp.callAPI({
-    operation: "createReport",
-    endpoint: "reports",
-    body: {
-      reportType,
-      marketplaceIds: [marketplaceId],
-      reportOptions: { preferredReportDocumentLocale: "en_US" },
-    },
-  })) as { reportId?: string };
-  const reportId = String(created?.reportId ?? "").trim();
-  if (!reportId) throw new Error("出品レポートの作成に失敗しました（reportIdが取得できません）");
+  const st = await getCronState(LISTING_STATE_KEY);
 
-  let reportDocumentId = "";
-  let processingStatus = "";
-  for (let i = 0; i < 60; i++) {
+  if (!st || st.phase == null) {
+    const created = (await sp.callAPI({
+      operation: "createReport",
+      endpoint: "reports",
+      body: {
+        reportType,
+        marketplaceIds: [marketplaceId],
+        reportOptions: {
+          preferredReportDocumentLocale: "en_US",
+          custom: "true",
+        },
+      },
+    })) as { reportId?: string };
+    const reportId = String(created?.reportId ?? "").trim();
+    if (!reportId) throw new Error("出品レポートの作成に失敗しました（reportIdが取得できません）");
+    await setCronState(LISTING_STATE_KEY, { phase: "poll", reportId, pollAttempts: 0, reportType });
+    return {
+      fetched: 0,
+      summary: `出品レポート: 作成済み、次回ポーリング (${reportId.slice(0, 10)}…)`,
+      metrics: { step: "listing_create", reportId, pollAttempts: 0 },
+    };
+  }
+
+  if (String(st.phase) === "poll") {
+    const reportId = String(st.reportId ?? "");
+    const pollAttempts = Number(st.pollAttempts ?? 0) + 1;
+    if (pollAttempts > MAX_LISTING_POLL_ATTEMPTS) {
+      await deleteCronState(LISTING_STATE_KEY);
+      throw new Error("出品レポート: ポーリング上限に達しました");
+    }
     const r = (await sp.callAPI({
       operation: "getReport",
       endpoint: "reports",
       path: { reportId },
     })) as { processingStatus?: string; reportDocumentId?: string };
-    processingStatus = String(r?.processingStatus ?? "");
-    reportDocumentId = String(r?.reportDocumentId ?? "");
-    if (processingStatus === "DONE" && reportDocumentId) break;
+    const processingStatus = String(r?.processingStatus ?? "");
+    const reportDocumentId = String(r?.reportDocumentId ?? "");
     if (processingStatus === "CANCELLED" || processingStatus === "FATAL") {
+      await deleteCronState(LISTING_STATE_KEY);
       throw new Error(`出品レポートの生成に失敗しました (${processingStatus})`);
     }
-    await new Promise((rr) => setTimeout(rr, 5000));
+    if (processingStatus === "DONE" && reportDocumentId) {
+      const doc = (await sp.callAPI({
+        operation: "getReportDocument",
+        endpoint: "reports",
+        path: { reportDocumentId },
+      })) as { url?: string; compressionAlgorithm?: string };
+      const url = String(doc?.url ?? "").trim();
+      if (!url) throw new Error("出品レポートURLが取得できませんでした");
+      const text = await fetchTextFromReportDocument(url, doc?.compressionAlgorithm);
+      const parsed = parseListingReportTsv(text);
+      if (parsed.parseErrors.length && parsed.rows.length === 0) {
+        await deleteCronState(LISTING_STATE_KEY);
+        throw new Error(parsed.parseErrors[0]);
+      }
+      const { upserted, deletedStale } = await upsertSkuConditions(parsed.rows);
+      await deleteCronState(LISTING_STATE_KEY);
+      return {
+        fetched: upserted,
+        summary: `出品レポート: 成功 / 辞書更新 ${upserted}件`,
+        metrics: {
+          step: "listing_download",
+          completed: true,
+          reportType,
+          processingStatus,
+          rows: parsed.rows.length,
+          upserted,
+          deletedStale,
+          parseErrors: parsed.parseErrors.slice(0, 5),
+        },
+      };
+    }
+    await setCronState(LISTING_STATE_KEY, { phase: "poll", reportId, pollAttempts, reportType });
+    return {
+      fetched: 0,
+      summary: `出品レポート: ポーリング (${processingStatus || "処理中"}) #${pollAttempts}`,
+      metrics: { step: "listing_poll", reportId, pollAttempts, processingStatus },
+    };
   }
-  if (!reportDocumentId) throw new Error("出品レポートの生成がタイムアウトしました");
 
-  const doc = (await sp.callAPI({
-    operation: "getReportDocument",
-    endpoint: "reports",
-    path: { reportDocumentId },
-  })) as { url?: string; compressionAlgorithm?: string };
-  const url = String(doc?.url ?? "").trim();
-  if (!url) throw new Error("出品レポートURLが取得できませんでした");
-
-  const text = await fetchTextFromReportDocument(url, doc?.compressionAlgorithm);
-  const parsed = parseListingReportTsv(text);
-  if (parsed.parseErrors.length && parsed.rows.length === 0) throw new Error(parsed.parseErrors[0]);
-  const { upserted, deletedStale } = await upsertSkuConditions(parsed.rows);
-  const fetched = upserted;
-  const summary = `出品レポート: 成功 / 辞書更新 ${upserted}件`;
-  return { fetched, summary, metrics: { reportType, processingStatus, rows: parsed.rows.length, upserted, deletedStale, parseErrors: parsed.parseErrors.slice(0, 5) } };
+  await deleteCronState(LISTING_STATE_KEY);
+  throw new Error("出品レポート: 不明な state フェーズ");
 }
 
 async function startJob(job_key: string): Promise<string | null> {
@@ -311,34 +444,6 @@ async function runOrdersPoll(req: NextRequest): Promise<{ fetched: number; summa
   };
 }
 
-async function runFinancesDaily(req: NextRequest): Promise<{ fetched: number; summary: string; metrics: Record<string, unknown> }> {
-  const origin = originFromRequest(req);
-  const d = new Date();
-  d.setUTCDate(d.getUTCDate() - 1);
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  const startDate = `${y}-${m}-${day}`;
-  const endDate = new Date().toISOString().slice(0, 10);
-
-  const res = await fetch(`${origin}/api/amazon/fetch-finances`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ startDate, endDate }),
-  });
-  const { json, raw } = await fetchJsonAnySafe(res);
-  if (!res.ok) {
-    const msg = (json && typeof json.error === "string" ? json.error : null) ?? raw.slice(0, 300) ?? "財務取得に失敗しました";
-    throw new Error(msg);
-  }
-  const total = Number(json?.totalFetched ?? 0);
-  const inserted = Number(json?.rowsInserted ?? 0);
-  const skipped = Number(json?.rowsSkipped ?? 0);
-  const fetched = total;
-  const summary = `財務取得: 成功 / 取得 ${fetched}件`;
-  return { fetched, summary, metrics: { startDate, endDate, totalFetched: total, rowsInserted: inserted, rowsSkipped: skipped, message: safeString(json?.message ?? "") } };
-}
-
 async function runAutoReconcile(req: NextRequest, maxRounds = 120): Promise<{ reconciled: number; skipped: number }> {
   const origin = originFromRequest(req);
   let reconciled = 0;
@@ -390,24 +495,39 @@ export async function GET(req: NextRequest) {
       fetched = r.fetched;
       summary = r.summary;
       metrics = { ...metrics, ...r.metrics };
-    } else if (jobKey === "finances_daily") {
-      const r = await runFinancesDaily(req);
+    } else if (jobKey === "finances_poll") {
+      const r = await runFinancesPoll();
       fetched = r.fetched;
       summary = r.summary;
       metrics = { ...metrics, ...r.metrics };
+    } else if (jobKey === "listing_report_poll") {
+      const r = await runListingReportPollStep();
+      fetched = r.fetched;
+      summary = r.summary;
+      metrics = { ...metrics, ...r.metrics };
+    } else if (jobKey === "reconcile_poll") {
+      const rec = await runAutoReconcile(req, 12);
+      fetched = rec.reconciled;
+      summary = `自動消込ポール: reconciled ${rec.reconciled} / skipped ${rec.skipped}`;
+      metrics = { ...metrics, autoReconcile: rec };
+    } else if (jobKey === "finances_daily") {
+      summary = `日次ジョブ: 通知・消込（財務・出品は finances_poll / listing_report_poll で取得）`;
+      metrics = { ...metrics, note: "finances_daily_orchestrator" };
+      fetched = 0;
     } else {
       summary = `${jobKey}: 未対応 / 取得 0件`;
       metrics = { ...metrics, notImplemented: true };
     }
 
-    if (runReconcile) {
-      const rec = await runAutoReconcile(req);
+    if (runReconcile && jobKey === "finances_daily") {
+      const rec = await runAutoReconcile(req, 28);
       metrics = { ...metrics, autoReconcile: rec };
+      fetched = rec.reconciled;
     }
 
     await finishJob(jobId, { status: "success", metrics });
-    // orders_poll は毎分実行のため通知を氾濫させない（日次サマリで別途通知）
-    if (jobKey !== "orders_poll") {
+    const quietCronJobs = new Set(["orders_poll", "finances_poll", "listing_report_poll", "reconcile_poll"]);
+    if (!quietCronJobs.has(jobKey)) {
       await insertDashboardNotice({
         job_key: jobKey,
         result: "success",
@@ -421,7 +541,7 @@ export async function GET(req: NextRequest) {
 
     // finances_daily の完走後に「毎日の結果」をまとめて通知する（5項目）
     if (jobKey === "finances_daily") {
-      const day = dayBoundsTokyoYesterdayIso();
+      const day = dayBoundsTokyoYesterday();
 
       // 1) Amazon注文取得（日次サマリ）
       const { data: pollJobs, error: pollErr } = await supabase
@@ -463,18 +583,50 @@ export async function GET(req: NextRequest) {
         error_message: pollErrCount > 0 ? "前日分のorders_pollに失敗が含まれます（詳細はcron_jobs参照）" : null,
       });
 
-      // 2) 売上取得（財務）
-      const totalFetched = Number((metrics as any).totalFetched ?? 0) || 0;
-      const rowsInserted = Number((metrics as any).rowsInserted ?? 0) || 0;
-      const rowsSkipped = Number((metrics as any).rowsSkipped ?? 0) || 0;
+      // 2) 売上取得（財務）— finances_poll の集計
+      const { data: finJobs, error: finErr } = await supabase
+        .from("cron_jobs")
+        .select("metrics, status")
+        .eq("job_key", "finances_poll")
+        .gte("started_at", day.startIso)
+        .lt("started_at", day.endExclusiveIso);
+      if (finErr) throw new Error(`財務ポール集計に失敗しました: ${finErr.message}`);
+      const finList = Array.isArray(finJobs) ? finJobs : [];
+      let finRuns = 0;
+      let finErrCount = 0;
+      let sumRowsFlattened = 0;
+      let sumInserted = 0;
+      let sumSkipped = 0;
+      let sawWindowComplete = false;
+      for (const j of finList as Array<{ metrics: any; status: any }>) {
+        finRuns += 1;
+        if (String(j.status) === "error") finErrCount += 1;
+        const m = j.metrics && typeof j.metrics === "object" ? j.metrics : {};
+        sumRowsFlattened += Number((m as any).rowsFlattened ?? 0) || 0;
+        sumInserted += Number((m as any).rowsInserted ?? 0) || 0;
+        sumSkipped += Number((m as any).rowsSkipped ?? 0) || 0;
+        if ((m as any).windowComplete === true) sawWindowComplete = true;
+      }
+      const finPartial = finErrCount > 0 || (finRuns > 0 && !sawWindowComplete);
       await insertDashboardNotice({
         job_key: "fetch_finances_daily",
-        result: "success",
-        fetched: totalFetched,
-        summary: `売上取得(日次 ${day.label}): 成功 / 取得 ${totalFetched}件（insert ${rowsInserted} / skip ${rowsSkipped}）`,
-        metrics: { step: "fetch_finances", dayLabel: day.label, totalFetched, rowsInserted, rowsSkipped },
-        error_code: null,
-        error_message: null,
+        result: finPartial ? "error" : "success",
+        fetched: sumRowsFlattened,
+        summary: `売上取得(日次 ${day.label}): ${finPartial ? "未完了または一部失敗" : "成功"} / 行 ${sumRowsFlattened}（insert ${sumInserted} / skip ${sumSkipped}） / 実行 ${finRuns}回`,
+        metrics: {
+          step: "fetch_finances",
+          dayLabel: day.label,
+          runs: finRuns,
+          errorRuns: finErrCount,
+          totalFetched: sumRowsFlattened,
+          rowsInserted: sumInserted,
+          rowsSkipped: sumSkipped,
+          windowComplete: sawWindowComplete,
+        },
+        error_code: finPartial ? "PARTIAL" : null,
+        error_message: finPartial
+          ? "finances_poll が同日中に区間完走していないか、エラー実行があります（cron_jobs・cron_continuation_state を確認）"
+          : null,
       });
 
       // 3) 注文データ消込 & 4) 売上引当て（同一エンジン）
@@ -502,29 +654,52 @@ export async function GET(req: NextRequest) {
         });
       }
 
-      // 5) 出品レポート（自動取得→辞書更新）
-      try {
-        const r = await runListingReportDaily();
+      // 5) 出品レポート — listing_report_poll の完了分を集計
+      const { data: listJobs, error: listErr } = await supabase
+        .from("cron_jobs")
+        .select("metrics, status, finished_at")
+        .eq("job_key", "listing_report_poll")
+        .gte("started_at", day.startIso)
+        .lt("started_at", day.endExclusiveIso);
+      if (listErr) throw new Error(`出品レポート集計に失敗しました: ${listErr.message}`);
+      const lj = Array.isArray(listJobs) ? listJobs : [];
+      let bestUpserted = 0;
+      let bestMetrics: Record<string, unknown> = {};
+      let listErrCount = 0;
+      for (const j of lj as Array<{ metrics: any; status: any }>) {
+        if (String(j.status) === "error") listErrCount += 1;
+        const m = j.metrics && typeof j.metrics === "object" ? j.metrics : {};
+        if ((m as any).completed === true && String(j.status) === "success") {
+          const u = Number((m as any).upserted ?? 0) || 0;
+          if (u >= bestUpserted) {
+            bestUpserted = u;
+            bestMetrics = m as Record<string, unknown>;
+          }
+        }
+      }
+      if (bestUpserted > 0) {
         await insertDashboardNotice({
           job_key: "listing_report_daily",
           result: "success",
-          fetched: Number((r.metrics as any).upserted ?? r.fetched ?? 0) || 0,
-          summary: `出品レポート(日次 ${day.label}): 成功 / 辞書更新 ${Number((r.metrics as any).upserted ?? 0) || 0}件`,
-          metrics: { step: "listing_report", dayLabel: day.label, ...r.metrics },
+          fetched: bestUpserted,
+          summary: `出品レポート(日次 ${day.label}): 成功 / 辞書更新 ${bestUpserted}件`,
+          metrics: { step: "listing_report", dayLabel: day.label, ...bestMetrics },
           error_code: null,
           error_message: null,
         });
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : "出品レポートに失敗しました";
-        const code = extractHttpErrorCode(msg);
+      } else {
         await insertDashboardNotice({
           job_key: "listing_report_daily",
-          result: "error",
+          result: listErrCount > 0 ? "error" : "success",
           fetched: 0,
-          summary: `出品レポート(日次 ${day.label}): 失敗 / 取得 0件`,
-          metrics: { step: "listing_report", dayLabel: day.label },
-          error_code: code,
-          error_message: msg,
+          summary:
+            listErrCount > 0
+              ? `出品レポート(日次 ${day.label}): 失敗または未完了（listing_report_poll を確認）`
+              : `出品レポート(日次 ${day.label}): 完了ジョブなし（listing_report_poll のスケジュールを確認）`,
+          metrics: { step: "listing_report", dayLabel: day.label, listPollErrors: listErrCount },
+          error_code: listErrCount > 0 ? "PARTIAL" : null,
+          error_message:
+            listErrCount > 0 ? "listing_report_poll にエラーが含まれます" : "同日に completed な listing_report_poll がありません",
         });
       }
     }
@@ -536,7 +711,8 @@ export async function GET(req: NextRequest) {
     const fetched = 0;
     const summary = `${jobKey}: 失敗${code ? `(${code})` : ""} / 取得 ${fetched}件`;
     await finishJob(jobId, { status: "error", metrics: { startedAt }, error_code: code, error_message: message });
-    if (jobKey !== "orders_poll") {
+    const quietOnError = new Set(["orders_poll", "finances_poll", "listing_report_poll", "reconcile_poll"]);
+    if (!quietOnError.has(jobKey)) {
       await insertDashboardNotice({
         job_key: jobKey,
         result: "error",

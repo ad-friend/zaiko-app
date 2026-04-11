@@ -234,15 +234,17 @@ function AmazonDuplicateImportNotice({
 type Props = {
   notices: DashboardNoticeRow[];
   onAfterDismiss: () => void;
+  /** 表示があるときだけ効く（お知らせ0件のときは null のため余白も付かない） */
+  className?: string;
 };
 
-export default function DashboardNotices({ notices, onAfterDismiss }: Props) {
+export default function DashboardNotices({ notices, onAfterDismiss, className }: Props) {
   const duplicateNotices = notices.filter((n) => n.notice_type === "amazon_order_import_duplicate_lines");
   const cronNotices = notices.filter((n) => n.notice_type === "cron_job_success" || n.notice_type === "cron_job_error");
   if (duplicateNotices.length === 0 && cronNotices.length === 0) return null;
 
   return (
-    <section className="mb-2" aria-label="ダッシュボードお知らせ">
+    <section className={["mb-2", className].filter(Boolean).join(" ")} aria-label="ダッシュボードお知らせ">
       {cronNotices.map((n) => (
         <CronJobNotice key={n.id} notice={n} onDismissed={onAfterDismiss} />
       ))}
