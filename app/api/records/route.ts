@@ -60,6 +60,8 @@ const SELECT_WITH_REGISTERED = `
 export const LIST_MAX_ROWS = 50000;
 const DEFAULT_PAGE_SIZE = 200;
 const MAX_PAGE_SIZE = 500;
+/** 仕入先解決→header_id.in の上限（URL・PostgREST 負荷対策） */
+const MAX_HEADER_IDS_FOR_SEARCH = 3500;
 
 function escapeIlikePattern(s: string): string {
   return s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_%");
@@ -104,7 +106,69 @@ function ilikeValue(raw: string): string {
   return `%${esc}%`;
 }
 
-function buildSearchOrClause(q: string, includeHeaderSupplier: boolean): string | null {
+/**
+ * 仕入先文字列（inbound_headers.supplier の部分一致）と、
+ * suppliers マスタの name/kana 一致→保存カナと完全一致するヘッダをまとめて解決する。
+ * （親テーブル .or() に inbound_headers.supplier を混ぜない）
+ */
+async function resolveHeaderIdsForSupplierSearch(rawQ: string): Promise<number[]> {
+  const t = rawQ.trim();
+  if (!t) return [];
+  const p = ilikeValue(t);
+  const idSet = new Set<number>();
+
+  const addIds = (rows: { id: unknown }[] | null | undefined) => {
+    for (const r of rows ?? []) {
+      if (idSet.size >= MAX_HEADER_IDS_FOR_SEARCH) break;
+      const n = Number(r.id);
+      if (Number.isInteger(n) && n > 0) idSet.add(n);
+    }
+  };
+
+  const { data: bySupplierIlike, error: errIlike } = await supabase
+    .from("inbound_headers")
+    .select("id")
+    .ilike("supplier", p)
+    .limit(5000);
+  if (errIlike) {
+    console.error("[records] resolveHeaderIds inbound_headers ilike:", errIlike.message);
+  } else {
+    addIds(bySupplierIlike);
+  }
+
+  if (idSet.size < MAX_HEADER_IDS_FOR_SEARCH) {
+    const { data: byName, error: errName } = await supabase.from("suppliers").select("kana").ilike("name", p).limit(150);
+    const { data: byKana, error: errKana } = await supabase.from("suppliers").select("kana").ilike("kana", p).limit(150);
+    if (errName) console.error("[records] resolveHeaderIds suppliers name:", errName.message);
+    if (errKana) console.error("[records] resolveHeaderIds suppliers kana:", errKana.message);
+    const kanas = new Set<string>();
+    for (const row of [...(byName ?? []), ...(byKana ?? [])]) {
+      const k = String((row as { kana?: unknown }).kana ?? "").trim();
+      if (k) kanas.add(k);
+    }
+    if (kanas.size > 0) {
+      const kanaList = [...kanas];
+      const chunkSize = 80;
+      for (let i = 0; i < kanaList.length && idSet.size < MAX_HEADER_IDS_FOR_SEARCH; i += chunkSize) {
+        const chunk = kanaList.slice(i, i + chunkSize);
+        const { data: byExactSupplier, error: errH } = await supabase
+          .from("inbound_headers")
+          .select("id")
+          .in("supplier", chunk)
+          .limit(5000);
+        if (errH) {
+          console.error("[records] resolveHeaderIds inbound_headers in supplier:", errH.message);
+          break;
+        }
+        addIds(byExactSupplier);
+      }
+    }
+  }
+
+  return [...idSet].slice(0, MAX_HEADER_IDS_FOR_SEARCH);
+}
+
+function buildSearchOrClause(q: string, headerIds: number[]): string | null {
   const t = q.trim();
   if (!t) return null;
   const p = ilikeValue(t);
@@ -117,8 +181,8 @@ function buildSearchOrClause(q: string, includeHeaderSupplier: boolean): string 
     `asin.ilike.${p}`,
     `condition_type.ilike.${p}`,
   ];
-  if (includeHeaderSupplier) {
-    parts.push(`inbound_headers.supplier.ilike.${p}`);
+  if (headerIds.length > 0) {
+    parts.push(`header_id.in.(${headerIds.join(",")})`);
   }
   if (/^\d+$/.test(t) && t.length <= 15) {
     parts.push(`id.eq.${t}`);
@@ -271,13 +335,9 @@ export async function GET(request: NextRequest) {
     const sortKey: SortKey | null =
       sortKeyRaw && allowedSort.has(sortKeyRaw as SortKey) ? (sortKeyRaw as SortKey) : null;
 
-    let searchOr = buildSearchOrClause(qRaw, true);
-    let result = await runListQuery(cutoffIso, page, pageSize, searchOr, sortKey, sortDirRaw);
-
-    if (result.error && searchOr?.includes("inbound_headers.supplier")) {
-      searchOr = buildSearchOrClause(qRaw, false);
-      result = await runListQuery(cutoffIso, page, pageSize, searchOr, sortKey, sortDirRaw);
-    }
+    const supplierHeaderIds = qRaw.trim() ? await resolveHeaderIdsForSupplierSearch(qRaw) : [];
+    const searchOr = buildSearchOrClause(qRaw, supplierHeaderIds);
+    const result = await runListQuery(cutoffIso, page, pageSize, searchOr, sortKey, sortDirRaw);
 
     if (result.error) throw result.error;
 
