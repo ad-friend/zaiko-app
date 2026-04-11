@@ -199,7 +199,8 @@ export default function HistoryPage() {
 
   const [total, setTotal] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
-  const [debouncedQ, setDebouncedQ] = useState("");
+  /** 検索ボタン／Enter で確定したクエリ（API の q に渡す） */
+  const [appliedSearchQ, setAppliedSearchQ] = useState("");
   const [jumpInput, setJumpInput] = useState("");
 
   const [loading, setLoading] = useState(true);
@@ -227,14 +228,13 @@ export default function HistoryPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [sortConfig, setSortConfig] = useState<{ key: string | null; direction: "asc" | "desc" }>({ key: null, direction: "asc" });
 
-  useEffect(() => {
-    const t = setTimeout(() => setDebouncedQ(searchTerm), 300);
-    return () => clearTimeout(t);
+  const runSearch = useCallback(() => {
+    setAppliedSearchQ(searchTerm.trim());
   }, [searchTerm]);
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [debouncedQ, sortConfig.key, sortConfig.direction]);
+  }, [appliedSearchQ, sortConfig.key, sortConfig.direction]);
 
   useEffect(() => {
     let cancelled = false;
@@ -245,7 +245,7 @@ export default function HistoryPage() {
         const url = buildRecordsQuery({
           page: currentPage,
           pageSize: PAGE_SIZE,
-          q: debouncedQ,
+          q: appliedSearchQ,
           sortKey: sortConfig.key,
           sortDir: sortConfig.direction,
         });
@@ -269,7 +269,7 @@ export default function HistoryPage() {
     return () => {
       cancelled = true;
     };
-  }, [currentPage, debouncedQ, sortConfig.key, sortConfig.direction]);
+  }, [currentPage, appliedSearchQ, sortConfig.key, sortConfig.direction]);
 
   useEffect(() => {
     (async () => {
@@ -295,7 +295,7 @@ export default function HistoryPage() {
       const url = buildRecordsQuery({
         page: currentPage,
         pageSize: PAGE_SIZE,
-        q: debouncedQ,
+        q: appliedSearchQ,
         sortKey: sortConfig.key,
         sortDir: sortConfig.direction,
       });
@@ -310,7 +310,7 @@ export default function HistoryPage() {
     } finally {
       setLoading(false);
     }
-  }, [currentPage, debouncedQ, sortConfig.key, sortConfig.direction]);
+  }, [currentPage, appliedSearchQ, sortConfig.key, sortConfig.direction]);
 
   const submitInventoryAdjustment = useCallback(async () => {
     const jan = invJan.trim();
@@ -565,7 +565,7 @@ export default function HistoryPage() {
     setSaving(true);
     try {
       const all = await fetchAllRecordsMatching({
-        q: debouncedQ,
+        q: appliedSearchQ,
         sortKey: sortConfig.key,
         sortDir: sortConfig.direction,
       });
@@ -683,7 +683,7 @@ export default function HistoryPage() {
     setCsvExportLoading(true);
     try {
       const data = await fetchAllRecordsMatching({
-        q: debouncedQ,
+        q: appliedSearchQ,
         sortKey: sortConfig.key,
         sortDir: sortConfig.direction,
       });
@@ -721,7 +721,7 @@ export default function HistoryPage() {
     } finally {
       setCsvExportLoading(false);
     }
-  }, [debouncedQ, sortConfig.key, sortConfig.direction, getSupplierName]);
+  }, [appliedSearchQ, sortConfig.key, sortConfig.direction, getSupplierName]);
 
   const downloadCsv5Years = useCallback(async () => {
     setCsv5YearsLoading(true);
@@ -1180,15 +1180,31 @@ export default function HistoryPage() {
           {!loading && !error && (
             <>
               <div className="px-6 py-3 border-b border-slate-100 bg-white shrink-0">
-                <div className="relative rounded-lg border border-slate-200 bg-white shadow-sm focus-within:ring-2 focus-within:ring-primary/20 focus-within:border-primary/40 transition-all max-w-md">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-                  <input
-                    type="text"
-                    value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
-                    placeholder="ID・JAN・ASIN・注文番号・商品名・仕入先カナ・コンディションで検索（DB）…"
-                    className={`${inputClass} pl-10 rounded-lg border-0 focus-visible:ring-0`}
-                  />
+                <div className="flex max-w-xl rounded-lg border border-slate-200 bg-white shadow-sm focus-within:ring-2 focus-within:ring-primary/20 focus-within:border-primary/40 transition-all overflow-hidden">
+                  <div className="relative flex-1 min-w-0">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                    <input
+                      type="text"
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                          e.preventDefault();
+                          runSearch();
+                        }
+                      }}
+                      placeholder="ID・JAN・ASIN・注文番号・商品名・仕入先カナ・コンディション（Enter または検索で実行）…"
+                      className={`${inputClass} h-10 pl-10 rounded-none border-0 shadow-none focus-visible:ring-0 focus-visible:ring-offset-0`}
+                      aria-label="在庫一覧の検索語"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => runSearch()}
+                    className={`${buttonClass} shrink-0 rounded-none border-l border-slate-200 bg-slate-50 px-4 text-slate-800 hover:bg-slate-100`}
+                  >
+                    検索
+                  </button>
                 </div>
               </div>
 
