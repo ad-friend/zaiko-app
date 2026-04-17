@@ -31,6 +31,7 @@ type LogicalTxKind = "Principal" | "Tax" | "Commission" | "FBA Per Unit Fulfillm
 type DetailRow = {
   amazon_order_id: string | null;
   posted_iso: string;
+  settlement_id: string | null;
   sku: string | null;
   transaction_type: string;
   amount_type: string;
@@ -112,6 +113,27 @@ function logicalToAmountTypes(kind: LogicalTxKind): { amount_type: "Charge" | "F
 /** 同一注文・同一内訳で再インポートしても上書きできる安定ハッシュ */
 function hashMergedDetail(orderId: string, amountType: string, amountDescription: string): string {
   const raw = ["AmazonTxCsvV3", orderId.trim(), amountType, amountDescription].join("|");
+  return createHash("sha256").update(raw).digest("hex");
+}
+
+/** 注文番号ありのイベント（Refund/調整など）も再インポートで重複しないよう安定ハッシュ化（posted_date/決済番号まで含める） */
+function hashOrderEventDetail(opts: {
+  orderId: string;
+  transactionType: string;
+  amountType: string;
+  amountDescription: string;
+  postedIso: string;
+  settlementId: string | null;
+}): string {
+  const raw = [
+    "AmazonTxCsvOrderEventV1",
+    opts.orderId.trim(),
+    opts.transactionType.trim(),
+    opts.amountType.trim(),
+    opts.amountDescription,
+    opts.postedIso,
+    opts.settlementId ? opts.settlementId.trim() : "",
+  ].join("|");
   return createHash("sha256").update(raw).digest("hex");
 }
 
@@ -218,6 +240,7 @@ const AMOUNT_COLUMNS: AmountColumnDef[] = [
     kind: "Commission",
     headerCandidates: [
       "Amazon手数料",
+      "手数料",
       "amazon fees",
       "selling fees",
       "referral fee",
@@ -239,6 +262,7 @@ const AMOUNT_COLUMNS: AmountColumnDef[] = [
     headerCandidates: [
       "その他トランザクション手数料",
       "その他のトランザクション手数料",
+      "その他",
       "other transaction fees",
       "other fees",
       "miscellaneous",
@@ -337,6 +361,14 @@ export async function POST(request: NextRequest) {
       "タイプ",
     ]);
     const hSku = pickHeaderKey(headers, ["sku", "seller-sku", "sellersku", "SKU", "出品者sku", "商品sku"]);
+    const hSettlement = pickHeaderKey(headers, [
+      "決済番号",
+      "settlement id",
+      "settlementid",
+      "transaction id",
+      "transactionid",
+      "決済id",
+    ]);
 
     const amountHeaderByKind = new Map<LogicalTxKind, string>();
     for (const col of AMOUNT_COLUMNS) {
@@ -376,6 +408,8 @@ export async function POST(request: NextRequest) {
       const orderId = toTrimmedString(r[hOrder]);
       const dateRaw = toTrimmedString(r[hDate]);
       const typeRaw = hType ? toTrimmedString(r[hType]) : "";
+      const settlementIdRaw = hSettlement ? toTrimmedString(r[hSettlement]) : "";
+      const settlementId = settlementIdRaw ? settlementIdRaw : null;
 
       const lineNo = rowOffsetBase + i + 2 + skippedPrefixLines;
 
@@ -408,10 +442,12 @@ export async function POST(request: NextRequest) {
           rowErrors.push(`行 ${lineNo}: オーダー番号が空ですが、金額が空/不正です。`);
           continue;
         }
+        if (num === 0) continue;
         const tt = normalizeTransactionType(typeRaw || "Adjustment");
         expanded.push({
           amazon_order_id: null,
           posted_iso: postedIso,
+          settlement_id: settlementId,
           sku,
           transaction_type: tt,
           amount_type: tt, // 文字列仕分け（PostageBilling/ServiceFee/adj_ 等）に使う
@@ -429,6 +465,7 @@ export async function POST(request: NextRequest) {
           rowErrors.push(`行 ${lineNo}: 金額が数値として解釈できません（${orderId} / ${headerName}）。`);
           continue;
         }
+        if (num === 0) continue;
 
         const signed = signedForKind(kind, num); // 現在は identity（CSV 符号をそのまま）
         const { amount_type, amount_description } = logicalToAmountTypes(kind);
@@ -436,6 +473,7 @@ export async function POST(request: NextRequest) {
         expanded.push({
           amazon_order_id: orderId,
           posted_iso: postedIso,
+          settlement_id: settlementId,
           sku,
           transaction_type: normalizeTransactionType(typeRaw || "Order"),
           amount_type,
@@ -464,11 +502,15 @@ export async function POST(request: NextRequest) {
     type MergeKey = string;
     const mergeMap = new Map<
       MergeKey,
-      { amount: number; posted_iso: string; sku: string | null; amount_type: string; amount_description: string }
+      { amount: number; posted_iso: string; settlement_id: string | null; sku: string | null; amount_type: string; amount_description: string }
     >();
 
-    const mergeKeyOf = (d: DetailRow): MergeKey =>
-      [d.amazon_order_id ?? "", d.transaction_type, d.amount_type, d.amount_description].join("\u0001");
+    const mergeKeyOf = (d: DetailRow): MergeKey => {
+      const base = [d.amazon_order_id ?? "", d.transaction_type, d.amount_type, d.amount_description];
+      // 重要: Refund 等は「同一注文・同一内訳でも別日時で複数回あり得る」ため、posted_date で分離する
+      if (d.transaction_type !== "Order") base.push(d.posted_iso);
+      return base.join("\u0001");
+    };
 
     let mergeExtraRows = 0;
     const ordersThatMerged = new Set<string>();
@@ -479,6 +521,7 @@ export async function POST(request: NextRequest) {
         mergeMap.set(k, {
           amount: d.amount,
           posted_iso: d.posted_iso,
+          settlement_id: d.settlement_id,
           sku: d.sku,
           amount_type: d.amount_type,
           amount_description: d.amount_description,
@@ -488,6 +531,7 @@ export async function POST(request: NextRequest) {
         if (Date.parse(d.posted_iso) < Date.parse(cur.posted_iso)) {
           cur.posted_iso = d.posted_iso;
         }
+        if (!cur.settlement_id && d.settlement_id) cur.settlement_id = d.settlement_id;
         if (!cur.sku && d.sku) cur.sku = d.sku;
         mergeExtraRows += 1;
         if (d.amazon_order_id) ordersThatMerged.add(d.amazon_order_id.trim());
@@ -500,8 +544,13 @@ export async function POST(request: NextRequest) {
     const chunkIdxSafe = chunkIndex ?? 0;
     let expenseSeq = 0;
     const insertPayload: SalesTxUpsertRow[] = [...mergeMap.entries()].map(([key, v]) => {
-      const orderId = key.split("\u0001")[0] ?? "";
-      const txType = key.split("\u0001")[1] ?? "Order";
+      const parts = key.split("\u0001");
+      const orderId = parts[0] ?? "";
+      const txType = parts[1] ?? "Order";
+      const amountType = parts[2] ?? v.amount_type;
+      const amountDesc = parts[3] ?? v.amount_description;
+      // non-Order の場合は mergeKey に posted_iso が入る（分離用）
+      const postedIsoFromKey = txType !== "Order" ? (parts[4] ?? v.posted_iso) : v.posted_iso;
       if (!orderId || txType !== "Order") expenseSeq += 1;
       return {
         amazon_order_id: orderId || null,
@@ -510,11 +559,20 @@ export async function POST(request: NextRequest) {
         amount_type: v.amount_type,
         amount_description: `Transaction report CSV — ${v.amount_description}`,
         amount: Math.round(v.amount * 100) / 100,
-        posted_date: v.posted_iso,
+        posted_date: postedIsoFromKey,
         amazon_event_hash:
-          orderId && txType === "Order"
-            ? hashMergedDetail(orderId, v.amount_type, v.amount_description)
-            : hashStandaloneExpense(txType, v.amount_type, v.posted_iso, v.amount, expenseSeq, chunkIdxSafe),
+          orderId
+            ? txType === "Order"
+              ? hashMergedDetail(orderId, v.amount_type, v.amount_description)
+              : hashOrderEventDetail({
+                  orderId,
+                  transactionType: txType,
+                  amountType: amountType,
+                  amountDescription: amountDesc,
+                  postedIso: postedIsoFromKey,
+                  settlementId: v.settlement_id,
+                })
+            : hashStandaloneExpense(txType, v.amount_type, postedIsoFromKey, v.amount, expenseSeq, chunkIdxSafe),
       };
     });
 

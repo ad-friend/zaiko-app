@@ -11,7 +11,7 @@ import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-statu
 /** PostgREST: 未割当または同一 Amazon 注文への仮引当のみ */
 function orderIdAvailabilityOr(amazonOrderId: string): string {
   const id = amazonOrderId.trim().replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-  return `order_id.is.null,order_id.eq."${id}"`;
+  return `order_id.is.null,order_id.eq."${id}",order_id.eq.""`;
 }
 
 /** 在庫 condition_type: 英字は ilike で大小文字非区別、日本語は eq */
@@ -98,7 +98,7 @@ export async function GET(request: NextRequest) {
       if (amazonOrderId && orderRowFound) {
         q = q.or(orderIdAvailabilityOr(amazonOrderId));
       } else {
-        q = q.is("order_id", null);
+        q = q.or('order_id.is.null,order_id.eq.""');
       }
       if (condNorm) {
         q = q.or(conditionTypeOrFilter(condNorm));
