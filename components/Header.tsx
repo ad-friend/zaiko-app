@@ -33,7 +33,7 @@ export default function Header() {
   const [mobileOpen, setMobileOpen] = useState(false);
 
   return (
-    <header className="sticky top-0 z-30 w-full shrink-0 border-b bg-white/80 backdrop-blur-md shadow-sm">
+    <header className="sticky top-0 z-30 w-full shrink-0 border-b bg-white/80 backdrop-blur-md shadow-sm print:hidden">
       <div className="mx-auto flex h-16 max-w-[1600px] items-center justify-between px-4 sm:px-6 lg:px-8">
         <Link href="/" className="flex items-center gap-2 text-slate-900 hover:opacity-80 transition-opacity">
           <div className="rounded-lg bg-primary p-1.5 text-white shadow-md shadow-primary/30">

@@ -1,7 +1,22 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Pencil, Save, X, ChevronLeft, Download, Upload, Search, ArrowUp, ArrowDown, ArrowUpDown, Calendar, Loader2, PackageMinus } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Pencil,
+  Save,
+  X,
+  ChevronLeft,
+  Download,
+  Upload,
+  Search,
+  ArrowUp,
+  ArrowDown,
+  ArrowUpDown,
+  Calendar,
+  Loader2,
+  PackageMinus,
+  Printer,
+} from "lucide-react";
 import { normalizeToFullWidthKatakana } from "@/lib/kana";
 import { normalizeSupplierForMatch } from "@/lib/normalizeSupplier";
 import { getInventoryStatusDisplay } from "@/lib/inventory-status-display";
@@ -84,6 +99,43 @@ function statusLabel(c: string | null | undefined): string {
   if (c === "new") return "新品";
   if (c === "used") return "中古";
   return c ?? "";
+}
+
+/** 印刷モーダルで選べる列（id は RecordRow から値を取るキー） */
+const PRINT_COLUMN_DEFS = [
+  { id: "id", label: "ID", defaultOn: true },
+  { id: "created_at", label: "仕入日", defaultOn: true },
+  { id: "registered_at", label: "登録日", defaultOn: true },
+  { id: "supplier", label: "仕入先", defaultOn: true },
+  { id: "genre", label: "ジャンル", defaultOn: false },
+  { id: "jan_code", label: "JAN", defaultOn: true },
+  { id: "asin", label: "ASIN", defaultOn: false },
+  { id: "condition_type", label: "コンディション", defaultOn: true },
+  { id: "product_name", label: "商品名", defaultOn: true },
+  { id: "brand", label: "ブランド", defaultOn: true },
+  { id: "model_number", label: "型番", defaultOn: true },
+  { id: "base_price", label: "基準価格", defaultOn: false },
+  { id: "effective_unit_price", label: "実質単価", defaultOn: true },
+  { id: "progress", label: "進捗", defaultOn: true },
+  { id: "order_id", label: "注文番号", defaultOn: false },
+  { id: "settled_at", label: "決済日", defaultOn: false },
+] as const;
+
+type PrintColumnId = (typeof PRINT_COLUMN_DEFS)[number]["id"];
+
+function initialPrintColumnSelection(): Record<PrintColumnId, boolean> {
+  const o = {} as Record<PrintColumnId, boolean>;
+  for (const c of PRINT_COLUMN_DEFS) o[c.id] = c.defaultOn;
+  return o;
+}
+
+function formatPrintIsoDate(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleDateString("ja-JP", { year: "numeric", month: "2-digit", day: "2-digit" });
+  } catch {
+    return String(iso);
+  }
 }
 
 type EditDraft = {
@@ -225,6 +277,13 @@ export default function HistoryPage() {
   const [invReason, setInvReason] = useState<"damaged" | "lost" | "internal_use" | "entertainment">("damaged");
   const [inventorySubmitting, setInventorySubmitting] = useState(false);
 
+  const [printModalOpen, setPrintModalOpen] = useState(false);
+  const [printRows, setPrintRows] = useState<RecordRow[] | null>(null);
+  const [printFetchLoading, setPrintFetchLoading] = useState(false);
+  const [printFetchError, setPrintFetchError] = useState<string | null>(null);
+  const [printColumnSelection, setPrintColumnSelection] = useState<Record<PrintColumnId, boolean>>(initialPrintColumnSelection);
+  const printCloseAfterPrintRef = useRef(false);
+
   const [searchTerm, setSearchTerm] = useState("");
   const [sortConfig, setSortConfig] = useState<{ key: string | null; direction: "asc" | "desc" }>({ key: null, direction: "asc" });
 
@@ -270,6 +329,52 @@ export default function HistoryPage() {
       cancelled = true;
     };
   }, [currentPage, appliedSearchQ, sortConfig.key, sortConfig.direction]);
+
+  useEffect(() => {
+    if (!printModalOpen) {
+      setPrintRows(null);
+      setPrintFetchError(null);
+      setPrintFetchLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setPrintFetchError(null);
+    setPrintRows(null);
+    setPrintFetchLoading(true);
+    (async () => {
+      try {
+        const data = await fetchAllRecordsMatching({
+          q: appliedSearchQ,
+          sortKey: sortConfig.key,
+          sortDir: sortConfig.direction,
+        });
+        if (!cancelled) setPrintRows(data);
+      } catch (e: unknown) {
+        if (!cancelled) setPrintFetchError(e instanceof Error ? e.message : "取得に失敗しました");
+      } finally {
+        if (!cancelled) setPrintFetchLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [printModalOpen, appliedSearchQ, sortConfig.key, sortConfig.direction]);
+
+  useEffect(() => {
+    if (printModalOpen) setPrintColumnSelection(initialPrintColumnSelection());
+  }, [printModalOpen]);
+
+  useEffect(() => {
+    const onAfterPrint = () => {
+      if (!printCloseAfterPrintRef.current) return;
+      printCloseAfterPrintRef.current = false;
+      setPrintModalOpen(false);
+      setPrintRows(null);
+      setPrintFetchError(null);
+    };
+    window.addEventListener("afterprint", onAfterPrint);
+    return () => window.removeEventListener("afterprint", onAfterPrint);
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -382,6 +487,50 @@ export default function HistoryPage() {
       return iso;
     }
   };
+
+  const getPrintCellValue = useCallback((col: PrintColumnId, row: RecordRow): string => {
+    switch (col) {
+      case "id":
+        return String(row.id);
+      case "created_at":
+        return formatPrintIsoDate(row.created_at);
+      case "registered_at":
+        return row.registered_at ? formatPrintIsoDate(row.registered_at) : "—";
+      case "supplier":
+        return getSupplierName(row.header?.supplier);
+      case "genre":
+        return row.header?.genre?.trim() || "—";
+      case "jan_code":
+        return row.jan_code?.trim() || "—";
+      case "asin":
+        return row.asin?.trim() || "—";
+      case "condition_type":
+        return statusLabel(row.condition_type);
+      case "product_name":
+        return row.product_name?.trim() || "—";
+      case "brand":
+        return row.brand?.trim() || "—";
+      case "model_number":
+        return row.model_number?.trim() || "—";
+      case "base_price":
+        return Number.isFinite(row.base_price) ? String(row.base_price) : "—";
+      case "effective_unit_price":
+        return Number.isFinite(row.effective_unit_price) ? String(row.effective_unit_price) : "—";
+      case "progress":
+        return getInventoryStatusDisplay({
+          order_id: row.order_id,
+          settled_at: row.settled_at,
+          exit_type: row.exit_type,
+          stock_status: row.stock_status,
+        }).label;
+      case "order_id":
+        return row.order_id?.trim() || "—";
+      case "settled_at":
+        return row.settled_at ? formatPrintIsoDate(row.settled_at) : "—";
+      default:
+        return "—";
+    }
+  }, [getSupplierName]);
 
   const toDateValue = (iso: string) => (iso ? iso.slice(0, 10) : "");
 
@@ -722,6 +871,32 @@ export default function HistoryPage() {
       setCsvExportLoading(false);
     }
   }, [appliedSearchQ, sortConfig.key, sortConfig.direction, getSupplierName]);
+
+  const activePrintColumns = useMemo(
+    () => PRINT_COLUMN_DEFS.filter((c) => printColumnSelection[c.id]),
+    [printColumnSelection]
+  );
+
+  const closePrintModal = useCallback(() => {
+    setPrintModalOpen(false);
+    setPrintRows(null);
+    setPrintFetchError(null);
+  }, []);
+
+  const runPrintFromModal = useCallback(() => {
+    if (activePrintColumns.length === 0) {
+      alert("1列以上選択してください。");
+      return;
+    }
+    if (!printRows?.length) {
+      alert("印刷するデータがありません。");
+      return;
+    }
+    printCloseAfterPrintRef.current = true;
+    requestAnimationFrame(() => {
+      window.print();
+    });
+  }, [activePrintColumns.length, printRows]);
 
   const downloadCsv5Years = useCallback(async () => {
     setCsv5YearsLoading(true);
@@ -1255,6 +1430,15 @@ export default function HistoryPage() {
                         className="hidden"
                         onChange={handleCsvImport}
                       />
+                      <button
+                        type="button"
+                        onClick={() => setPrintModalOpen(true)}
+                        disabled={loading || total === 0 || isBulkEditing}
+                        className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300 disabled:opacity-50`}
+                      >
+                        <Printer className="mr-2 h-4 w-4 shrink-0" />
+                        印刷
+                      </button>
                       <button
                         type="button"
                         onClick={() => void handleCsvExport()}
@@ -1967,6 +2151,143 @@ export default function HistoryPage() {
                 ) : (
                   "実行"
                 )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {printModalOpen && (
+        <div className="fixed inset-0 z-[210] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+          <div className="relative flex w-full max-w-5xl max-h-[92vh] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+              <h3 className="text-lg font-bold text-slate-900">在庫一覧の印刷</h3>
+              <button
+                type="button"
+                onClick={closePrintModal}
+                className="rounded-full p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
+                aria-label="閉じる"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="space-y-3 border-b border-slate-100 px-5 py-3">
+              <p className="text-sm text-slate-600">
+                現在の検索・並び順に一致する全件を対象に、印刷する列を選んでください。
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-semibold text-slate-500">列の表示</span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setPrintColumnSelection(
+                      PRINT_COLUMN_DEFS.reduce(
+                        (acc, c) => {
+                          acc[c.id] = true;
+                          return acc;
+                        },
+                        {} as Record<PrintColumnId, boolean>
+                      )
+                    )
+                  }
+                  className="rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                >
+                  すべて選択
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setPrintColumnSelection(
+                      PRINT_COLUMN_DEFS.reduce(
+                        (acc, c) => {
+                          acc[c.id] = false;
+                          return acc;
+                        },
+                        {} as Record<PrintColumnId, boolean>
+                      )
+                    )
+                  }
+                  className="rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                >
+                  すべて解除
+                </button>
+              </div>
+              <div className="flex max-h-28 flex-wrap gap-x-4 gap-y-2 overflow-y-auto rounded-lg border border-slate-100 bg-slate-50/80 p-3">
+                {PRINT_COLUMN_DEFS.map((c) => (
+                  <label key={c.id} className="flex cursor-pointer items-center gap-2 text-sm text-slate-800">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 rounded border-slate-300"
+                      checked={printColumnSelection[c.id]}
+                      onChange={(e) =>
+                        setPrintColumnSelection((prev) => ({ ...prev, [c.id]: e.target.checked }))
+                      }
+                    />
+                    {c.label}
+                  </label>
+                ))}
+              </div>
+              {printFetchLoading && (
+                <div className="flex items-center gap-2 text-sm text-slate-600">
+                  <Loader2 className="h-4 w-4 animate-spin shrink-0" />
+                  データを読み込み中です…
+                </div>
+              )}
+              {printFetchError && (
+                <p className="text-sm text-red-600">{printFetchError}</p>
+              )}
+              {!printFetchLoading && !printFetchError && printRows && (
+                <p className="text-sm text-slate-600">
+                  印刷対象: <span className="font-semibold text-slate-900">{printRows.length}</span> 件
+                </p>
+              )}
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto px-5 py-4">
+              <div id="inventory-print-area" className="rounded-lg border border-slate-200 bg-white p-3 print:border-0 print:p-0">
+                {printFetchLoading || !printRows ? (
+                  <p className="py-8 text-center text-sm text-slate-500">プレビューは取得完了後に表示されます。</p>
+                ) : (
+                  <table className="w-full border-collapse text-left text-xs text-slate-800 print:text-[11px]">
+                    <thead>
+                      <tr className="border-b border-slate-200">
+                        {activePrintColumns.map((c) => (
+                          <th key={c.id} className="whitespace-nowrap bg-slate-50 px-2 py-2 font-semibold print:bg-transparent">
+                            {c.label}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {printRows.map((row) => (
+                        <tr key={row.id} className="border-b border-slate-100 align-top">
+                          {activePrintColumns.map((c) => (
+                            <td key={c.id} className="max-w-[14rem] px-2 py-1.5 break-words print:max-w-none">
+                              {getPrintCellValue(c.id, row)}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-slate-100 bg-slate-50/80 px-5 py-4">
+              <button
+                type="button"
+                onClick={closePrintModal}
+                className={`${buttonClass} h-9 bg-white px-4 text-sm text-slate-700 border border-slate-200`}
+              >
+                閉じる
+              </button>
+              <button
+                type="button"
+                onClick={runPrintFromModal}
+                disabled={printFetchLoading || !!printFetchError || !printRows?.length}
+                className={`${buttonClass} h-9 bg-primary px-4 text-sm text-white hover:bg-primary/90 disabled:opacity-50`}
+              >
+                <Printer className="mr-2 h-4 w-4 shrink-0" />
+                印刷
               </button>
             </div>
           </div>

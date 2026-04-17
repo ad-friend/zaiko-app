@@ -68,3 +68,21 @@ body {
   color: var(--foreground);
   font-family: var(--font-sans), system-ui, sans-serif;
 }
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  #inventory-print-area,
+  #inventory-print-area * {
+    visibility: visible;
+  }
+  #inventory-print-area {
+    position: fixed;
+    left: 0;
+    top: 0;
+    width: 100%;
+    background: #fff;
+    color: #0f172a;
+  }
+}
