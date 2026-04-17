@@ -21,6 +21,7 @@ type AmazonOrder = {
   jan_code: string | null;
   asin?: string | null;
   created_at: string;
+  updated_at?: string | null;
 };
 
 type InboundCandidate = {
@@ -119,6 +120,11 @@ const buttonClass =
 export default function AmazonReconcileManager() {
   const [manualOrders, setManualOrders] = useState<AmazonOrder[]>([]);
   const [loading, setLoading] = useState(true);
+  /** reconciled/completed だが inbound_items.order_id が無い行（STEP 3-2） */
+  const [inconsistentOrders, setInconsistentOrders] = useState<AmazonOrder[]>([]);
+  const [inconsistentLoading, setInconsistentLoading] = useState(true);
+  const [inconsistentError, setInconsistentError] = useState<string | null>(null);
+  const [repairingOrderRowId, setRepairingOrderRowId] = useState<string | null>(null);
   
   // 自動消込用のState（バックエンドは1回最大20件のため、フロントで連続呼び出し）
   const [reconciling, setReconciling] = useState(false);
@@ -192,9 +198,35 @@ export default function AmazonReconcileManager() {
     }
   }, []);
 
+  const fetchInconsistentOrders = useCallback(async () => {
+    setInconsistentLoading(true);
+    setInconsistentError(null);
+    try {
+      const res = await fetch("/api/amazon/orders?status=inconsistent_reconciled");
+      const { json, raw } = await readJsonAnySafe(res);
+      if (!res.ok) {
+        const msg =
+          (json && typeof json === "object" && "error" in json && typeof (json as any).error === "string"
+            ? (json as any).error
+            : null) ?? raw.slice(0, 300);
+        throw new Error(msg || "不整合注文の取得に失敗しました");
+      }
+      setInconsistentOrders(Array.isArray(json) ? (json as AmazonOrder[]) : []);
+    } catch (e) {
+      setInconsistentError(e instanceof Error ? e.message : "不整合注文の取得に失敗しました");
+      setInconsistentOrders([]);
+    } finally {
+      setInconsistentLoading(false);
+    }
+  }, []);
+
+  const refreshStep3Orders = useCallback(async () => {
+    await Promise.all([fetchManualOrders(), fetchInconsistentOrders()]);
+  }, [fetchManualOrders, fetchInconsistentOrders]);
+
   useEffect(() => {
-    fetchManualOrders();
-  }, [fetchManualOrders]);
+    void refreshStep3Orders();
+  }, [refreshStep3Orders]);
 
   const handleCandidatesLoaded = useCallback((orderKey: string, count: number) => {
     setCandidateCountByOrderId((prev) => ({ ...prev, [orderKey]: count }));
@@ -217,12 +249,14 @@ export default function AmazonReconcileManager() {
       delete next[`pk:${removedId}`];
       return next;
     });
-  }, []);
+    void fetchInconsistentOrders();
+  }, [fetchInconsistentOrders]);
 
   const handleOrderCancellationExcluded = useCallback((amazonOrderId: string) => {
     const want = String(amazonOrderId).trim();
     setManualOrders((prev) => prev.filter((o) => String(o.amazon_order_id).trim() !== want));
-  }, []);
+    void fetchInconsistentOrders();
+  }, [fetchInconsistentOrders]);
 
   const filteredManualOrders = showOnlyNoStock
     ? manualOrders.filter((o) => (candidateCountByOrderId[orderStableKey(o)] ?? -1) === 0)
@@ -267,6 +301,7 @@ export default function AmazonReconcileManager() {
         throw new Error(msg || "データ取得に失敗しました");
       }
       setFetchResult(`${data?.message ?? "取得完了"} (新規/更新: ${data?.rowsUpserted ?? 0}件)`);
+      void refreshStep3Orders();
     } catch (e) {
       setError(e instanceof Error ? e.message : "データ取得に失敗しました");
     } finally {
@@ -393,6 +428,38 @@ export default function AmazonReconcileManager() {
 
   const RECONCILE_MAX_ROUNDS = 300;
 
+  const repairInconsistentOrderRow = async (orderRowId: string) => {
+    if (
+      !confirm(
+        "この行を手動確認（manual_required）に戻し、同一注文番号の在庫引当（order_id / settled_at）を解除しますか？\n※同一 amazon_order_id の reconciled / completed 行はまとめて manual_required になります。"
+      )
+    ) {
+      return;
+    }
+    setRepairingOrderRowId(orderRowId);
+    setInconsistentError(null);
+    try {
+      const res = await fetch("/api/amazon/orders/repair-inconsistent-reconciled", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orderRowId }),
+      });
+      const { json, raw } = await readJsonAnySafe(res);
+      if (!res.ok) {
+        const msg =
+          (json && typeof json === "object" && "error" in json && typeof (json as any).error === "string"
+            ? (json as any).error
+            : null) ?? raw.slice(0, 300);
+        throw new Error(msg || "復旧に失敗しました");
+      }
+      await refreshStep3Orders();
+    } catch (e) {
+      setInconsistentError(e instanceof Error ? e.message : "復旧に失敗しました");
+    } finally {
+      setRepairingOrderRowId(null);
+    }
+  };
+
   const runReconcile = async () => {
     if (!confirm("自動消込を実行しますか？（pending がなくなるまで最大繰り返し実行されます）")) return;
     setReconciling(true);
@@ -435,7 +502,7 @@ export default function AmazonReconcileManager() {
             rounds: round,
             allComplete: true,
           });
-          await fetchManualOrders();
+          await refreshStep3Orders();
           return;
         }
 
@@ -451,13 +518,13 @@ export default function AmazonReconcileManager() {
             rounds: round,
             allComplete: false,
           });
-          await fetchManualOrders();
+          await refreshStep3Orders();
           return;
         }
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "消込処理に失敗しました");
-      await fetchManualOrders();
+      await refreshStep3Orders();
     } finally {
       setReconciling(false);
       setReconcileLoopRound(0);
@@ -623,7 +690,7 @@ export default function AmazonReconcileManager() {
                   <ManualOrderCard
                     key={order.id}
                     order={order}
-                    onConfirmed={fetchManualOrders}
+                    onConfirmed={refreshStep3Orders}
                     onCandidatesLoaded={handleCandidatesLoaded}
                     onConditionUpdated={handleOrderConditionUpdated}
                     onDeleted={handleOrderDeleted}
@@ -631,6 +698,58 @@ export default function AmazonReconcileManager() {
                   />
                 ))}
               </div>
+            )}
+          </div>
+
+          {/* STEP 3-2: reconciled だが在庫に order_id が無い不整合 */}
+          <div className="rounded-xl border border-amber-300 bg-amber-50/40 p-7 lg:p-8 shadow-sm relative overflow-hidden">
+            <div className="absolute top-0 left-0 w-1.5 h-full bg-amber-600" />
+            <h3 className="text-lg lg:text-xl font-bold text-slate-900 mb-2">STEP 3-2: 不整合（仮消込済みだが在庫紐付けなし）</h3>
+            <p className="text-sm text-slate-700 mb-4 leading-relaxed max-w-4xl">
+              <code className="rounded bg-white/80 px-1 py-0.5 text-xs">reconciled</code> または{" "}
+              <code className="rounded bg-white/80 px-1 py-0.5 text-xs">completed</code> なのに、
+              <code className="rounded bg-white/80 px-1 py-0.5 text-xs">inbound_items.order_id</code> に該当注文番号が無い行です。
+              直近更新の上位500件の reconciled/completed 行のみを走査します（それより古い不整合は別途SQLで確認してください）。
+            </p>
+            {inconsistentError && (
+              <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">{inconsistentError}</div>
+            )}
+            {inconsistentLoading ? (
+              <p className="text-slate-600">読み込み中...</p>
+            ) : inconsistentOrders.length === 0 ? (
+              <p className="text-slate-600">不整合は検出されませんでした。</p>
+            ) : (
+              <ul className="space-y-3">
+                {inconsistentOrders.map((o) => {
+                  const rowId = resolveOrderRowIdString(o) ?? o.id;
+                  const updated = o.updated_at
+                    ? new Date(o.updated_at).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })
+                    : "—";
+                  return (
+                    <li
+                      key={o.id}
+                      className="flex flex-col gap-2 rounded-lg border border-amber-200/80 bg-white/90 p-4 sm:flex-row sm:items-center sm:justify-between"
+                    >
+                      <div className="min-w-0 text-sm text-slate-800">
+                        <p className="font-mono font-semibold break-all">{o.amazon_order_id}</p>
+                        <p className="mt-1 text-xs text-slate-600 break-all">
+                          SKU: {o.sku} / JAN: {o.jan_code ?? "—"} / 条件: {o.condition_id} / 行: {o.line_index ?? 0} /{" "}
+                          <span className="font-mono">{o.reconciliation_status}</span>
+                        </p>
+                        <p className="mt-1 text-xs text-slate-500">updated_at（表示: 東京）: {updated}</p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={repairingOrderRowId === rowId}
+                        onClick={() => void repairInconsistentOrderRow(rowId)}
+                        className={`${buttonClass} shrink-0 border border-amber-700 bg-amber-700 text-white hover:bg-amber-800 disabled:opacity-50 text-sm h-9 px-4`}
+                      >
+                        {repairingOrderRowId === rowId ? "処理中..." : "手動確認に戻す（引当解除）"}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
             )}
           </div>
         </div>
