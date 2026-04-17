@@ -1,5 +1,6 @@
 -- 在庫一覧「進捗」全件ソート用（アプリ getInventoryStatusSortRank と同一優先順位）
--- 10=販売中, 20=引当済, 30=販売済, 40=返品検品待ち, 50=イレギュラー/廃棄
+-- 10=販売中, 20=引当済, 25=補填済み, 30=販売済, 40=返品検品待ち, 50=イレギュラー/廃棄
+-- 既存DBで旧式の生成列のみある場合は migration_inbound_items_inventory_progress_rank_adjustment.sql を実行。
 
 ALTER TABLE inbound_items
   ADD COLUMN IF NOT EXISTS inventory_progress_rank integer
@@ -11,6 +12,7 @@ ALTER TABLE inbound_items
       WHEN NULLIF(TRIM(COALESCE(order_id, '')), '') IS NOT NULL
            AND settled_at IS NOT NULL THEN 30
       WHEN NULLIF(TRIM(COALESCE(order_id, '')), '') IS NOT NULL THEN 20
+      WHEN settled_at IS NOT NULL THEN 25
       ELSE 10
     END
   ) STORED;

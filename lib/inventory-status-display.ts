@@ -4,7 +4,8 @@
  * 2. stock_status=return_inspection → 返品・検品待ち（オレンジ）
  * 3. order_id あり + settled_at あり → 販売済（決済完了）（ブルー）
  * 4. order_id あり + settled_at なし → 引当済（決済待ち）（赤系）
- * 5. それ以外 → 販売中（緑系）
+ * 5. order_id なし + settled_at あり → 補填済み（財務補填で settled_at のみ立った行。黒地・白字）
+ * 6. それ以外 → 販売中（緑系）
  */
 import { STOCK_STATUS_DISPOSED, STOCK_STATUS_RETURN_INSPECTION } from "@/lib/inbound-stock-status";
 
@@ -88,6 +89,13 @@ export function getInventoryStatusDisplay(row: InventoryRowForStatus): Inventory
     };
   }
 
+  if (!hasOrder && hasSettled) {
+    return {
+      label: "補填済み",
+      badgeClassName: "bg-neutral-950 text-white ring-1 ring-neutral-800",
+    };
+  }
+
   return {
     label: "販売中",
     badgeClassName: "bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200/60",
@@ -96,7 +104,7 @@ export function getInventoryStatusDisplay(row: InventoryRowForStatus): Inventory
 
 /**
  * ソート用の進捗ランク（表示ロジックと同じ優先順位）。
- * 昇順: 販売中 → 引当済 → 販売済 → 返品検品 → イレギュラー/廃棄
+ * 昇順: 販売中 → 引当済 → 補填済み → 販売済 → 返品検品 → イレギュラー/廃棄
  */
 export function getInventoryStatusSortRank(row: InventoryRowForStatus): number {
   const hasExit = nonempty(row.exit_type);
@@ -108,6 +116,7 @@ export function getInventoryStatusSortRank(row: InventoryRowForStatus): number {
   const hasSettled = nonempty(row.settled_at);
   if (hasOrder && hasSettled) return 30;
   if (hasOrder && !hasSettled) return 20;
+  if (!hasOrder && hasSettled) return 25;
   return 10;
 }
 
