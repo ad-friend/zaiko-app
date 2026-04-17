@@ -1,14 +1,19 @@
 /**
  * 未処理財務データ（stock_id IS NULL）をグループ化して返す
  * GET: sales_transactions の未紐付き明細を amazon_order_id（または sku+posted_date）でグループ化し集計する。
+ * - 注文番号が無くても adjustment 系の行は一覧に含める（補填の手動処理用）。
  */
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import {
   classifyPendingFinanceGroup,
   displayLabelForPendingFinanceKind,
+  getRepresentativeTransactionType,
+  isAdjustmentLike,
   type PendingFinanceGroupKind,
 } from "@/lib/pending-finance-group-kind";
+import { isPrincipalTaxOffsetQuad } from "@/lib/amazon-principal-tax-quad";
+import { canRefundPositiveOffsetForRows } from "@/lib/amazon-refund-offset-like";
 
 export type PendingFinanceDetail = {
   id: number;
@@ -27,19 +32,24 @@ export type PendingFinanceGroup = {
   amazon_order_id: string | null;
   sku: string | null;
   transaction_type: string;
+  /** 最古明細基準の代表取引タイプ（モーダル既定モード用） */
+  representative_transaction_type: string;
   net_amount: number;
   posted_date: string;
   raw_details: PendingFinanceDetail[];
   group_kind: PendingFinanceGroupKind;
   display_label: string;
+  /** Principal/Tax 4行相殺パターン */
+  is_principal_tax_quad: boolean;
+  /** 注文本消込（manual-reconcile-order）を出してよいか */
+  can_order_reconcile: boolean;
+  /** 返金+プラス売上の相殺完結を出してよいか */
+  can_refund_positive_offset: boolean;
 };
 
 export async function GET() {
   try {
     const shouldExcludeByType = (transactionType: unknown, amountType: unknown, amountDescription: unknown): boolean => {
-      // 手動消込UIでは「注文に紐づく売上/返金」だけを見たい。
-      // 取引タイプの表記揺れがあるため、Refund/返金/注文などで分岐せず、
-      // 「明らかに手数料・振込・FBA・送料課金系だけ」を部分一致で除外する。
       const tt = String(transactionType ?? "").normalize("NFKC").toLowerCase();
       const at = String(amountType ?? "").normalize("NFKC").toLowerCase();
       const ad = String(amountDescription ?? "").normalize("NFKC").toLowerCase();
@@ -57,15 +67,12 @@ export async function GET() {
       return keywords.some((k) => hay.includes(k));
     };
 
-    // status カラムが存在する場合は reconciled を除外する。
-    // 存在しない場合でも動くように、失敗時は status なしで再クエリする。
     let rows: any[] | null = null;
     {
       const res = await supabase
         .from("sales_transactions")
         .select("id, amazon_order_id, sku, transaction_type, amount_type, amount_description, amount, posted_date, status")
         .is("stock_id", null)
-        // NULL を落とさないようにする: (status IS NULL) OR (status != 'reconciled')
         .or("status.is.null,status.neq.reconciled")
         .order("posted_date", { ascending: false });
       if (!res.error) {
@@ -89,14 +96,13 @@ export async function GET() {
 
     let list = (rows ?? []) as PendingFinanceDetail[];
 
-    // 手動消込の対象だけに最適化して除外:
-    // - 注文番号が無い行はアカウントレベルの経費等として扱い除外（adj_ グループも生成させない）
-    // - 取引タイプ/金額タイプに手数料・振込関連の文字列を含むものは除外
-    // - 金額の符号（±/0）では判定しない（返金等のマイナスも残す）
     list = list.filter((row) => {
+      if (shouldExcludeByType((row as any).transaction_type, (row as any).amount_type, (row as any).amount_description)) {
+        return false;
+      }
       const orderId = row.amazon_order_id?.trim() ?? "";
-      if (!orderId) return false;
-      return !shouldExcludeByType((row as any).transaction_type, (row as any).amount_type, (row as any).amount_description);
+      if (orderId) return true;
+      return isAdjustmentLike([row] as Parameters<typeof isAdjustmentLike>[0]);
     });
 
     const groupMap = new Map<string, PendingFinanceDetail[]>();
@@ -111,7 +117,7 @@ export async function GET() {
       if (orderId) {
         key = orderId;
       } else {
-        key = `adj_${txType}_${sku ?? "n/a"}_${posted}`;
+        key = `adj_${txType}_${sku ?? "n/a"}_${posted}_${row.id}`;
       }
 
       if (!groupMap.has(key)) groupMap.set(key, []);
@@ -123,22 +129,36 @@ export async function GET() {
       const netAmount = details.reduce((sum, d) => sum + Number(d.amount ?? 0), 0);
       const first = details[0];
       const orderId = first.amazon_order_id?.trim() ?? null;
-      const representativeSku = first.sku?.trim() ?? null;
+      const representativeSku =
+        details.map((d) => d.sku?.trim()).find((s) => s && s.length > 0) ?? first.sku?.trim() ?? null;
       const transactionType = first.transaction_type ?? "Unknown";
       const postedDate = first.posted_date ?? "";
       const group_kind = classifyPendingFinanceGroup(details);
       const display_label = displayLabelForPendingFinanceKind(group_kind, transactionType);
+      const representative_transaction_type = getRepresentativeTransactionType(details);
+      const is_principal_tax_quad =
+        group_kind === "offset_principal_tax" || isPrincipalTaxOffsetQuad(details as Parameters<typeof isPrincipalTaxOffsetQuad>[0]);
+
+      const realOrder = Boolean(orderId) && !String(groupId).startsWith("adj_");
+      const can_order_reconcile =
+        realOrder && !is_principal_tax_quad && group_kind !== "adjustment_like";
+
+      const can_refund_positive_offset = realOrder && canRefundPositiveOffsetForRows(details);
 
       groups.push({
         groupId,
         amazon_order_id: orderId,
         sku: representativeSku,
         transaction_type: transactionType,
+        representative_transaction_type,
         net_amount: netAmount,
         posted_date: postedDate,
         raw_details: details,
         group_kind,
         display_label,
+        is_principal_tax_quad,
+        can_order_reconcile,
+        can_refund_positive_offset,
       });
     }
 

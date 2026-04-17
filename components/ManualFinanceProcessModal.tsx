@@ -21,11 +21,16 @@ export type PendingFinanceGroupData = {
   amazon_order_id: string | null;
   sku: string | null;
   transaction_type: string;
+  /** API 追加: 最古明細の transaction_type */
+  representative_transaction_type?: string;
   net_amount: number;
   posted_date: string;
   raw_details: PendingFinanceDetail[];
   group_kind?: PendingFinanceGroupKind;
   display_label?: string;
+  is_principal_tax_quad?: boolean;
+  can_order_reconcile?: boolean;
+  can_refund_positive_offset?: boolean;
 };
 
 export type CandidateStock = {
@@ -38,6 +43,13 @@ export type CandidateStock = {
   created_at: string | null;
 };
 
+type ProcessMode =
+  | "principal_tax_offset"
+  | "order_reconcile"
+  | "refund_positive_offset"
+  | "adjustment_finance_only"
+  | "adjustment_with_stock";
+
 type Props = {
   isOpen: boolean;
   onClose: () => void;
@@ -45,28 +57,77 @@ type Props = {
   onSuccess?: () => void;
 };
 
+function isQuadFromData(data: PendingFinanceGroupData): boolean {
+  return (
+    data.is_principal_tax_quad === true ||
+    data.group_kind === "offset_principal_tax" ||
+    isPrincipalTaxOffsetQuad(data.raw_details ?? [])
+  );
+}
+
+function buildModeOptions(data: PendingFinanceGroupData): { id: ProcessMode; label: string }[] {
+  const isQuad = isQuadFromData(data);
+  const isAdjustment = data.group_kind === "adjustment_like";
+  const opts: { id: ProcessMode; label: string }[] = [];
+  if (isQuad) opts.push({ id: "principal_tax_offset", label: "Principal / Tax 相殺（在庫は基本触らない）" });
+  if (data.can_order_reconcile) opts.push({ id: "order_reconcile", label: "注文売上の本消込（在庫を選択）" });
+  if (data.can_refund_positive_offset) opts.push({ id: "refund_positive_offset", label: "返金＋プラス売上の相殺完結（在庫は触らない）" });
+  if (isAdjustment) {
+    opts.push({ id: "adjustment_finance_only", label: "補填・財務のみ完結" });
+    opts.push({ id: "adjustment_with_stock", label: "補填・在庫にも紐付け（SKU→JAN候補から選択）" });
+  }
+  return opts;
+}
+
+function defaultProcessMode(data: PendingFinanceGroupData | null): ProcessMode {
+  if (!data) return "order_reconcile";
+  if (isQuadFromData(data)) return "principal_tax_offset";
+  if (data.group_kind === "adjustment_like") return "adjustment_finance_only";
+  if (data.can_refund_positive_offset) return "refund_positive_offset";
+  if (data.can_order_reconcile) return "order_reconcile";
+  return "adjustment_finance_only";
+}
+
 export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuccess }: Props) {
+  const [processMode, setProcessMode] = useState<ProcessMode>("order_reconcile");
   const [candidateStocks, setCandidateStocks] = useState<CandidateStock[]>([]);
+  const [adjustmentCandidates, setAdjustmentCandidates] = useState<CandidateStock[]>([]);
   const [selectedStockId, setSelectedStockId] = useState<number | null>(null);
+  const [selectedAdjustmentStockId, setSelectedAdjustmentStockId] = useState<number | null>(null);
   const [loadingCandidates, setLoadingCandidates] = useState(false);
+  const [loadingAdjustmentCandidates, setLoadingAdjustmentCandidates] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showReleaseInbound, setShowReleaseInbound] = useState(false);
+
+  const details = data?.raw_details ?? [];
+  const netAmount = data?.net_amount ?? 0;
+  const isQuad = data != null && isQuadFromData(data);
+  const isAdjustment = data?.group_kind === "adjustment_like";
+
+  const modeOptions = data ? buildModeOptions(data) : [];
 
   useEffect(() => {
-    const details = data?.raw_details ?? [];
-    const isOffsetQuad =
-      data != null &&
-      (data.group_kind === "offset_principal_tax" || isPrincipalTaxOffsetQuad(details));
-    if (!isOpen || !data || data.transaction_type !== "Order" || isOffsetQuad) {
+    if (!isOpen || !data) return;
+    const opts = buildModeOptions(data);
+    const allowed = new Set(opts.map((o) => o.id));
+    const d = defaultProcessMode(data);
+    setProcessMode(allowed.has(d) ? d : (opts[0]?.id ?? "order_reconcile"));
+    setSelectedStockId(null);
+    setSelectedAdjustmentStockId(null);
+    setError(null);
+    setShowReleaseInbound(false);
+  }, [isOpen, data?.groupId, data?.group_kind, data?.can_order_reconcile, data?.can_refund_positive_offset, data?.is_principal_tax_quad]);
+
+  useEffect(() => {
+    if (!isOpen || !data || processMode !== "order_reconcile" || !data.amazon_order_id || isQuad) {
       setCandidateStocks([]);
       setSelectedStockId(null);
-      setError(null);
       return;
     }
     setLoadingCandidates(true);
-    setError(null);
     const params = new URLSearchParams();
-    if (data.amazon_order_id) params.set("amazon_order_id", data.amazon_order_id);
+    params.set("amazon_order_id", data.amazon_order_id);
     if (data.sku) params.set("sku", data.sku);
     fetch(`/api/amazon/candidate-stocks?${params}`)
       .then((res) => (res.ok ? res.json() : []))
@@ -76,14 +137,29 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
       })
       .catch(() => setCandidateStocks([]))
       .finally(() => setLoadingCandidates(false));
-  }, [isOpen, data?.groupId, data?.amazon_order_id, data?.sku, data?.transaction_type, data?.group_kind, data?.raw_details]);
+  }, [isOpen, data?.groupId, data?.amazon_order_id, data?.sku, processMode, isQuad]);
 
-  const details = data?.raw_details ?? [];
-  const netAmount = data?.net_amount ?? 0;
-  const txType = data?.transaction_type ?? "";
-  const isOffsetQuad =
-    data != null &&
-    (data.group_kind === "offset_principal_tax" || isPrincipalTaxOffsetQuad(details));
+  useEffect(() => {
+    if (!isOpen || !data || processMode !== "adjustment_with_stock") {
+      setAdjustmentCandidates([]);
+      setSelectedAdjustmentStockId(null);
+      return;
+    }
+    const sku = (data.sku ?? "").trim();
+    if (!sku) {
+      setAdjustmentCandidates([]);
+      return;
+    }
+    setLoadingAdjustmentCandidates(true);
+    fetch(`/api/amazon/adjustment-inbound-candidates?sku=${encodeURIComponent(sku)}`)
+      .then((res) => (res.ok ? res.json() : []))
+      .then((list) => {
+        setAdjustmentCandidates(Array.isArray(list) ? list : []);
+        setSelectedAdjustmentStockId(null);
+      })
+      .catch(() => setAdjustmentCandidates([]))
+      .finally(() => setLoadingAdjustmentCandidates(false));
+  }, [isOpen, data?.groupId, data?.sku, processMode]);
 
   const handlePrincipalTaxSettle = async (action: "offset" | "release_inbound") => {
     if (!data) return;
@@ -132,15 +208,65 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
     }
   };
 
+  const handleRefundPositiveOffset = async () => {
+    if (!data?.amazon_order_id) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/amazon/manual-finance-refund-offset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ groupId: data.amazon_order_id }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? "相殺に失敗しました");
+      onSuccess?.();
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "相殺に失敗しました");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleAdjustmentSettle = async (withStock: boolean) => {
+    if (!data) return;
+    const ids = details.map((d) => d.id);
+    if (ids.length === 0) {
+      setError("明細がありません。");
+      return;
+    }
+    if (withStock && selectedAdjustmentStockId == null) {
+      setError("在庫を選択してください。");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/amazon/manual-finance-adjustment-settle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          salesTransactionIds: ids,
+          stockId: withStock ? selectedAdjustmentStockId : null,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? "補填の消込に失敗しました");
+      onSuccess?.();
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "補填の消込に失敗しました");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
-      <div
-        className="absolute inset-0"
-        aria-hidden
-        onClick={onClose}
-      />
+      <div className="absolute inset-0" aria-hidden onClick={onClose} />
       <div
         className="relative w-full max-w-4xl max-h-[90vh] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl animate-in zoom-in-95 duration-200 flex flex-col"
         role="dialog"
@@ -162,8 +288,34 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
         </div>
 
         <div className="flex-1 overflow-y-auto p-6">
+          <p className="mb-4 text-xs text-slate-600 leading-relaxed">
+            処理内容を選んでから確定してください。返金の<strong>実物在庫</strong>は返品検品・在庫画面で扱い、ここでは<strong>財務上の相殺・本消込・補填の消込</strong>に限定します（補填で在庫に紐付ける場合は下で明示的に選択）。
+          </p>
+
+          {modeOptions.length > 1 && (
+            <div className="mb-5 rounded-lg border border-slate-200 bg-slate-50/80 p-3">
+              <p className="text-xs font-semibold text-slate-700 mb-2">処理モード</p>
+              <div className="flex flex-col gap-2">
+                {modeOptions.map((o) => (
+                  <label key={o.id} className="flex items-start gap-2 cursor-pointer text-sm text-slate-700">
+                    <input
+                      type="radio"
+                      name="process-mode"
+                      checked={processMode === o.id}
+                      onChange={() => {
+                        setProcessMode(o.id);
+                        setError(null);
+                      }}
+                      className="mt-0.5 border-slate-300 text-blue-600"
+                    />
+                    <span>{o.label}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-            {/* 左: 財務データ明細 */}
             <div className="rounded-xl border border-slate-200 bg-slate-50/30 overflow-hidden">
               <h3 className="bg-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-700 border-b border-slate-200">
                 財務データの明細
@@ -189,7 +341,9 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                               <td className="py-2.5 pr-3 text-slate-700">
                                 {row.amount_description ?? row.amount_type ?? "—"}
                               </td>
-                              <td className={`py-2.5 text-right tabular-nums font-medium ${isNegative ? "text-red-600" : "text-slate-800"}`}>
+                              <td
+                                className={`py-2.5 text-right tabular-nums font-medium ${isNegative ? "text-red-600" : "text-slate-800"}`}
+                              >
                                 {isNegative ? "−" : ""}
                                 {Math.abs(amount).toLocaleString()} 円
                               </td>
@@ -212,18 +366,18 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
               </div>
             </div>
 
-            {/* 右: アクションエリア */}
             <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
-              {isOffsetQuad && (
+              {error && <p className="text-sm text-red-600 px-4 pt-4">{error}</p>}
+
+              {processMode === "principal_tax_offset" && isQuad && (
                 <>
                   <h3 className="bg-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-700 border-b border-slate-200">
                     Principal / Tax 相殺
                   </h3>
                   <div className="p-4 space-y-4">
                     <p className="text-xs text-slate-600">
-                      注文内で Principal / Tax のプラスがマイナスと相殺しているだけの場合、在庫を触らずに未消込リストから外すことができます。在庫に紐づく注文引当を解除してから相殺する場合は下のボタンを選んでください。
+                      注文内で Principal / Tax のプラスとマイナスが相殺しているだけの場合、在庫を変えずに未消込から外せます。
                     </p>
-                    {error && <p className="text-sm text-red-600">{error}</p>}
                     <button
                       type="button"
                       onClick={() => void handlePrincipalTaxSettle("offset")}
@@ -234,30 +388,42 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                     </button>
                     <button
                       type="button"
-                      onClick={() => void handlePrincipalTaxSettle("release_inbound")}
-                      disabled={submitting}
-                      className="w-full inline-flex items-center justify-center rounded-lg bg-amber-500 text-white py-2.5 px-4 text-sm font-semibold hover:bg-amber-600 disabled:opacity-50 transition-colors shadow-sm border border-amber-600/30"
+                      onClick={() => setShowReleaseInbound((v) => !v)}
+                      className="text-xs text-slate-500 underline"
                     >
-                      {submitting ? "処理中..." : "在庫の注文引当を解除して復帰"}
+                      在庫の注文引当を戻す必要がある場合
                     </button>
+                    {showReleaseInbound && (
+                      <button
+                        type="button"
+                        onClick={() => void handlePrincipalTaxSettle("release_inbound")}
+                        disabled={submitting}
+                        className="w-full inline-flex items-center justify-center rounded-lg bg-amber-500 text-white py-2.5 px-4 text-sm font-semibold hover:bg-amber-600 disabled:opacity-50 transition-colors shadow-sm border border-amber-600/30"
+                      >
+                        {submitting ? "処理中..." : "在庫の注文引当を解除してから相殺"}
+                      </button>
+                    )}
                   </div>
                 </>
               )}
-              {!isOffsetQuad && txType === "Order" && (
+
+              {processMode === "order_reconcile" && data?.can_order_reconcile && (
                 <>
                   <h3 className="bg-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-700 border-b border-slate-200">
                     紐付ける在庫の選択
                   </h3>
                   <div className="p-4 space-y-4">
                     <p className="text-xs text-slate-500">
-                      この注文に紐づける在庫を選び、本消込を実行します。
+                      この注文に紐づける在庫を選び、本消込を実行します（棚卸のため在庫と売上を一致させます）。
                     </p>
                     {loadingCandidates ? (
                       <p className="text-sm text-slate-500 py-4 text-center">在庫候補を取得中...</p>
                     ) : candidateStocks.length === 0 ? (
-                      <p className="text-sm text-slate-500 py-4 text-center">紐付け可能な在庫がありません。</p>
+                      <p className="text-sm text-slate-500 py-4 text-center">
+                        紐付け可能な在庫がありません。検索で候補を広げる場合は Amazon 消込の在庫レスキューと同様に、必要なら別途検索UIを追加できます。
+                      </p>
                     ) : (
-                      <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50/50 p-3">
+                      <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50/50 p-3 max-h-56 overflow-y-auto">
                         {candidateStocks.map((s) => (
                           <label key={s.id} className="flex items-center gap-3 cursor-pointer">
                             <input
@@ -268,19 +434,17 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                               className="rounded-full border-slate-300 text-blue-600"
                             />
                             <span className="text-sm text-slate-600">
-                              ID: {s.id} — {s.product_name || s.sku || "—"} ({s.created_at ? new Date(s.created_at).toLocaleDateString("ja-JP") : ""})
+                              ID: {s.id} — {s.product_name || s.sku || "—"} (
+                              {s.created_at ? new Date(s.created_at).toLocaleDateString("ja-JP") : ""})
                               {s.unit_cost ? ` · ${Number(s.unit_cost).toLocaleString()}円` : ""}
                             </span>
                           </label>
                         ))}
                       </div>
                     )}
-                    {error && (
-                      <p className="text-sm text-red-600">{error}</p>
-                    )}
                     <button
                       type="button"
-                      onClick={handleConfirmOrder}
+                      onClick={() => void handleConfirmOrder()}
                       disabled={selectedStockId == null || submitting}
                       className="w-full inline-flex items-center justify-center rounded-lg bg-blue-600 text-white py-2.5 px-4 text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
                     >
@@ -289,41 +453,94 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                   </div>
                 </>
               )}
-              {!isOffsetQuad && txType === "Refund" && (
+
+              {processMode === "refund_positive_offset" && data?.can_refund_positive_offset && (
                 <>
                   <h3 className="bg-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-700 border-b border-slate-200">
-                    返品処理
+                    返金＋プラス売上の相殺
                   </h3>
                   <div className="p-4 space-y-4">
                     <p className="text-xs text-slate-600">
-                      返品に伴い、過去に紐付けた在庫の注文紐付けを解除し、在庫に復帰させます。
+                      同一注文でプラスの売上行と返金行が揃っている場合、在庫を変えずに財務上だけ相殺済みにできます（自動本消込と同じ考え方）。
+                    </p>
+                    <p className="text-xs text-amber-800 bg-amber-50 border border-amber-100 rounded px-2 py-1.5">
+                      返品の実物在庫は「返品検品」等の在庫フローで処理してください。
                     </p>
                     <button
                       type="button"
-                      onClick={() => console.log("返品処理実行", data?.groupId)}
-                      className="w-full inline-flex items-center justify-center rounded-lg bg-amber-500 text-white py-2.5 px-4 text-sm font-semibold hover:bg-amber-600 transition-colors shadow-sm border border-amber-600/30"
+                      onClick={() => void handleRefundPositiveOffset()}
+                      disabled={submitting}
+                      className="w-full inline-flex items-center justify-center rounded-lg bg-violet-600 text-white py-2.5 px-4 text-sm font-semibold hover:bg-violet-700 disabled:opacity-50 transition-colors shadow-sm"
                     >
-                      過去の注文紐付けを解除し、在庫に復帰させる
+                      {submitting ? "処理中..." : "相殺完結（在庫は触らない）"}
                     </button>
                   </div>
                 </>
               )}
-              {!isOffsetQuad &&
-                (txType === "Adjustment" || (txType !== "Order" && txType !== "Refund")) && (
+
+              {processMode === "adjustment_finance_only" && isAdjustment && (
                 <>
                   <h3 className="bg-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-700 border-b border-slate-200">
-                    補填処理
+                    補填・財務のみ
                   </h3>
                   <div className="p-4 space-y-4">
                     <p className="text-xs text-slate-600">
-                      該当SKUの最古の在庫を補填として処理します。
+                      補填・クレーム等の明細を、在庫を変えずに消込リストから外します。
                     </p>
                     <button
                       type="button"
-                      onClick={() => console.log("補填処理実行", data?.groupId)}
-                      className="w-full inline-flex items-center justify-center rounded-lg bg-emerald-600 text-white py-2.5 px-4 text-sm font-semibold hover:bg-emerald-700 transition-colors shadow-sm"
+                      onClick={() => void handleAdjustmentSettle(false)}
+                      disabled={submitting}
+                      className="w-full inline-flex items-center justify-center rounded-lg bg-emerald-600 text-white py-2.5 px-4 text-sm font-semibold hover:bg-emerald-700 disabled:opacity-50 transition-colors shadow-sm"
                     >
-                      該当SKUの最古の在庫を補填として処理する
+                      {submitting ? "処理中..." : "財務のみ消込する"}
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {processMode === "adjustment_with_stock" && isAdjustment && (
+                <>
+                  <h3 className="bg-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-700 border-b border-slate-200">
+                    補填・在庫にも紐付け
+                  </h3>
+                  <div className="p-4 space-y-4">
+                    <p className="text-xs text-slate-600">
+                      seller SKU から JAN を解き、該当 JAN の在庫候補を表示します。正の金額行に在庫と原価を付け、在庫に settled_at を立てます（order_id は変更しません）。
+                    </p>
+                    {!data?.sku?.trim() ? (
+                      <p className="text-sm text-amber-700">明細に SKU が無いため候補を出せません。財務のみ消込を選ぶか、データ取込を確認してください。</p>
+                    ) : loadingAdjustmentCandidates ? (
+                      <p className="text-sm text-slate-500 py-4 text-center">在庫候補を取得中...</p>
+                    ) : adjustmentCandidates.length === 0 ? (
+                      <p className="text-sm text-slate-500 py-4 text-center">候補在庫がありません（マッピング・JAN を確認）。</p>
+                    ) : (
+                      <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50/50 p-3 max-h-56 overflow-y-auto">
+                        {adjustmentCandidates.map((s) => (
+                          <label key={s.id} className="flex items-center gap-3 cursor-pointer">
+                            <input
+                              type="radio"
+                              name="adj-stock-select"
+                              checked={selectedAdjustmentStockId === s.id}
+                              onChange={() => setSelectedAdjustmentStockId(s.id)}
+                              className="rounded-full border-slate-300 text-emerald-600"
+                            />
+                            <span className="text-sm text-slate-600">
+                              ID: {s.id} — {s.product_name || s.sku || "—"} (
+                              {s.created_at ? new Date(s.created_at).toLocaleDateString("ja-JP") : ""})
+                              {s.unit_cost ? ` · ${Number(s.unit_cost).toLocaleString()}円` : ""}
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => void handleAdjustmentSettle(true)}
+                      disabled={submitting || !data?.sku?.trim() || selectedAdjustmentStockId == null}
+                      className="w-full inline-flex items-center justify-center rounded-lg bg-emerald-700 text-white py-2.5 px-4 text-sm font-semibold hover:bg-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
+                    >
+                      {submitting ? "処理中..." : "在庫を紐付けて消込する"}
                     </button>
                   </div>
                 </>

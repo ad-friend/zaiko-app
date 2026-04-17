@@ -13,7 +13,7 @@ export type PendingFinanceDetailLike = PrincipalTaxQuadRowLike & {
   transaction_type?: string;
 };
 
-function isAdjustmentLike(details: PendingFinanceDetailLike[]): boolean {
+export function isAdjustmentLike(details: PendingFinanceDetailLike[]): boolean {
   for (const row of details) {
     const hay = [row.transaction_type, row.amount_type, row.amount_description ?? ""]
       .map((x) => String(x ?? "").normalize("NFKC").toLowerCase())
@@ -32,7 +32,7 @@ function isAdjustmentLike(details: PendingFinanceDetailLike[]): boolean {
   return false;
 }
 
-function representativeRow(details: PendingFinanceDetailLike[]): PendingFinanceDetailLike {
+export function representativeRow(details: PendingFinanceDetailLike[]): PendingFinanceDetailLike {
   return [...details].sort((a, b) => {
     const da = String(a.posted_date ?? "");
     const db = String(b.posted_date ?? "");
@@ -55,6 +55,11 @@ export function classifyPendingFinanceGroup(details: PendingFinanceDetailLike[])
   if (isPrincipalTaxOffsetQuad(details)) return "offset_principal_tax";
   const rep = representativeRow(details);
   return classifyByTransactionType(rep.transaction_type);
+}
+
+/** モーダル分岐用: 分類と同じ基準の代表 transaction_type（最古明細） */
+export function getRepresentativeTransactionType(details: PendingFinanceDetailLike[]): string {
+  return String(representativeRow(details).transaction_type ?? "Unknown");
 }
 
 export function displayLabelForPendingFinanceKind(
