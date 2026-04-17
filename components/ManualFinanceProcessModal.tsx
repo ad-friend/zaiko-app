@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { isPrincipalTaxOffsetQuad } from "@/lib/amazon-principal-tax-quad";
+import { consolidatedInternalNoteForEdit } from "@/lib/amazon-pending-finance-internal-note";
 import type { PendingFinanceGroupKind } from "@/lib/pending-finance-group-kind";
 
 export type PendingFinanceDetail = {
@@ -13,6 +14,7 @@ export type PendingFinanceDetail = {
   amount_description: string | null;
   amount: number;
   posted_date: string;
+  internal_note?: string | null;
   [key: string]: unknown;
 };
 
@@ -31,6 +33,8 @@ export type PendingFinanceGroupData = {
   is_principal_tax_quad?: boolean;
   can_order_reconcile?: boolean;
   can_refund_positive_offset?: boolean;
+  /** STEP5 カード用（API: pending-finances） */
+  internal_note_summary?: string | null;
 };
 
 export type CandidateStock = {
@@ -78,11 +82,6 @@ function isAdjustmentGroupData(data: PendingFinanceGroupData): boolean {
   if (isAdjustmentTransactionType(data.transaction_type)) return true;
   if (isAdjustmentTransactionType(data.representative_transaction_type)) return true;
   return false;
-}
-
-function isS03LikeOrderId(raw: string | null | undefined): boolean {
-  const s = String(raw ?? "").trim().toUpperCase();
-  return s.startsWith("S03-");
 }
 
 function isQuadFromData(data: PendingFinanceGroupData): boolean {
@@ -143,6 +142,11 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
 
   const modeOptions = data ? buildModeOptions(data) : [];
 
+  const rawDetailsNoteSig = useMemo(
+    () => (data?.raw_details ?? []).map((d) => `${d.id}:${String(d.internal_note ?? "")}`).join("|"),
+    [data?.groupId, data?.raw_details]
+  );
+
   async function persistInternalNoteIfNeeded(ids: number[]): Promise<void> {
     const note = internalNote.trim();
     if (!note) return;
@@ -174,7 +178,7 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
     setSelectedAdjustmentStockId(null);
     setError(null);
     setShowReleaseInbound(false);
-    setInternalNote("");
+    setInternalNote(consolidatedInternalNoteForEdit(data.raw_details ?? []));
   }, [
     isOpen,
     data?.groupId,
@@ -185,6 +189,7 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
     data?.can_order_reconcile,
     data?.can_refund_positive_offset,
     data?.is_principal_tax_quad,
+    rawDetailsNoteSig,
   ]);
 
   useEffect(() => {
@@ -409,8 +414,7 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
             </div>
           )}
 
-          {data &&
-          ((isAdjustment && isS03LikeOrderId(data.amazon_order_id ?? data.groupId)) || internalNote.trim().length > 0) ? (
+          {data ? (
             <div className="mb-5 rounded-lg border border-slate-200 bg-white p-3">
               <label className="block text-xs font-semibold text-slate-700 mb-2" htmlFor="internal-note">
                 社内メモ（任意）<span className="font-normal text-slate-500"> — sales_transactions.internal_note</span>
@@ -424,7 +428,8 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                 className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 placeholder:text-slate-400 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-300/30"
               />
               <p className="mt-2 text-[11px] text-slate-500 leading-relaxed">
-                DBに <span className="font-mono">internal_note</span> 列が無い場合は、先に{" "}
+                このグループの全明細に同じ内容で保存されます（複数の既存メモは編集用に区切りで連結表示）。DBに{" "}
+                <span className="font-mono">internal_note</span> 列が無い場合は、先に{" "}
                 <span className="font-mono">docs/migration_sales_transactions_internal_note.sql</span> を Supabase で実行してください。
               </p>
             </div>

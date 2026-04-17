@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Ban, Trash2 } from "lucide-react";
 import ManualFinanceProcessModal, { type PendingFinanceGroupData } from "@/components/ManualFinanceProcessModal";
 import ReturnInspectionQueueSection from "@/components/ReturnInspectionQueueSection";
+import { consolidatedInternalNoteForEdit } from "@/lib/amazon-pending-finance-internal-note";
 import { normalizeOrderCondition } from "@/lib/amazon-condition-match";
 
 type AmazonOrder = {
@@ -174,6 +175,10 @@ export default function AmazonReconcileManager() {
   const [isLoadingPendingFinances, setIsLoadingPendingFinances] = useState(false);
   const [selectedPendingFinance, setSelectedPendingFinance] = useState<PendingFinanceGroupData | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [expandedMemoGroupId, setExpandedMemoGroupId] = useState<string | null>(null);
+  const [memoDraftByGroupId, setMemoDraftByGroupId] = useState<Record<string, string>>({});
+  const [memoSavingGroupId, setMemoSavingGroupId] = useState<string | null>(null);
+  const [memoFlashByGroupId, setMemoFlashByGroupId] = useState<Record<string, { type: "ok" | "err"; text: string }>>({});
 
   const [error, setError] = useState<string | null>(null);
   const [showOnlyNoStock, setShowOnlyNoStock] = useState(false);
@@ -279,6 +284,52 @@ export default function AmazonReconcileManager() {
       setIsLoadingPendingFinances(false);
     }
   }, []);
+
+  const toggleMemoEditor = useCallback((g: PendingFinanceGroupData) => {
+    setExpandedMemoGroupId((prev) => {
+      const closing = prev === g.groupId;
+      if (!closing) {
+        setMemoDraftByGroupId((draft) => ({
+          ...draft,
+          [g.groupId]: consolidatedInternalNoteForEdit(g.raw_details ?? []),
+        }));
+      }
+      return closing ? null : g.groupId;
+    });
+  }, []);
+
+  const saveMemoOnlyForGroup = useCallback(
+    async (g: PendingFinanceGroupData) => {
+      const ids = (g.raw_details ?? []).map((d) => d.id).filter((n) => Number.isFinite(n) && n >= 1);
+      if (ids.length === 0) return;
+      const note = (memoDraftByGroupId[g.groupId] ?? "").trim();
+      setMemoSavingGroupId(g.groupId);
+      setMemoFlashByGroupId((f) => {
+        const next = { ...f };
+        delete next[g.groupId];
+        return next;
+      });
+      try {
+        const res = await fetch("/api/amazon/sales-transactions/internal-note", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ salesTransactionIds: ids, internal_note: note.length > 0 ? note : null }),
+        });
+        const json = (await res.json().catch(() => ({}))) as { error?: string };
+        if (!res.ok) throw new Error(typeof json.error === "string" ? json.error : "保存に失敗しました");
+        setMemoFlashByGroupId((f) => ({ ...f, [g.groupId]: { type: "ok", text: "メモを保存しました" } }));
+        await fetchPendingFinances();
+      } catch (e) {
+        setMemoFlashByGroupId((f) => ({
+          ...f,
+          [g.groupId]: { type: "err", text: e instanceof Error ? e.message : "保存に失敗しました" },
+        }));
+      } finally {
+        setMemoSavingGroupId(null);
+      }
+    },
+    [memoDraftByGroupId, fetchPendingFinances]
+  );
 
   useEffect(() => {
     fetchPendingFinances();
@@ -850,49 +901,99 @@ export default function AmazonReconcileManager() {
                     {pendingFinances.map((g) => (
                       <li
                         key={g.groupId}
-                        className="flex items-center gap-2 rounded-lg border border-slate-100 bg-slate-50/50 px-2.5 py-2 text-xs"
+                        className="flex flex-col gap-1.5 rounded-lg border border-slate-100 bg-slate-50/50 px-2.5 py-2 text-xs"
                       >
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate font-medium text-slate-800" title={g.amazon_order_id ?? g.sku ?? g.groupId}>
-                            {g.amazon_order_id ?? g.sku ?? g.groupId}
-                          </p>
-                          <div className="mt-0.5 flex items-center gap-1.5 flex-wrap">
-                            <span
-                              className={`inline-flex shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${
-                                g.group_kind === "offset_principal_tax"
-                                  ? "bg-violet-100 text-violet-800"
-                                  : g.group_kind === "adjustment_like"
-                                    ? "bg-emerald-100 text-emerald-800"
-                                    : g.group_kind === "order" || g.transaction_type === "Order"
-                                      ? "bg-blue-100 text-blue-700"
-                                      : g.group_kind === "refund" || g.transaction_type === "Refund"
-                                        ? "bg-amber-100 text-amber-700"
-                                        : "bg-slate-200 text-slate-700"
-                              }`}
-                            >
-                              {g.display_label ?? g.transaction_type}
-                            </span>
-                            <span className="text-slate-500">
-                              {g.posted_date ? new Date(g.posted_date).toLocaleDateString("ja-JP", { month: "numeric", day: "numeric" }) : "—"}
-                            </span>
+                        <div className="flex items-center gap-2">
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate font-medium text-slate-800" title={g.amazon_order_id ?? g.sku ?? g.groupId}>
+                              {g.amazon_order_id ?? g.sku ?? g.groupId}
+                            </p>
+                            <div className="mt-0.5 flex items-center gap-1.5 flex-wrap">
+                              <span
+                                className={`inline-flex shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                                  g.group_kind === "offset_principal_tax"
+                                    ? "bg-violet-100 text-violet-800"
+                                    : g.group_kind === "adjustment_like"
+                                      ? "bg-emerald-100 text-emerald-800"
+                                      : g.group_kind === "order" || g.transaction_type === "Order"
+                                        ? "bg-blue-100 text-blue-700"
+                                        : g.group_kind === "refund" || g.transaction_type === "Refund"
+                                          ? "bg-amber-100 text-amber-700"
+                                          : "bg-slate-200 text-slate-700"
+                                }`}
+                              >
+                                {g.display_label ?? g.transaction_type}
+                              </span>
+                              <span className="text-slate-500">
+                                {g.posted_date ? new Date(g.posted_date).toLocaleDateString("ja-JP", { month: "numeric", day: "numeric" }) : "—"}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="shrink-0 text-right">
+                            <p className={`font-semibold tabular-nums ${g.net_amount >= 0 ? "text-slate-800" : "text-red-600"}`}>
+                              {g.net_amount >= 0 ? "" : "−"}
+                              {Math.abs(g.net_amount).toLocaleString()}円
+                            </p>
+                            <div className="mt-1 flex flex-wrap justify-end gap-1">
+                              <button
+                                type="button"
+                                onClick={() => toggleMemoEditor(g)}
+                                className={`inline-flex items-center justify-center rounded px-2 py-1 text-[10px] font-medium transition-colors ${
+                                  expandedMemoGroupId === g.groupId
+                                    ? "bg-amber-200 text-amber-950"
+                                    : "bg-white border border-slate-200 text-slate-700 hover:bg-slate-100"
+                                }`}
+                              >
+                                メモ
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSelectedPendingFinance(g);
+                                  setIsModalOpen(true);
+                                }}
+                                className="inline-flex items-center justify-center rounded bg-slate-200 px-2 py-1 text-[10px] font-medium text-slate-700 hover:bg-slate-300 transition-colors"
+                              >
+                                手動処理
+                              </button>
+                            </div>
                           </div>
                         </div>
-                        <div className="shrink-0 text-right">
-                          <p className={`font-semibold tabular-nums ${g.net_amount >= 0 ? "text-slate-800" : "text-red-600"}`}>
-                            {g.net_amount >= 0 ? "" : "−"}
-                            {Math.abs(g.net_amount).toLocaleString()}円
+                        {g.internal_note_summary ? (
+                          <p className="text-[10px] text-slate-600 truncate pl-0.5" title={g.internal_note_summary}>
+                            メモ: {g.internal_note_summary}
                           </p>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSelectedPendingFinance(g);
-                              setIsModalOpen(true);
-                            }}
-                            className="mt-1 inline-flex items-center justify-center rounded bg-slate-200 px-2 py-1 text-[10px] font-medium text-slate-700 hover:bg-slate-300 transition-colors"
-                          >
-                            手動処理
-                          </button>
-                        </div>
+                        ) : null}
+                        {expandedMemoGroupId === g.groupId ? (
+                          <div className="w-full border-t border-slate-200 pt-2 space-y-1.5">
+                            <textarea
+                              value={memoDraftByGroupId[g.groupId] ?? ""}
+                              onChange={(e) => setMemoDraftByGroupId((d) => ({ ...d, [g.groupId]: e.target.value }))}
+                              rows={3}
+                              placeholder="社内メモ（このグループの全明細に同じ内容で保存）"
+                              className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-[11px] text-slate-800 placeholder:text-slate-400 focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-300/40"
+                            />
+                            <div className="flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                disabled={memoSavingGroupId === g.groupId}
+                                onClick={() => void saveMemoOnlyForGroup(g)}
+                                className="inline-flex items-center justify-center rounded bg-slate-800 px-2.5 py-1 text-[10px] font-medium text-white hover:bg-slate-900 disabled:opacity-50"
+                              >
+                                {memoSavingGroupId === g.groupId ? "保存中…" : "メモだけ保存"}
+                              </button>
+                            </div>
+                            {memoFlashByGroupId[g.groupId] ? (
+                              <p
+                                className={`text-[10px] ${
+                                  memoFlashByGroupId[g.groupId].type === "ok" ? "text-emerald-700" : "text-red-600"
+                                }`}
+                              >
+                                {memoFlashByGroupId[g.groupId].text}
+                              </p>
+                            ) : null}
+                          </div>
+                        ) : null}
                       </li>
                     ))}
                   </ul>

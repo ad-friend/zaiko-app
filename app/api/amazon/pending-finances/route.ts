@@ -14,6 +14,7 @@ import {
 } from "@/lib/pending-finance-group-kind";
 import { isPrincipalTaxOffsetQuad } from "@/lib/amazon-principal-tax-quad";
 import { canRefundPositiveOffsetForRows } from "@/lib/amazon-refund-offset-like";
+import { internalNoteSummaryForGroup } from "@/lib/amazon-pending-finance-internal-note";
 
 export type PendingFinanceDetail = {
   id: number;
@@ -24,6 +25,7 @@ export type PendingFinanceDetail = {
   amount_description: string | null;
   amount: number;
   posted_date: string;
+  internal_note?: string | null;
   [key: string]: unknown;
 };
 
@@ -45,6 +47,8 @@ export type PendingFinanceGroup = {
   can_order_reconcile: boolean;
   /** 返金+プラス売上の相殺完結を出してよいか */
   can_refund_positive_offset: boolean;
+  /** グループ内 internal_note の一覧用サマリ（STEP5 カード表示） */
+  internal_note_summary: string | null;
 };
 
 export async function GET() {
@@ -67,34 +71,39 @@ export async function GET() {
       return keywords.some((k) => hay.includes(k));
     };
 
-    let rows: any[] | null = null;
-    {
-      const res = await supabase
-        .from("sales_transactions")
-        .select("id, amazon_order_id, sku, transaction_type, amount_type, amount_description, amount, posted_date, status")
-        .is("stock_id", null)
-        .or("status.is.null,status.neq.reconciled")
-        .order("posted_date", { ascending: false });
+    const selectVariants = [
+      "id, amazon_order_id, sku, transaction_type, amount_type, amount_description, amount, posted_date, status, internal_note",
+      "id, amazon_order_id, sku, transaction_type, amount_type, amount_description, amount, posted_date, status",
+      "id, amazon_order_id, sku, transaction_type, amount_type, amount_description, amount, posted_date, internal_note",
+      "id, amazon_order_id, sku, transaction_type, amount_type, amount_description, amount, posted_date",
+    ] as const;
+
+    let rows: any[] = [];
+    for (let i = 0; i < selectVariants.length; i++) {
+      const sel = selectVariants[i];
+      let q = supabase.from("sales_transactions").select(sel).is("stock_id", null);
+      if (sel.includes("status")) {
+        q = q.or("status.is.null,status.neq.reconciled");
+      }
+      const res = await q.order("posted_date", { ascending: false });
       if (!res.error) {
         rows = res.data ?? [];
-      } else {
-        const code = (res.error as any)?.code;
-        const msg = (res.error as any)?.message ?? "";
-        if (code !== "42703" && !msg.includes("status")) throw res.error;
+        break;
       }
+      const msg = String((res.error as { message?: string }).message ?? "").toLowerCase();
+      const code = String((res.error as { code?: string }).code ?? "");
+      const last = i === selectVariants.length - 1;
+      if (last) throw res.error;
+      const wantsNote = sel.includes("internal_note");
+      const wantsStatus = sel.includes("status");
+      const missingInternal = msg.includes("internal_note");
+      const missingStatus = code === "42703" || msg.includes("status");
+      if (wantsNote && missingInternal) continue;
+      if (wantsStatus && missingStatus) continue;
+      throw res.error;
     }
 
-    if (rows == null) {
-      const { data, error } = await supabase
-        .from("sales_transactions")
-        .select("id, amazon_order_id, sku, transaction_type, amount_type, amount_description, amount, posted_date")
-        .is("stock_id", null)
-        .order("posted_date", { ascending: false });
-      if (error) throw error;
-      rows = data ?? [];
-    }
-
-    let list = (rows ?? []) as PendingFinanceDetail[];
+    let list = rows as PendingFinanceDetail[];
 
     list = list.filter((row) => {
       if (shouldExcludeByType((row as any).transaction_type, (row as any).amount_type, (row as any).amount_description)) {
@@ -144,6 +153,7 @@ export async function GET() {
         realOrder && !is_principal_tax_quad && group_kind !== "adjustment_like";
 
       const can_refund_positive_offset = realOrder && canRefundPositiveOffsetForRows(details);
+      const internal_note_summary = internalNoteSummaryForGroup(details);
 
       groups.push({
         groupId,
@@ -159,6 +169,7 @@ export async function GET() {
         is_principal_tax_quad,
         can_order_reconcile,
         can_refund_positive_offset,
+        internal_note_summary,
       });
     }
 
