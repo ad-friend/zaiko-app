@@ -26,6 +26,9 @@ export type PendingFinanceDetail = {
   amount: number;
   posted_date: string;
   internal_note?: string | null;
+  item_quantity?: number;
+  finance_line_group_id?: string | null;
+  needs_quantity_review?: boolean;
   [key: string]: unknown;
 };
 
@@ -49,6 +52,8 @@ export type PendingFinanceGroup = {
   can_refund_positive_offset: boolean;
   /** グループ内 internal_note の一覧用サマリ（STEP5 カード表示） */
   internal_note_summary: string | null;
+  /** 明細の needs_quantity_review の OR（要確認アラート） */
+  needs_quantity_review?: boolean;
 };
 
 export async function GET() {
@@ -72,6 +77,7 @@ export async function GET() {
     };
 
     const selectVariants = [
+      "id, amazon_order_id, sku, transaction_type, amount_type, amount_description, amount, posted_date, status, internal_note, item_quantity, finance_line_group_id, needs_quantity_review",
       "id, amazon_order_id, sku, transaction_type, amount_type, amount_description, amount, posted_date, status, internal_note",
       "id, amazon_order_id, sku, transaction_type, amount_type, amount_description, amount, posted_date, status",
       "id, amazon_order_id, sku, transaction_type, amount_type, amount_description, amount, posted_date, internal_note",
@@ -96,10 +102,13 @@ export async function GET() {
       if (last) throw res.error;
       const wantsNote = sel.includes("internal_note");
       const wantsStatus = sel.includes("status");
+      const wantsQtyCols = sel.includes("needs_quantity_review");
       const missingInternal = msg.includes("internal_note");
       const missingStatus = code === "42703" || msg.includes("status");
+      const missingQtyCols = code === "42703" || msg.includes("item_quantity") || msg.includes("needs_quantity_review");
       if (wantsNote && missingInternal) continue;
       if (wantsStatus && missingStatus) continue;
+      if (wantsQtyCols && missingQtyCols) continue;
       throw res.error;
     }
 
@@ -122,9 +131,12 @@ export async function GET() {
       const sku = row.sku?.trim() ?? null;
       const txType = row.transaction_type ?? "Unknown";
 
+      const finGid = String((row as { finance_line_group_id?: string | null }).finance_line_group_id ?? "").trim();
       let key: string;
       if (orderId) {
         key = orderId;
+      } else if (finGid) {
+        key = `adj_${txType}_${sku ?? "n/a"}_${posted}_${finGid}`;
       } else {
         key = `adj_${txType}_${sku ?? "n/a"}_${posted}_${row.id}`;
       }
@@ -154,6 +166,7 @@ export async function GET() {
 
       const can_refund_positive_offset = realOrder && canRefundPositiveOffsetForRows(details);
       const internal_note_summary = internalNoteSummaryForGroup(details);
+      const needs_quantity_review = details.some((d) => Boolean((d as { needs_quantity_review?: boolean }).needs_quantity_review));
 
       groups.push({
         groupId,
@@ -170,6 +183,7 @@ export async function GET() {
         can_order_reconcile,
         can_refund_positive_offset,
         internal_note_summary,
+        needs_quantity_review,
       });
     }
 

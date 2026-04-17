@@ -927,6 +927,11 @@ export default function AmazonReconcileManager() {
                               <span className="text-slate-500">
                                 {g.posted_date ? new Date(g.posted_date).toLocaleDateString("ja-JP", { month: "numeric", day: "numeric" }) : "—"}
                               </span>
+                              {g.needs_quantity_review ? (
+                                <span className="inline-flex shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold bg-amber-200 text-amber-950 border border-amber-400/60">
+                                  要確認
+                                </span>
+                              ) : null}
                             </div>
                           </div>
                           <div className="shrink-0 text-right">

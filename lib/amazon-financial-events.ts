@@ -21,7 +21,12 @@ type ShipmentEvent = {
   PostedDate?: string;
   ShipmentItemList?: ShipmentItem[];
 };
-type AdjustmentItem = { SellerSKU?: string; TotalAmount?: Currency };
+type AdjustmentItem = {
+  SellerSKU?: string;
+  TotalAmount?: Currency;
+  Quantity?: string | number;
+  PerUnitAmount?: Currency;
+};
 type AdjustmentEvent = {
   PostedDate?: string;
   AdjustmentType?: string;
@@ -79,7 +84,8 @@ function buildEventHash(
   amount: number,
   postedDate: string,
   eventIndex: number,
-  rowIndex: number
+  rowIndex: number,
+  unitIndex?: number | null
 ): string {
   const raw = [
     amazonOrderId ?? "",
@@ -90,8 +96,43 @@ function buildEventHash(
     postedDate,
     String(eventIndex),
     String(rowIndex),
+    unitIndex != null && unitIndex >= 0 ? `u${unitIndex}` : "",
   ].join("_");
   return createHash("sha256").update(raw).digest("hex");
+}
+
+/** 円ベース: 1 円未満の誤差まで許容 */
+function amountsClose(a: number, b: number, eps = 0.015): boolean {
+  return Math.abs(a - b) <= eps + 1e-9;
+}
+
+function splitSignedAmountToUnits(total: number, q: number): number[] {
+  const units = Math.max(1, Math.floor(q));
+  const cents = Math.round(total * 100);
+  const sign = cents >= 0 ? 1 : -1;
+  const mag = Math.abs(cents);
+  const base = Math.floor(mag / units);
+  const rem = mag - base * units;
+  const out: number[] = [];
+  for (let i = 0; i < units; i += 1) {
+    const c = base + (i < rem ? 1 : 0);
+    out.push((sign * c) / 100);
+  }
+  return out;
+}
+
+function parseAdjustmentQuantity(it: AdjustmentItem): { fromApi: boolean; q: number } {
+  const raw = (it as { Quantity?: string | number }).Quantity;
+  if (raw == null) return { fromApi: false, q: 1 };
+  const s = String(raw).trim();
+  if (!s) return { fromApi: false, q: 1 };
+  const n = parseInt(s, 10);
+  if (!Number.isFinite(n) || n < 1) return { fromApi: false, q: 1 };
+  return { fromApi: true, q: n };
+}
+
+function buildFinanceLineGroupId(parts: string[]): string {
+  return createHash("sha256").update(parts.join("|")).digest("hex").slice(0, 32);
 }
 
 export type SalesTransactionRow = {
@@ -103,6 +144,11 @@ export type SalesTransactionRow = {
   amount: number;
   posted_date: string;
   amazon_event_hash: string;
+  /** 既定 1。補填分割時も各行 1 */
+  item_quantity?: number;
+  finance_line_group_id?: string | null;
+  /** Quantity・PerUnit・Total が揃い P×Q≈T のときのみ false */
+  needs_quantity_review?: boolean;
 };
 
 function flattenShipmentEvents(list: ShipmentEvent[] | undefined, transactionType: string): SalesTransactionRow[] {
@@ -232,22 +278,67 @@ function flattenAdjustmentEvents(list: AdjustmentEvent[] | undefined): SalesTran
     const eventBase = toAmountMaybe(ev.AdjustmentAmount);
     const items = ev.AdjustmentItemList ?? [];
     if (items.length > 0) {
-      for (const it of items) {
+      items.forEach((it, itemIdx) => {
         const sku = it.SellerSKU?.trim() ?? null;
         const base = toAmountMaybe(it.TotalAmount);
-        if (base == null) continue;
-        const itemAmount = toSignedAmount(base, false);
-        rows.push({
-          amazon_order_id: null,
-          sku,
-          transaction_type: "Adjustment",
-          amount_type: adjType,
-          amount_description: null,
-          amount: itemAmount,
-          posted_date: posted,
-          amazon_event_hash: buildEventHash(null, "Adjustment", adjType, null, itemAmount, posted, eventIndex, rowIndex++),
-        });
-      }
+        if (base == null) return;
+        const itemSignedTotal = toSignedAmount(base, false);
+        const { fromApi, q: qRaw } = parseAdjustmentQuantity(it);
+        const q = Math.min(1000, Math.max(1, qRaw));
+        const perUnitBase = toAmountMaybe(it.PerUnitAmount);
+        const Psigned = perUnitBase != null ? toSignedAmount(perUnitBase, false) : null;
+        const quantityCertain =
+          fromApi && Psigned != null && amountsClose(Psigned * q, itemSignedTotal);
+        const needs_quantity_review = !quantityCertain;
+        const gid = buildFinanceLineGroupId([
+          "adj",
+          String(eventIndex),
+          String(itemIdx),
+          posted,
+          adjType,
+          sku ?? "",
+          String(itemSignedTotal),
+        ]);
+
+        if (q <= 1) {
+          rows.push({
+            amazon_order_id: null,
+            sku,
+            transaction_type: "Adjustment",
+            amount_type: adjType,
+            amount_description: null,
+            amount: itemSignedTotal,
+            posted_date: posted,
+            amazon_event_hash: buildEventHash(null, "Adjustment", adjType, null, itemSignedTotal, posted, eventIndex, rowIndex++, null),
+            item_quantity: 1,
+            finance_line_group_id: gid,
+            needs_quantity_review,
+          });
+          return;
+        }
+
+        const unitAmounts =
+          quantityCertain && Psigned != null
+            ? Array.from({ length: q }, () => Psigned)
+            : splitSignedAmountToUnits(itemSignedTotal, q);
+
+        for (let u = 0; u < q; u += 1) {
+          const amt = unitAmounts[u] ?? itemSignedTotal / q;
+          rows.push({
+            amazon_order_id: null,
+            sku,
+            transaction_type: "Adjustment",
+            amount_type: adjType,
+            amount_description: null,
+            amount: amt,
+            posted_date: posted,
+            amazon_event_hash: buildEventHash(null, "Adjustment", adjType, null, amt, posted, eventIndex, rowIndex++, u),
+            item_quantity: 1,
+            finance_line_group_id: gid,
+            needs_quantity_review,
+          });
+        }
+      });
     } else {
       if (eventBase == null) return;
       const amount = toSignedAmount(eventBase, false);
@@ -259,7 +350,10 @@ function flattenAdjustmentEvents(list: AdjustmentEvent[] | undefined): SalesTran
         amount_description: null,
         amount,
         posted_date: posted,
-        amazon_event_hash: buildEventHash(null, "Adjustment", adjType, null, amount, posted, eventIndex, rowIndex++),
+        amazon_event_hash: buildEventHash(null, "Adjustment", adjType, null, amount, posted, eventIndex, rowIndex++, null),
+        item_quantity: 1,
+        finance_line_group_id: null,
+        needs_quantity_review: true,
       });
     }
   });
@@ -387,6 +481,9 @@ export async function upsertSalesTransactionRows(allRows: SalesTransactionRow[])
     amount: r.amount,
     posted_date: r.posted_date,
     amazon_event_hash: r.amazon_event_hash,
+    item_quantity: r.item_quantity ?? 1,
+    finance_line_group_id: r.finance_line_group_id ?? null,
+    needs_quantity_review: r.needs_quantity_review ?? false,
   }));
 
   let inserted = 0;

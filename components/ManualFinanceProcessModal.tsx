@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { isPrincipalTaxOffsetQuad } from "@/lib/amazon-principal-tax-quad";
 import { consolidatedInternalNoteForEdit } from "@/lib/amazon-pending-finance-internal-note";
+import { isExpenseSkipTxForRefundOffset, toNumberAmount } from "@/lib/amazon-refund-offset-like";
 import type { PendingFinanceGroupKind } from "@/lib/pending-finance-group-kind";
 
 export type PendingFinanceDetail = {
@@ -15,6 +16,9 @@ export type PendingFinanceDetail = {
   amount: number;
   posted_date: string;
   internal_note?: string | null;
+  item_quantity?: number;
+  finance_line_group_id?: string | null;
+  needs_quantity_review?: boolean;
   [key: string]: unknown;
 };
 
@@ -35,6 +39,7 @@ export type PendingFinanceGroupData = {
   can_refund_positive_offset?: boolean;
   /** STEP5 カード用（API: pending-finances） */
   internal_note_summary?: string | null;
+  needs_quantity_review?: boolean;
 };
 
 export type CandidateStock = {
@@ -164,7 +169,6 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
   const [candidateStocks, setCandidateStocks] = useState<CandidateStock[]>([]);
   const [adjustmentCandidates, setAdjustmentCandidates] = useState<CandidateStock[]>([]);
   const [selectedStockId, setSelectedStockId] = useState<number | null>(null);
-  const [selectedAdjustmentStockId, setSelectedAdjustmentStockId] = useState<number | null>(null);
   const [loadingCandidates, setLoadingCandidates] = useState(false);
   const [loadingAdjustmentCandidates, setLoadingAdjustmentCandidates] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -181,11 +185,25 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
   const [adjustmentRescueLoading, setAdjustmentRescueLoading] = useState(false);
   const [adjustmentRescueError, setAdjustmentRescueError] = useState<string | null>(null);
   const [adjustmentRescueExtra, setAdjustmentRescueExtra] = useState<CandidateStock[]>([]);
+  /** 補填の正の明細行ごとの在庫 inbound_items.id */
+  const [adjustmentStockByTxId, setAdjustmentStockByTxId] = useState<Record<number, number | null>>({});
 
   const details = data?.raw_details ?? [];
   const netAmount = data?.net_amount ?? 0;
   const isQuad = data != null && isQuadFromData(data);
   const isAdjustment = data != null && isAdjustmentGroupData(data);
+
+  const adjustmentAttachRows = useMemo(() => {
+    return details.filter(
+      (row) =>
+        toNumberAmount(row.amount) > 0 &&
+        !isExpenseSkipTxForRefundOffset({
+          amount_type: row.amount_type,
+          transaction_type: row.transaction_type,
+          amount_description: row.amount_description,
+        })
+    );
+  }, [details]);
 
   const modeOptions = data ? buildModeOptions(data) : [];
 
@@ -302,7 +320,22 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
     const d = defaultProcessMode(data);
     setProcessMode(allowed.has(d) ? d : (opts[0]?.id ?? "order_reconcile"));
     setSelectedStockId(null);
-    setSelectedAdjustmentStockId(null);
+    {
+      const m: Record<number, number | null> = {};
+      for (const r of data.raw_details ?? []) {
+        if (
+          toNumberAmount(r.amount) > 0 &&
+          !isExpenseSkipTxForRefundOffset({
+            amount_type: r.amount_type,
+            transaction_type: r.transaction_type,
+            amount_description: r.amount_description,
+          })
+        ) {
+          m[r.id] = null;
+        }
+      }
+      setAdjustmentStockByTxId(m);
+    }
     setError(null);
     setShowReleaseInbound(false);
     setInternalNote(consolidatedInternalNoteForEdit(data.raw_details ?? []));
@@ -354,7 +387,6 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
   useEffect(() => {
     if (!isOpen || !data || processMode !== "adjustment_with_stock") {
       setAdjustmentCandidates([]);
-      setSelectedAdjustmentStockId(null);
       setAdjustmentRescueExtra([]);
       setAdjustmentRescueQuery("");
       setAdjustmentRescueError(null);
@@ -366,7 +398,6 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
     const sku = (data.sku ?? "").trim();
     if (!sku) {
       setAdjustmentCandidates([]);
-      setSelectedAdjustmentStockId(null);
       return;
     }
     setLoadingAdjustmentCandidates(true);
@@ -374,7 +405,6 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
       .then((res) => (res.ok ? res.json() : []))
       .then((list) => {
         setAdjustmentCandidates(Array.isArray(list) ? list : []);
-        setSelectedAdjustmentStockId(null);
       })
       .catch(() => setAdjustmentCandidates([]))
       .finally(() => setLoadingAdjustmentCandidates(false));
@@ -463,9 +493,18 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
       setError("明細がありません。");
       return;
     }
-    if (withStock && selectedAdjustmentStockId == null) {
-      setError("在庫を選択してください。");
-      return;
+    if (withStock) {
+      if (adjustmentAttachRows.length === 0) {
+        setError("在庫に紐付けられる正の明細がありません。");
+        return;
+      }
+      const allPicked = adjustmentAttachRows.every(
+        (r) => adjustmentStockByTxId[r.id] != null && Number(adjustmentStockByTxId[r.id]) >= 1
+      );
+      if (!allPicked) {
+        setError("正の明細ごとに在庫を選択してください。");
+        return;
+      }
     }
     if (withStock) {
       if (!confirmHeavyAction("補填: 在庫へ紐付け（settled_at 更新）")) return;
@@ -477,12 +516,19 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
     setError(null);
     try {
       // internal_note は adjustment-settle API 側でまとめて更新する（二重更新を避ける）
+      const allocations = withStock
+        ? adjustmentAttachRows.map((r) => ({
+            salesTransactionId: r.id,
+            stockId: adjustmentStockByTxId[r.id] as number,
+          }))
+        : undefined;
       const res = await fetch("/api/amazon/manual-finance-adjustment-settle", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           salesTransactionIds: ids,
-          stockId: withStock ? selectedAdjustmentStockId : null,
+          stockId: null,
+          allocations: withStock ? allocations : undefined,
           internal_note: internalNote.trim() ? internalNote.trim() : null,
         }),
       });
@@ -556,6 +602,15 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
               <p className="text-xs text-amber-950/90 leading-relaxed">
                 「調整」は補填だけとは限りません。基本は <span className="font-semibold">財務のみ完結</span> を推奨します。
                 本消込・返金相殺は在庫/売上整合に影響するため、実行前に二段確認が出ます。
+              </p>
+            </div>
+          )}
+
+          {(data?.needs_quantity_review === true || details.some((d) => d.needs_quantity_review === true)) && (
+            <div className="mb-5 rounded-lg border border-amber-300 bg-amber-100/80 p-3">
+              <p className="text-xs font-semibold text-amber-950">要確認</p>
+              <p className="text-xs text-amber-950/95 mt-1 leading-relaxed">
+                Amazon 明細で個数・単価・合計の「確実」条件を満たしていません。内容を確認してから消込してください。
               </p>
             </div>
           )}
@@ -897,23 +952,34 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                           <p className="text-[11px] text-sky-800/90">レスキュー検索で {adjustmentRescueExtra.length} 件ヒット（下の候補に反映されます）</p>
                         ) : null}
                       </div>
+                    ) : adjustmentAttachRows.length === 0 ? (
+                      <p className="text-xs text-slate-500">在庫に紐付ける正の明細がありません。</p>
                     ) : (
-                      <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50/50 p-3 max-h-56 overflow-y-auto">
-                        {mergedAdjustmentCandidates.map((s) => (
-                          <label key={s.id} className="flex items-center gap-3 cursor-pointer">
-                            <input
-                              type="radio"
-                              name="adj-stock-select"
-                              checked={selectedAdjustmentStockId === s.id}
-                              onChange={() => setSelectedAdjustmentStockId(s.id)}
-                              className="rounded-full border-slate-300 text-emerald-600"
-                            />
-                            <span className="text-sm text-slate-600">
-                              ID: {s.id} — {s.product_name || s.sku || "—"} (
-                              {s.created_at ? new Date(s.created_at).toLocaleDateString("ja-JP") : ""})
-                              {s.unit_cost ? ` · ${Number(s.unit_cost).toLocaleString()}円` : ""}
-                            </span>
-                          </label>
+                      <div className="space-y-3 max-h-72 overflow-y-auto pr-0.5">
+                        {adjustmentAttachRows.map((row) => (
+                          <div key={row.id} className="rounded-lg border border-slate-200 bg-slate-50/50 p-2.5 space-y-2">
+                            <p className="text-[11px] font-semibold text-slate-700">
+                              明細 ID {row.id} · {toNumberAmount(row.amount).toLocaleString()} 円
+                            </p>
+                            <div className="space-y-1 max-h-36 overflow-y-auto">
+                              {mergedAdjustmentCandidates.map((s) => (
+                                <label key={`${row.id}-${s.id}`} className="flex items-center gap-2 cursor-pointer">
+                                  <input
+                                    type="radio"
+                                    name={`adj-stock-${row.id}`}
+                                    checked={adjustmentStockByTxId[row.id] === s.id}
+                                    onChange={() => setAdjustmentStockByTxId((prev) => ({ ...prev, [row.id]: s.id }))}
+                                    className="rounded-full border-slate-300 text-emerald-600"
+                                  />
+                                  <span className="text-xs text-slate-600">
+                                    ID: {s.id} — {s.product_name || s.sku || "—"} (
+                                    {s.created_at ? new Date(s.created_at).toLocaleDateString("ja-JP") : ""})
+                                    {s.unit_cost ? ` · ${Number(s.unit_cost).toLocaleString()}円` : ""}
+                                  </span>
+                                </label>
+                              ))}
+                            </div>
+                          </div>
                         ))}
                       </div>
                     )}
@@ -955,7 +1021,13 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                     <button
                       type="button"
                       onClick={() => void handleAdjustmentSettle(true)}
-                      disabled={submitting || selectedAdjustmentStockId == null}
+                      disabled={
+                        submitting ||
+                        adjustmentAttachRows.length === 0 ||
+                        !adjustmentAttachRows.every(
+                          (r) => adjustmentStockByTxId[r.id] != null && Number(adjustmentStockByTxId[r.id]) >= 1
+                        )
+                      }
                       className="w-full inline-flex items-center justify-center rounded-lg bg-emerald-700 text-white py-2.5 px-4 text-sm font-semibold hover:bg-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
                     >
                       {submitting ? "処理中..." : "在庫を紐付けて消込する"}
