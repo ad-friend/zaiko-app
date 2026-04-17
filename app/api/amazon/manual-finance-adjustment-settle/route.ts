@@ -3,7 +3,7 @@
  * - 財務: 指定明細を reconciled に（在庫紐付けなしでも可）
  * - 任意: stockId 指定時、金額が正で経費スキップ対象でない行に stock_id / unit_cost を付与し、
  *   inbound_items.settled_at のみ更新（order_id は補填では変更しない）
- * POST body: { salesTransactionIds: number[], stockId?: number | null }
+ * POST body: { salesTransactionIds: number[], stockId?: number | null, internal_note?: string | null }
  */
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
@@ -38,6 +38,10 @@ export async function POST(request: NextRequest) {
           ? Number(stockIdRaw)
           : null;
 
+    const noteRaw = (body as { internal_note?: unknown }).internal_note;
+    const internal_note =
+      noteRaw == null ? null : typeof noteRaw === "string" ? noteRaw.trim() || null : String(noteRaw).trim() || null;
+
     if (ids.length === 0) {
       return NextResponse.json({ error: "salesTransactionIds を1件以上指定してください。" }, { status: 400 });
     }
@@ -50,19 +54,19 @@ export async function POST(request: NextRequest) {
     {
       const res = await supabase
         .from("sales_transactions")
-        .select("id, transaction_type, amount_type, amount_description, amount, posted_date, stock_id, status")
+        .select("id, transaction_type, amount_type, amount_description, amount, posted_date, stock_id, status, internal_note")
         .in("id", ids);
       if (!res.error) rows = (res.data ?? []) as TxRow[];
       else {
         const code = (res.error as { code?: string })?.code;
         const msg = (res.error as { message?: string })?.message ?? "";
-        if (code !== "42703" && !msg.includes("status")) throw res.error;
+        if (code !== "42703" && !msg.includes("status") && !msg.includes("internal_note")) throw res.error;
       }
     }
     if (rows == null) {
       const { data, error } = await supabase
         .from("sales_transactions")
-        .select("id, transaction_type, amount_type, amount_description, amount, posted_date, stock_id")
+        .select("id, transaction_type, amount_type, amount_description, amount, posted_date, stock_id, internal_note")
         .in("id", ids);
       if (error) throw error;
       rows = (data ?? []) as TxRow[];
@@ -131,6 +135,23 @@ export async function POST(request: NextRequest) {
     }
 
     await markSalesTransactionsReconciled(ids);
+
+    if (internal_note != null) {
+      const { error: noteErr } = await supabase.from("sales_transactions").update({ internal_note }).in("id", ids);
+      if (noteErr) {
+        const msg = (noteErr as { message?: string })?.message ?? "";
+        if (msg.toLowerCase().includes("internal_note")) {
+          return NextResponse.json(
+            {
+              error:
+                "internal_note 列がありません。docs/migration_sales_transactions_internal_note.sql を Supabase で実行してください。",
+            },
+            { status: 500 }
+          );
+        }
+        throw noteErr;
+      }
+    }
 
     return NextResponse.json({
       ok: true,

@@ -57,6 +57,34 @@ type Props = {
   onSuccess?: () => void;
 };
 
+function normalizeTxType(raw: string | null | undefined): string {
+  return String(raw ?? "").normalize("NFKC").trim().toLowerCase();
+}
+
+function isAdjustmentTransactionType(raw: string | null | undefined): boolean {
+  const t = normalizeTxType(raw);
+  if (!t) return false;
+  if (t === "adjustment") return true;
+  if (t.includes("adjustment")) return true;
+  // Amazon 日本語レポート
+  if (raw != null && String(raw).normalize("NFKC").includes("調整")) return true;
+  return false;
+}
+
+function isAdjustmentGroupData(data: PendingFinanceGroupData): boolean {
+  if (data.group_kind === "adjustment_like") return true;
+  const rows = data.raw_details ?? [];
+  if (rows.some((r) => isAdjustmentTransactionType(r.transaction_type))) return true;
+  if (isAdjustmentTransactionType(data.transaction_type)) return true;
+  if (isAdjustmentTransactionType(data.representative_transaction_type)) return true;
+  return false;
+}
+
+function isS03LikeOrderId(raw: string | null | undefined): boolean {
+  const s = String(raw ?? "").trim().toUpperCase();
+  return s.startsWith("S03-");
+}
+
 function isQuadFromData(data: PendingFinanceGroupData): boolean {
   return (
     data.is_principal_tax_quad === true ||
@@ -67,14 +95,19 @@ function isQuadFromData(data: PendingFinanceGroupData): boolean {
 
 function buildModeOptions(data: PendingFinanceGroupData): { id: ProcessMode; label: string }[] {
   const isQuad = isQuadFromData(data);
-  const isAdjustment = data.group_kind === "adjustment_like";
+  const isAdjustment = isAdjustmentGroupData(data);
   const opts: { id: ProcessMode; label: string }[] = [];
   if (isQuad) opts.push({ id: "principal_tax_offset", label: "Principal / Tax 相殺（在庫は基本触らない）" });
-  if (data.can_order_reconcile) opts.push({ id: "order_reconcile", label: "注文売上の本消込（在庫を選択）" });
-  if (data.can_refund_positive_offset) opts.push({ id: "refund_positive_offset", label: "返金＋プラス売上の相殺完結（在庫は触らない）" });
+  // 調整は用途が混在し得るため、API側の可否に依存せず選択肢を出す（危険操作は実行前に二段確認）
   if (isAdjustment) {
-    opts.push({ id: "adjustment_finance_only", label: "補填・財務のみ完結" });
+    opts.push({ id: "adjustment_finance_only", label: "補填・財務のみ完結（推奨）" });
     opts.push({ id: "adjustment_with_stock", label: "補填・在庫にも紐付け（SKU→JAN候補から選択）" });
+  }
+  if (data.amazon_order_id?.trim()) {
+    opts.push({ id: "order_reconcile", label: "注文売上の本消込（在庫を選択）※調整では通常不要" });
+  }
+  if (data.amazon_order_id?.trim()) {
+    opts.push({ id: "refund_positive_offset", label: "返金＋プラス売上の相殺完結（在庫は触らない）※条件により失敗します" });
   }
   return opts;
 }
@@ -82,7 +115,9 @@ function buildModeOptions(data: PendingFinanceGroupData): { id: ProcessMode; lab
 function defaultProcessMode(data: PendingFinanceGroupData | null): ProcessMode {
   if (!data) return "order_reconcile";
   if (isQuadFromData(data)) return "principal_tax_offset";
-  if (data.group_kind === "adjustment_like") return "adjustment_finance_only";
+  if (isAdjustmentGroupData(data)) {
+    return "adjustment_finance_only";
+  }
   if (data.can_refund_positive_offset) return "refund_positive_offset";
   if (data.can_order_reconcile) return "order_reconcile";
   return "adjustment_finance_only";
@@ -99,13 +134,35 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showReleaseInbound, setShowReleaseInbound] = useState(false);
+  const [internalNote, setInternalNote] = useState("");
 
   const details = data?.raw_details ?? [];
   const netAmount = data?.net_amount ?? 0;
   const isQuad = data != null && isQuadFromData(data);
-  const isAdjustment = data?.group_kind === "adjustment_like";
+  const isAdjustment = data != null && isAdjustmentGroupData(data);
 
   const modeOptions = data ? buildModeOptions(data) : [];
+
+  async function persistInternalNoteIfNeeded(ids: number[]): Promise<void> {
+    const note = internalNote.trim();
+    if (!note) return;
+    if (ids.length === 0) return;
+    const res = await fetch("/api/amazon/sales-transactions/internal-note", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ salesTransactionIds: ids, internal_note: note }),
+    });
+    const json = (await res.json().catch(() => ({}))) as { error?: string };
+    if (!res.ok) throw new Error(typeof json.error === "string" ? json.error : "internal_note の保存に失敗しました");
+  }
+
+  function confirmHeavyAction(label: string): boolean {
+    const first = window.confirm(
+      `${label}\n\nこの操作は在庫・売上整合に影響します。本当に続行しますか？\n（調整行では誤用に注意してください）`
+    );
+    if (!first) return false;
+    return window.confirm("最終確認: 続行しますか？");
+  }
 
   useEffect(() => {
     if (!isOpen || !data) return;
@@ -117,7 +174,18 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
     setSelectedAdjustmentStockId(null);
     setError(null);
     setShowReleaseInbound(false);
-  }, [isOpen, data?.groupId, data?.group_kind, data?.can_order_reconcile, data?.can_refund_positive_offset, data?.is_principal_tax_quad]);
+    setInternalNote("");
+  }, [
+    isOpen,
+    data?.groupId,
+    data?.amazon_order_id,
+    data?.transaction_type,
+    data?.representative_transaction_type,
+    data?.group_kind,
+    data?.can_order_reconcile,
+    data?.can_refund_positive_offset,
+    data?.is_principal_tax_quad,
+  ]);
 
   useEffect(() => {
     if (!isOpen || !data || processMode !== "order_reconcile" || !data.amazon_order_id || isQuad) {
@@ -168,9 +236,13 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
       setError("明細IDが不正です。");
       return;
     }
+    if (action === "release_inbound") {
+      if (!confirmHeavyAction("Principal/Tax 相殺: 在庫の注文引当を解除")) return;
+    }
     setSubmitting(true);
     setError(null);
     try {
+      await persistInternalNoteIfNeeded(ids);
       const res = await fetch("/api/amazon/manual-finance-principal-tax-settle", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -189,9 +261,11 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
 
   const handleConfirmOrder = async () => {
     if (!data || selectedStockId == null) return;
+    if (!confirmHeavyAction("注文売上の本消込（在庫へ紐付け）")) return;
     setSubmitting(true);
     setError(null);
     try {
+      await persistInternalNoteIfNeeded(details.map((d) => d.id));
       const res = await fetch("/api/amazon/manual-reconcile-order", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -210,9 +284,11 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
 
   const handleRefundPositiveOffset = async () => {
     if (!data?.amazon_order_id) return;
+    if (!confirmHeavyAction("返金＋プラス売上の相殺完結")) return;
     setSubmitting(true);
     setError(null);
     try {
+      await persistInternalNoteIfNeeded(details.map((d) => d.id));
       const res = await fetch("/api/amazon/manual-finance-refund-offset", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -240,15 +316,23 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
       setError("在庫を選択してください。");
       return;
     }
+    if (withStock) {
+      if (!confirmHeavyAction("補填: 在庫へ紐付け（settled_at 更新）")) return;
+    } else if (internalNote.trim()) {
+      // メモのみでも確認（誤記防止）
+      if (!confirmHeavyAction("補填: 財務のみ消込（メモ付き）")) return;
+    }
     setSubmitting(true);
     setError(null);
     try {
+      // internal_note は adjustment-settle API 側でまとめて更新する（二重更新を避ける）
       const res = await fetch("/api/amazon/manual-finance-adjustment-settle", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           salesTransactionIds: ids,
           stockId: withStock ? selectedAdjustmentStockId : null,
+          internal_note: internalNote.trim() ? internalNote.trim() : null,
         }),
       });
       const json = await res.json();
@@ -314,6 +398,37 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
               </div>
             </div>
           )}
+
+          {isAdjustment && (
+            <div className="mb-5 rounded-lg border border-amber-200 bg-amber-50/60 p-3">
+              <p className="text-xs font-semibold text-amber-950 mb-2">調整行の注意</p>
+              <p className="text-xs text-amber-950/90 leading-relaxed">
+                「調整」は補填だけとは限りません。基本は <span className="font-semibold">財務のみ完結</span> を推奨します。
+                本消込・返金相殺は在庫/売上整合に影響するため、実行前に二段確認が出ます。
+              </p>
+            </div>
+          )}
+
+          {data &&
+          ((isAdjustment && isS03LikeOrderId(data.amazon_order_id ?? data.groupId)) || internalNote.trim().length > 0) ? (
+            <div className="mb-5 rounded-lg border border-slate-200 bg-white p-3">
+              <label className="block text-xs font-semibold text-slate-700 mb-2" htmlFor="internal-note">
+                社内メモ（任意）<span className="font-normal text-slate-500"> — sales_transactions.internal_note</span>
+              </label>
+              <textarea
+                id="internal-note"
+                value={internalNote}
+                onChange={(e) => setInternalNote(e.target.value)}
+                rows={3}
+                placeholder="例: 関連JAN=4901234567890 / 元注文=249-xxxx / 補填理由=..."
+                className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 placeholder:text-slate-400 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-300/30"
+              />
+              <p className="mt-2 text-[11px] text-slate-500 leading-relaxed">
+                DBに <span className="font-mono">internal_note</span> 列が無い場合は、先に{" "}
+                <span className="font-mono">docs/migration_sales_transactions_internal_note.sql</span> を Supabase で実行してください。
+              </p>
+            </div>
+          ) : null}
 
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
             <div className="rounded-xl border border-slate-200 bg-slate-50/30 overflow-hidden">
@@ -407,7 +522,7 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                 </>
               )}
 
-              {processMode === "order_reconcile" && data?.can_order_reconcile && (
+              {processMode === "order_reconcile" && Boolean(data?.amazon_order_id?.trim()) && (
                 <>
                   <h3 className="bg-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-700 border-b border-slate-200">
                     紐付ける在庫の選択
@@ -416,6 +531,11 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                     <p className="text-xs text-slate-500">
                       この注文に紐づける在庫を選び、本消込を実行します（棚卸のため在庫と売上を一致させます）。
                     </p>
+                    {isAdjustment && !data?.can_order_reconcile ? (
+                      <p className="text-xs font-semibold text-amber-900 bg-amber-50 border border-amber-100 rounded px-2 py-1.5">
+                        注意: このグループは自動判定では「注文本消込」対象外です。調整行に対して本消込を実行すると失敗する可能性があります。
+                      </p>
+                    ) : null}
                     {loadingCandidates ? (
                       <p className="text-sm text-slate-500 py-4 text-center">在庫候補を取得中...</p>
                     ) : candidateStocks.length === 0 ? (
@@ -454,7 +574,7 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                 </>
               )}
 
-              {processMode === "refund_positive_offset" && data?.can_refund_positive_offset && (
+              {processMode === "refund_positive_offset" && Boolean(data?.amazon_order_id?.trim()) && (
                 <>
                   <h3 className="bg-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-700 border-b border-slate-200">
                     返金＋プラス売上の相殺
@@ -463,6 +583,11 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                     <p className="text-xs text-slate-600">
                       同一注文でプラスの売上行と返金行が揃っている場合、在庫を変えずに財務上だけ相殺済みにできます（自動本消込と同じ考え方）。
                     </p>
+                    {!data?.can_refund_positive_offset ? (
+                      <p className="text-xs font-semibold text-amber-900 bg-amber-50 border border-amber-100 rounded px-2 py-1.5">
+                        注意: このグループは自動判定では「返金相殺」条件を満たしていません。実行するとAPI側で拒否される可能性があります。
+                      </p>
+                    ) : null}
                     <p className="text-xs text-amber-800 bg-amber-50 border border-amber-100 rounded px-2 py-1.5">
                       返品の実物在庫は「返品検品」等の在庫フローで処理してください。
                     </p>

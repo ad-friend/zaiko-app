@@ -21,6 +21,8 @@ export function isAdjustmentLike(details: PendingFinanceDetailLike[]): boolean {
     if (
       hay.includes("adjustment") ||
       hay.includes("adjust") ||
+      // Amazon 日本語レポートの「調整」行（CSV）など
+      hay.includes("調整") ||
       hay.includes("補填") ||
       hay.includes("goodwill") ||
       hay.includes("claim") ||
