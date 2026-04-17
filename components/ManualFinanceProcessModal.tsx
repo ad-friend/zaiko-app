@@ -122,6 +122,43 @@ function defaultProcessMode(data: PendingFinanceGroupData | null): ProcessMode {
   return "adjustment_finance_only";
 }
 
+type ApiCandidateRow = {
+  id: number;
+  sku: string | null;
+  brand: string | null;
+  model_number: string | null;
+  condition: string | null;
+  unit_cost: number;
+  created_at: string | null;
+  amazon_order_id: string | null;
+};
+
+function mapApiRowsToCandidateStocks(list: unknown): CandidateStock[] {
+  if (!Array.isArray(list)) return [];
+  return (list as ApiCandidateRow[])
+    .map((r) => ({
+      id: Number(r.id),
+      sku: r.sku ?? null,
+      condition: r.condition ?? null,
+      unit_cost: Number(r.unit_cost ?? 0),
+      amazon_order_id: r.amazon_order_id ?? null,
+      product_name:
+        [r.brand, r.model_number]
+          .map((x) => String(x ?? "").trim())
+          .filter(Boolean)
+          .join(" / ") || null,
+      created_at: r.created_at ?? null,
+    }))
+    .filter((x) => Number.isFinite(x.id) && x.id >= 1);
+}
+
+function mergeCandidateStocksById(base: CandidateStock[], extra: CandidateStock[]): CandidateStock[] {
+  const m = new Map<number, CandidateStock>();
+  for (const c of base) m.set(c.id, c);
+  for (const c of extra) m.set(c.id, c);
+  return [...m.values()].sort((a, b) => a.id - b.id);
+}
+
 export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuccess }: Props) {
   const [processMode, setProcessMode] = useState<ProcessMode>("order_reconcile");
   const [candidateStocks, setCandidateStocks] = useState<CandidateStock[]>([]);
@@ -134,6 +171,16 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
   const [error, setError] = useState<string | null>(null);
   const [showReleaseInbound, setShowReleaseInbound] = useState(false);
   const [internalNote, setInternalNote] = useState("");
+  /** 本消込: Amazon 消込カードと同様の JAN/商品名レスキュー検索 */
+  const [orderRescueQuery, setOrderRescueQuery] = useState("");
+  const [orderRescueLoading, setOrderRescueLoading] = useState(false);
+  const [orderRescueError, setOrderRescueError] = useState<string | null>(null);
+  const [orderRescueExtra, setOrderRescueExtra] = useState<CandidateStock[]>([]);
+  /** 補填・在庫紐付け: 同上 */
+  const [adjustmentRescueQuery, setAdjustmentRescueQuery] = useState("");
+  const [adjustmentRescueLoading, setAdjustmentRescueLoading] = useState(false);
+  const [adjustmentRescueError, setAdjustmentRescueError] = useState<string | null>(null);
+  const [adjustmentRescueExtra, setAdjustmentRescueExtra] = useState<CandidateStock[]>([]);
 
   const details = data?.raw_details ?? [];
   const netAmount = data?.net_amount ?? 0;
@@ -145,6 +192,15 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
   const rawDetailsNoteSig = useMemo(
     () => (data?.raw_details ?? []).map((d) => `${d.id}:${String(d.internal_note ?? "")}`).join("|"),
     [data?.groupId, data?.raw_details]
+  );
+
+  const mergedOrderCandidates = useMemo(
+    () => mergeCandidateStocksById(candidateStocks, orderRescueExtra),
+    [candidateStocks, orderRescueExtra]
+  );
+  const mergedAdjustmentCandidates = useMemo(
+    () => mergeCandidateStocksById(adjustmentCandidates, adjustmentRescueExtra),
+    [adjustmentCandidates, adjustmentRescueExtra]
   );
 
   async function persistInternalNoteIfNeeded(ids: number[]): Promise<void> {
@@ -168,6 +224,77 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
     return window.confirm("最終確認: 続行しますか？");
   }
 
+  async function runOrderRescueSearch() {
+    if (!data?.amazon_order_id?.trim()) {
+      setOrderRescueError("注文番号がありません。");
+      return;
+    }
+    const q = orderRescueQuery.trim();
+    if (!q) {
+      setOrderRescueError("検索語を入力してください。");
+      return;
+    }
+    setOrderRescueLoading(true);
+    setOrderRescueError(null);
+    try {
+      const params = new URLSearchParams({ search: q, amazon_order_id: data.amazon_order_id.trim() });
+      if (data.sku?.trim()) params.set("sku", data.sku.trim());
+      const res = await fetch(`/api/amazon/candidate-stocks?${params}`);
+      const raw: unknown = await res.json().catch(() => null);
+      if (!res.ok) {
+        const msg =
+          raw &&
+          typeof raw === "object" &&
+          "error" in raw &&
+          typeof (raw as { error?: unknown }).error === "string"
+            ? (raw as { error: string }).error
+            : "検索に失敗しました。";
+        throw new Error(msg);
+      }
+      const mapped = mapApiRowsToCandidateStocks(raw);
+      setOrderRescueExtra(mapped);
+      if (mapped.length === 0) setOrderRescueError("該当する在庫がありませんでした。");
+    } catch (e) {
+      setOrderRescueError(e instanceof Error ? e.message : "検索に失敗しました。");
+    } finally {
+      setOrderRescueLoading(false);
+    }
+  }
+
+  async function runAdjustmentRescueSearch() {
+    const q = adjustmentRescueQuery.trim();
+    if (!q) {
+      setAdjustmentRescueError("検索語を入力してください。");
+      return;
+    }
+    setAdjustmentRescueLoading(true);
+    setAdjustmentRescueError(null);
+    try {
+      const params = new URLSearchParams({ search: q });
+      const oid = data?.amazon_order_id?.trim();
+      if (oid) params.set("amazon_order_id", oid);
+      const res = await fetch(`/api/amazon/candidate-stocks?${params}`);
+      const raw: unknown = await res.json().catch(() => null);
+      if (!res.ok) {
+        const msg =
+          raw &&
+          typeof raw === "object" &&
+          "error" in raw &&
+          typeof (raw as { error?: unknown }).error === "string"
+            ? (raw as { error: string }).error
+            : "検索に失敗しました。";
+        throw new Error(msg);
+      }
+      const mapped = mapApiRowsToCandidateStocks(raw);
+      setAdjustmentRescueExtra(mapped);
+      if (mapped.length === 0) setAdjustmentRescueError("該当する在庫がありませんでした。");
+    } catch (e) {
+      setAdjustmentRescueError(e instanceof Error ? e.message : "検索に失敗しました。");
+    } finally {
+      setAdjustmentRescueLoading(false);
+    }
+  }
+
   useEffect(() => {
     if (!isOpen || !data) return;
     const opts = buildModeOptions(data);
@@ -179,6 +306,12 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
     setError(null);
     setShowReleaseInbound(false);
     setInternalNote(consolidatedInternalNoteForEdit(data.raw_details ?? []));
+    setOrderRescueQuery("");
+    setOrderRescueError(null);
+    setOrderRescueExtra([]);
+    setAdjustmentRescueQuery("");
+    setAdjustmentRescueError(null);
+    setAdjustmentRescueExtra([]);
   }, [
     isOpen,
     data?.groupId,
@@ -196,8 +329,14 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
     if (!isOpen || !data || processMode !== "order_reconcile" || !data.amazon_order_id || isQuad) {
       setCandidateStocks([]);
       setSelectedStockId(null);
+      setOrderRescueExtra([]);
+      setOrderRescueQuery("");
+      setOrderRescueError(null);
       return;
     }
+    setOrderRescueExtra([]);
+    setOrderRescueQuery("");
+    setOrderRescueError(null);
     setLoadingCandidates(true);
     const params = new URLSearchParams();
     params.set("amazon_order_id", data.amazon_order_id);
@@ -216,11 +355,18 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
     if (!isOpen || !data || processMode !== "adjustment_with_stock") {
       setAdjustmentCandidates([]);
       setSelectedAdjustmentStockId(null);
+      setAdjustmentRescueExtra([]);
+      setAdjustmentRescueQuery("");
+      setAdjustmentRescueError(null);
       return;
     }
+    setAdjustmentRescueExtra([]);
+    setAdjustmentRescueQuery("");
+    setAdjustmentRescueError(null);
     const sku = (data.sku ?? "").trim();
     if (!sku) {
       setAdjustmentCandidates([]);
+      setSelectedAdjustmentStockId(null);
       return;
     }
     setLoadingAdjustmentCandidates(true);
@@ -543,13 +689,46 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                     ) : null}
                     {loadingCandidates ? (
                       <p className="text-sm text-slate-500 py-4 text-center">在庫候補を取得中...</p>
-                    ) : candidateStocks.length === 0 ? (
-                      <p className="text-sm text-slate-500 py-4 text-center">
-                        紐付け可能な在庫がありません。検索で候補を広げる場合は Amazon 消込の在庫レスキューと同様に、必要なら別途検索UIを追加できます。
-                      </p>
+                    ) : mergedOrderCandidates.length === 0 ? (
+                      <div className="space-y-2 rounded-lg border border-red-100 bg-red-50/50 p-3">
+                        <p className="text-xs font-semibold text-red-800 flex items-start gap-1.5 leading-snug">
+                          <span className="shrink-0" aria-hidden>
+                            ⚠
+                          </span>
+                          紐付け可能な在庫がありません。JAN / ASIN を確認し在庫を登録してください。
+                        </p>
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
+                          <input
+                            type="text"
+                            value={orderRescueQuery}
+                            onChange={(e) => setOrderRescueQuery(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                void runOrderRescueSearch();
+                              }
+                            }}
+                            placeholder="例: 4901234567890 または 商品名の一部"
+                            disabled={orderRescueLoading || submitting}
+                            className="min-w-0 flex-1 rounded-md border border-sky-200 bg-white px-2.5 py-2 text-xs text-slate-800 placeholder:text-slate-400 focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-300/40"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void runOrderRescueSearch()}
+                            disabled={orderRescueLoading || submitting}
+                            className="inline-flex h-9 shrink-0 items-center justify-center rounded-md bg-sky-700 px-4 text-xs font-medium text-white hover:bg-sky-800 disabled:bg-slate-300"
+                          >
+                            {orderRescueLoading ? "検索中…" : "検索"}
+                          </button>
+                        </div>
+                        {orderRescueError ? <p className="text-[11px] font-medium text-red-700">{orderRescueError}</p> : null}
+                        {orderRescueExtra.length > 0 ? (
+                          <p className="text-[11px] text-sky-800/90">レスキュー検索で {orderRescueExtra.length} 件ヒット（下の候補に反映されます）</p>
+                        ) : null}
+                      </div>
                     ) : (
                       <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50/50 p-3 max-h-56 overflow-y-auto">
-                        {candidateStocks.map((s) => (
+                        {mergedOrderCandidates.map((s) => (
                           <label key={s.id} className="flex items-center gap-3 cursor-pointer">
                             <input
                               type="radio"
@@ -567,6 +746,41 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                         ))}
                       </div>
                     )}
+                    {mergedOrderCandidates.length > 0 && !loadingCandidates ? (
+                      <div className="space-y-2 rounded-lg border border-sky-100 bg-sky-50/40 p-3">
+                        <p className="text-[11px] text-slate-600 leading-snug">
+                          自動候補に無い場合: JAN または商品名の一部で追加検索（STEP3 注文カードのレスキューと同じ API）。
+                        </p>
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
+                          <input
+                            type="text"
+                            value={orderRescueQuery}
+                            onChange={(e) => setOrderRescueQuery(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                void runOrderRescueSearch();
+                              }
+                            }}
+                            placeholder="例: 4901234567890 または 商品名の一部"
+                            disabled={orderRescueLoading || submitting}
+                            className="min-w-0 flex-1 rounded-md border border-sky-200 bg-white px-2.5 py-2 text-xs text-slate-800 placeholder:text-slate-400 focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-300/40"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void runOrderRescueSearch()}
+                            disabled={orderRescueLoading || submitting}
+                            className="inline-flex h-9 shrink-0 items-center justify-center rounded-md bg-sky-700 px-4 text-xs font-medium text-white hover:bg-sky-800 disabled:bg-slate-300"
+                          >
+                            {orderRescueLoading ? "検索中…" : "検索"}
+                          </button>
+                        </div>
+                        {orderRescueError ? <p className="text-[11px] font-medium text-red-700">{orderRescueError}</p> : null}
+                        {orderRescueExtra.length > 0 ? (
+                          <p className="text-[11px] text-sky-800/90">レスキュー検索で {orderRescueExtra.length} 件を候補に反映しました</p>
+                        ) : null}
+                      </div>
+                    ) : null}
                     <button
                       type="button"
                       onClick={() => void handleConfirmOrder()}
@@ -637,16 +851,55 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                   <div className="p-4 space-y-4">
                     <p className="text-xs text-slate-600">
                       seller SKU から JAN を解き、該当 JAN の在庫候補を表示します。正の金額行に在庫と原価を付け、在庫に settled_at を立てます（order_id は変更しません）。
+                      自動候補が空やズレる場合は、下の JAN / 商品名検索で STEP3 と同様に候補を追加できます。
                     </p>
                     {!data?.sku?.trim() ? (
-                      <p className="text-sm text-amber-700">明細に SKU が無いため候補を出せません。財務のみ消込を選ぶか、データ取込を確認してください。</p>
-                    ) : loadingAdjustmentCandidates ? (
+                      <p className="text-xs text-amber-900 bg-amber-50 border border-amber-100 rounded px-2 py-1.5 leading-relaxed">
+                        明細に SKU が無いため、SKU 経由の自動候補は出ません。JAN / 商品名の検索で在庫を選んでください。
+                      </p>
+                    ) : null}
+                    {data?.sku?.trim() && loadingAdjustmentCandidates ? (
                       <p className="text-sm text-slate-500 py-4 text-center">在庫候補を取得中...</p>
-                    ) : adjustmentCandidates.length === 0 ? (
-                      <p className="text-sm text-slate-500 py-4 text-center">候補在庫がありません（マッピング・JAN を確認）。</p>
+                    ) : mergedAdjustmentCandidates.length === 0 ? (
+                      <div className="space-y-2 rounded-lg border border-red-100 bg-red-50/50 p-3">
+                        <p className="text-xs font-semibold text-red-800 flex items-start gap-1.5 leading-snug">
+                          <span className="shrink-0" aria-hidden>
+                            ⚠
+                          </span>
+                          紐付け可能な在庫がありません。JAN / ASIN を確認し在庫を登録するか、下で検索してください。
+                        </p>
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
+                          <input
+                            type="text"
+                            value={adjustmentRescueQuery}
+                            onChange={(e) => setAdjustmentRescueQuery(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                void runAdjustmentRescueSearch();
+                              }
+                            }}
+                            placeholder="例: 4901234567890 または 商品名の一部"
+                            disabled={adjustmentRescueLoading || submitting}
+                            className="min-w-0 flex-1 rounded-md border border-sky-200 bg-white px-2.5 py-2 text-xs text-slate-800 placeholder:text-slate-400 focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-300/40"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void runAdjustmentRescueSearch()}
+                            disabled={adjustmentRescueLoading || submitting}
+                            className="inline-flex h-9 shrink-0 items-center justify-center rounded-md bg-sky-700 px-4 text-xs font-medium text-white hover:bg-sky-800 disabled:bg-slate-300"
+                          >
+                            {adjustmentRescueLoading ? "検索中…" : "検索"}
+                          </button>
+                        </div>
+                        {adjustmentRescueError ? <p className="text-[11px] font-medium text-red-700">{adjustmentRescueError}</p> : null}
+                        {adjustmentRescueExtra.length > 0 ? (
+                          <p className="text-[11px] text-sky-800/90">レスキュー検索で {adjustmentRescueExtra.length} 件ヒット（下の候補に反映されます）</p>
+                        ) : null}
+                      </div>
                     ) : (
                       <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50/50 p-3 max-h-56 overflow-y-auto">
-                        {adjustmentCandidates.map((s) => (
+                        {mergedAdjustmentCandidates.map((s) => (
                           <label key={s.id} className="flex items-center gap-3 cursor-pointer">
                             <input
                               type="radio"
@@ -664,10 +917,45 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                         ))}
                       </div>
                     )}
+                    {mergedAdjustmentCandidates.length > 0 && !(data?.sku?.trim() && loadingAdjustmentCandidates) ? (
+                      <div className="space-y-2 rounded-lg border border-sky-100 bg-sky-50/40 p-3">
+                        <p className="text-[11px] text-slate-600 leading-snug">
+                          一覧に無い在庫を探す: JAN または商品名の一部で検索（注文カードのレスキューと同じ API）。
+                        </p>
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
+                          <input
+                            type="text"
+                            value={adjustmentRescueQuery}
+                            onChange={(e) => setAdjustmentRescueQuery(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                void runAdjustmentRescueSearch();
+                              }
+                            }}
+                            placeholder="例: 4901234567890 または 商品名の一部"
+                            disabled={adjustmentRescueLoading || submitting}
+                            className="min-w-0 flex-1 rounded-md border border-sky-200 bg-white px-2.5 py-2 text-xs text-slate-800 placeholder:text-slate-400 focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-300/40"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void runAdjustmentRescueSearch()}
+                            disabled={adjustmentRescueLoading || submitting}
+                            className="inline-flex h-9 shrink-0 items-center justify-center rounded-md bg-sky-700 px-4 text-xs font-medium text-white hover:bg-sky-800 disabled:bg-slate-300"
+                          >
+                            {adjustmentRescueLoading ? "検索中…" : "検索"}
+                          </button>
+                        </div>
+                        {adjustmentRescueError ? <p className="text-[11px] font-medium text-red-700">{adjustmentRescueError}</p> : null}
+                        {adjustmentRescueExtra.length > 0 ? (
+                          <p className="text-[11px] text-sky-800/90">レスキュー検索で {adjustmentRescueExtra.length} 件を候補に反映しました</p>
+                        ) : null}
+                      </div>
+                    ) : null}
                     <button
                       type="button"
                       onClick={() => void handleAdjustmentSettle(true)}
-                      disabled={submitting || !data?.sku?.trim() || selectedAdjustmentStockId == null}
+                      disabled={submitting || selectedAdjustmentStockId == null}
                       className="w-full inline-flex items-center justify-center rounded-lg bg-emerald-700 text-white py-2.5 px-4 text-sm font-semibold hover:bg-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
                     >
                       {submitting ? "処理中..." : "在庫を紐付けて消込する"}
