@@ -7,6 +7,7 @@ import {
   computeSalesTransactionIdempotencyKey,
   dedupeUpsertChunkByIdempotencyKey,
 } from "@/lib/sales-transaction-idempotency";
+import { applyCanonicalToSalesTransactionRowForApi } from "@/lib/canonical-sales-transaction";
 
 const UPSERT_CHUNK = 500;
 
@@ -510,7 +511,8 @@ export async function upsertSalesTransactionRows(allRows: SalesTransactionRow[])
   if (allRows.length === 0) {
     return { inserted: 0, skipped: 0, tableMissing: false };
   }
-  const insertPayload = allRows.map((r) => {
+  const rows = allRows.map(applyCanonicalToSalesTransactionRowForApi);
+  const insertPayload = rows.map((r) => {
     const dedupe_slot = r.dedupe_slot ?? 0;
     return {
       amazon_order_id: r.amazon_order_id,

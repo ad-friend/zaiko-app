@@ -1,5 +1,7 @@
 -- sales_transactions: hash 変更と無関係に「同じ明細」で upsert 衝突する idempotency_key
 -- Supabase SQL エディタで実行（本番前にバックアップ推奨）。
+-- digest 先頭の 'stx_idem_v1' は lib/sales-transaction-idempotency.ts の SALES_TX_IDEM_VERSION と一致させること。
+-- バージョン変更手順: docs/sales_transactions_idempotency_versioning.md
 -- pgcrypto が無い場合は Supabase の Database → Extensions で pgcrypto を有効化してください。
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;

@@ -42,6 +42,12 @@ mustInclude("app/api/amazon/fetch-finances/route.ts", ["upsertSalesTransactionRo
 mustInclude("app/api/amazon-sales-import/route.ts", ["onConflict: \"idempotency_key\""], "amazon-sales-import");
 
 mustInclude(
+  "app/api/amazon-sales-import/preview/route.ts",
+  ["buildAmazonSalesCsvImportFromBody", "findSuspiciousBusinessKeyCollisions"],
+  "amazon-sales-import-preview"
+);
+
+mustInclude(
   "app/api/amazon/pending-finances/route.ts",
   ["finance_line_group_id", "needs_quantity_review"],
   "pending-finances"

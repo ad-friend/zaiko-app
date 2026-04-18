@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "verify:finance": "node scripts/check-finance-pipeline.mjs"
+    "verify:finance": "node scripts/check-finance-pipeline.mjs",
+    "backfill:sales-idem": "tsx scripts/backfill-sales-transactions-canonical.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.98.0",
@@ -22,6 +23,7 @@
     "react-dom": "19.2.3"
   },
   "devDependencies": {
+    "tsx": "^4.21.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/papaparse": "^5.5.2",

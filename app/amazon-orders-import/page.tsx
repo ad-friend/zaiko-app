@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import Papa from "papaparse";
-import { UploadCloud, ShieldCheck, RotateCcw, Banknote } from "lucide-react";
+import { UploadCloud, ShieldCheck, RotateCcw, Banknote, ScanSearch } from "lucide-react";
 import { sliceFromTransactionHeader } from "@/lib/amazon-transaction-csv-header";
 
 /** 売上インポート: 1リクエストあたりのデータ行数（自動消込と同様のチャンク＋リトライ方針） */
@@ -23,6 +23,28 @@ async function postAmazonSalesImportChunk(body: object): Promise<Response> {
   for (let attempt = 1; attempt <= SALES_IMPORT_MAX_ATTEMPTS; attempt++) {
     try {
       const res = await fetch("/api/amazon-sales-import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) return res;
+      if (res.status !== 429 && res.status < 500) return res;
+      if (attempt === SALES_IMPORT_MAX_ATTEMPTS) return res;
+      await sleep(400 * 2 ** (attempt - 1));
+    } catch (e) {
+      lastNetworkError = e instanceof Error ? e : new Error(String(e));
+      if (attempt === SALES_IMPORT_MAX_ATTEMPTS) throw lastNetworkError;
+      await sleep(400 * 2 ** (attempt - 1));
+    }
+  }
+  throw lastNetworkError ?? new Error("通信に失敗しました");
+}
+
+async function postAmazonSalesPreviewChunk(body: object): Promise<Response> {
+  let lastNetworkError: Error | null = null;
+  for (let attempt = 1; attempt <= SALES_IMPORT_MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch("/api/amazon-sales-import/preview", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -290,6 +312,45 @@ export default function AmazonOrdersImportPage() {
     message?: string;
     upserted?: number;
     row_errors?: string[];
+    skipped_rows?: Array<{
+      line: number;
+      code: string;
+      message: string;
+      amazon_order_id?: string | null;
+      detail?: string;
+    }>;
+  } | null>(null);
+
+  type SalesResultSkippedRow = {
+    line: number;
+    code: string;
+    message: string;
+    amazon_order_id?: string | null;
+    detail?: string;
+  };
+
+  type SalesPreparedPayload = {
+    fileName: string;
+    headerFields: string[];
+    dataRows: Record<string, string>[];
+    skippedPrefixLines: number;
+  };
+  const [salesPrepared, setSalesPrepared] = useState<SalesPreparedPayload | null>(null);
+  const [salesPreviewRunning, setSalesPreviewRunning] = useState(false);
+  const [salesPreviewError, setSalesPreviewError] = useState<string | null>(null);
+  const [salesPreviewResult, setSalesPreviewResult] = useState<{
+    ok: true;
+    rows_read: number;
+    rows_expanded: number;
+    rows_after_merge: number;
+    skipped_prefix_lines: number;
+    merged_split_payment_orders: number;
+    merged_split_payment_extra_rows: number;
+    message: string;
+    row_errors: string[];
+    skipped_rows: SalesResultSkippedRow[];
+    suspicious: Array<{ business_fingerprint: string; idempotency_keys: string[]; skus: (string | null)[] }>;
+    chunks: number;
   } | null>(null);
 
   const parsedSummary = useMemo(() => {
@@ -479,8 +540,11 @@ export default function AmazonOrdersImportPage() {
 
     setSalesError(null);
     setSalesResult(null);
+    setSalesPreviewError(null);
+    setSalesPreviewResult(null);
+    setSalesPrepared(null);
     setSalesFileName(file.name);
-    setSalesRunning(true);
+    setSalesRunning(false);
     setSalesImportProgress(null);
 
     try {
@@ -493,7 +557,6 @@ export default function AmazonOrdersImportPage() {
           .find((l) => l.length > 0) ?? "";
       if (!firstNonEmptyLine) {
         setSalesError("ヘッダー行が見つかりません（日付・オーダー番号を含む行がありません）。");
-        setSalesResult({ ok: false });
         return;
       }
 
@@ -507,7 +570,6 @@ export default function AmazonOrdersImportPage() {
       const critical = parsed.errors?.filter((err) => err.type === "FieldMismatch" || err.type === "Quotes") ?? [];
       if (critical.length) {
         setSalesError(`CSV パースエラー: ${critical.map((x) => x.message).join("; ")}`);
-        setSalesResult({ ok: false });
         return;
       }
 
@@ -527,39 +589,164 @@ export default function AmazonOrdersImportPage() {
 
       if (dataRows.length === 0) {
         setSalesError("取り込むデータ行がありません。");
-        setSalesResult({ ok: false });
         return;
       }
 
-      const totalChunks = Math.max(1, Math.ceil(dataRows.length / SALES_IMPORT_CHUNK_ROWS));
-      const batchMode = totalChunks > 1;
-      const totalRows = dataRows.length;
+      setSalesPrepared({
+        fileName: file.name,
+        headerFields,
+        dataRows,
+        skippedPrefixLines,
+      });
+    } catch (err) {
+      setSalesError(err instanceof Error ? err.message : "売上 CSV の読み取りに失敗しました");
+    } finally {
+      e.target.value = "";
+    }
+  };
 
-      type SalesImportApi = {
-        error?: string;
-        ok?: boolean;
-        rows_read?: number;
-        rows_expanded?: number;
-        rows_after_merge?: number;
-        skipped_prefix_lines?: number;
-        merged_split_payment_orders?: number;
-        merged_split_payment_extra_rows?: number;
-        message?: string;
-        upserted?: number;
-        row_errors?: string[];
-      };
+  type SalesImportApi = {
+    error?: string;
+    ok?: boolean;
+    rows_read?: number;
+    rows_expanded?: number;
+    rows_after_merge?: number;
+    skipped_prefix_lines?: number;
+    merged_split_payment_orders?: number;
+    merged_split_payment_extra_rows?: number;
+    message?: string;
+    upserted?: number;
+    row_errors?: string[];
+    skipped_rows?: SalesResultSkippedRow[];
+  };
 
-      let sumUpserted = 0;
-      let sumRowsRead = 0;
-      let sumRowsExpanded = 0;
-      let sumRowsAfterMerge = 0;
-      let sumMergedOrders = 0;
-      let sumMergedExtra = 0;
-      const rowErrorsAll: string[] = [];
-      let lastMessage = "";
+  type SalesPreviewChunkApi = SalesImportApi & {
+    suspicious_business_key_collisions?: Array<{
+      business_fingerprint: string;
+      idempotency_keys: string[];
+      skus: (string | null)[];
+    }>;
+  };
 
-      setSalesImportProgress({ completedRows: 0, totalRows });
+  const handleSalesPreviewClick = async () => {
+    if (!salesPrepared) return;
+    setSalesPreviewError(null);
+    setSalesPreviewResult(null);
+    setSalesPreviewRunning(true);
+    setSalesImportProgress({ completedRows: 0, totalRows: salesPrepared.dataRows.length });
 
+    const { fileName, headerFields, dataRows, skippedPrefixLines } = salesPrepared;
+    const totalChunks = Math.max(1, Math.ceil(dataRows.length / SALES_IMPORT_CHUNK_ROWS));
+    const batchMode = totalChunks > 1;
+    const totalRows = dataRows.length;
+
+    let sumRowsRead = 0;
+    let sumRowsExpanded = 0;
+    let sumRowsAfterMerge = 0;
+    let sumMergedOrders = 0;
+    let sumMergedExtra = 0;
+    const rowErrorsAll: string[] = [];
+    const skippedRowsAll: SalesResultSkippedRow[] = [];
+    const suspiciousAll: NonNullable<SalesPreviewChunkApi["suspicious_business_key_collisions"]> = [];
+    let lastMessage = "";
+
+    try {
+      for (let ci = 0; ci < totalChunks; ci++) {
+        const start = ci * SALES_IMPORT_CHUNK_ROWS;
+        const chunkRows = dataRows.slice(start, start + SALES_IMPORT_CHUNK_ROWS);
+
+        const res = await postAmazonSalesPreviewChunk({
+          rows: chunkRows,
+          headers: headerFields,
+          fileName,
+          batchMode,
+          chunkIndex: ci,
+          totalChunks,
+          skippedPrefixLines,
+          rowOffsetBase: start,
+        });
+
+        const parsedRes = await readJsonOrTextSafe<SalesPreviewChunkApi>(res);
+        const data = parsedRes.data;
+
+        if (!res.ok) {
+          const rawSnippet = parsedRes.raw.trim().slice(0, 400);
+          const msg = (data && typeof data.error === "string" ? data.error : null) ?? rawSnippet;
+          setSalesPreviewError(
+            totalChunks > 1
+              ? `${msg || "プレビューに失敗しました"}（チャンク ${ci + 1}/${totalChunks}）`
+              : msg || "プレビューに失敗しました"
+          );
+          return;
+        }
+
+        if (!parsedRes.okJson || !data) {
+          setSalesPreviewError(
+            totalChunks > 1
+              ? `サーバー応答が JSON ではありません。（チャンク ${ci + 1}/${totalChunks}）`
+              : "サーバー応答が JSON ではありません。"
+          );
+          return;
+        }
+
+        setSalesImportProgress({ completedRows: Math.min(start + chunkRows.length, totalRows), totalRows });
+
+        sumRowsRead += data.rows_read ?? 0;
+        sumRowsExpanded += data.rows_expanded ?? 0;
+        sumRowsAfterMerge += data.rows_after_merge ?? 0;
+        sumMergedOrders += data.merged_split_payment_orders ?? 0;
+        sumMergedExtra += data.merged_split_payment_extra_rows ?? 0;
+        if (data.row_errors?.length) rowErrorsAll.push(...data.row_errors);
+        if (data.skipped_rows?.length) skippedRowsAll.push(...data.skipped_rows);
+        if (data.suspicious_business_key_collisions?.length) suspiciousAll.push(...data.suspicious_business_key_collisions);
+        if (typeof data.message === "string" && data.message) lastMessage = data.message;
+      }
+
+      setSalesPreviewResult({
+        ok: true,
+        rows_read: sumRowsRead,
+        rows_expanded: sumRowsExpanded,
+        rows_after_merge: sumRowsAfterMerge,
+        skipped_prefix_lines: skippedPrefixLines,
+        merged_split_payment_orders: sumMergedOrders,
+        merged_split_payment_extra_rows: sumMergedExtra,
+        message: lastMessage || "プレビュー完了（DB は未更新）。",
+        row_errors: rowErrorsAll.slice(0, 50),
+        skipped_rows: skippedRowsAll.slice(0, 100),
+        suspicious: suspiciousAll.slice(0, 50),
+        chunks: totalChunks,
+      });
+    } catch (err) {
+      setSalesPreviewError(err instanceof Error ? err.message : "プレビューに失敗しました");
+    } finally {
+      setSalesPreviewRunning(false);
+      setSalesImportProgress(null);
+    }
+  };
+
+  const handleSalesImportClick = async () => {
+    if (!salesPrepared) return;
+    setSalesError(null);
+    setSalesResult(null);
+    setSalesRunning(true);
+    setSalesImportProgress({ completedRows: 0, totalRows: salesPrepared.dataRows.length });
+
+    const { fileName, headerFields, dataRows, skippedPrefixLines } = salesPrepared;
+    const totalChunks = Math.max(1, Math.ceil(dataRows.length / SALES_IMPORT_CHUNK_ROWS));
+    const batchMode = totalChunks > 1;
+    const totalRows = dataRows.length;
+
+    let sumUpserted = 0;
+    let sumRowsRead = 0;
+    let sumRowsExpanded = 0;
+    let sumRowsAfterMerge = 0;
+    let sumMergedOrders = 0;
+    let sumMergedExtra = 0;
+    const rowErrorsAll: string[] = [];
+    const skippedRowsAll: SalesResultSkippedRow[] = [];
+    let lastMessage = "";
+
+    try {
       for (let ci = 0; ci < totalChunks; ci++) {
         const start = ci * SALES_IMPORT_CHUNK_ROWS;
         const chunkRows = dataRows.slice(start, start + SALES_IMPORT_CHUNK_ROWS);
@@ -567,7 +754,7 @@ export default function AmazonOrdersImportPage() {
         const res = await postAmazonSalesImportChunk({
           rows: chunkRows,
           headers: headerFields,
-          fileName: file.name,
+          fileName,
           batchMode,
           chunkIndex: ci,
           totalChunks,
@@ -608,6 +795,7 @@ export default function AmazonOrdersImportPage() {
         sumMergedOrders += data.merged_split_payment_orders ?? 0;
         sumMergedExtra += data.merged_split_payment_extra_rows ?? 0;
         if (data.row_errors?.length) rowErrorsAll.push(...data.row_errors);
+        if (data.skipped_rows?.length) skippedRowsAll.push(...data.skipped_rows);
         if (typeof data.message === "string" && data.message) lastMessage = data.message;
       }
 
@@ -627,13 +815,13 @@ export default function AmazonOrdersImportPage() {
         message: `${lastMessage || "取り込みが完了しました。"}${batchNote}`,
         upserted: sumUpserted,
         row_errors: rowErrorsAll.slice(0, 50),
+        skipped_rows: skippedRowsAll.slice(0, 100),
       });
     } catch (err) {
       setSalesError(err instanceof Error ? err.message : "売上データのインポートに失敗しました");
     } finally {
       setSalesRunning(false);
       setSalesImportProgress(null);
-      e.target.value = "";
     }
   };
 
@@ -810,41 +998,56 @@ export default function AmazonOrdersImportPage() {
             <span className="font-mono">sku</span>。
             <br />
             <span className="text-slate-500">
-              ブラウザでパース後、最大 50 行ずつ API に順番送信します（タイムアウト回避・失敗時は自動リトライ）。先頭のタイトル行は自動でスキップします。金額列は
+              ファイル選択でブラウザがパースします。次に「プレビュー」で DB に触れず検証するか、「DBに取り込む」で最大 50 行ずつ API に送信します（タイムアウト回避・失敗時は自動リトライ）。先頭のタイトル行は自動でスキップします。金額列は
               Principal / Tax / 手数料などに縦展開し、同一注文×種別は合算して{" "}
               <span className="font-mono">sales_transactions</span> に保存します。
             </span>
           </p>
 
-          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
-            <div className="flex-1">
+          <div className="flex flex-col lg:flex-row items-start lg:items-center gap-4">
+            <div className="flex-1 min-w-0">
               <input
                 type="file"
                 accept=".csv,.tsv,.txt"
                 onChange={handleSalesFileChange}
-                disabled={salesRunning}
+                disabled={salesRunning || salesPreviewRunning}
                 className="block w-full text-sm text-slate-700"
               />
               {salesFileName && <p className="mt-2 text-xs text-slate-500">選択: {salesFileName}</p>}
+              {salesPrepared && (
+                <p className="mt-2 text-sm text-emerald-800/95">
+                  パース済み <span className="font-semibold tabular-nums">{salesPrepared.dataRows.length}</span>{" "}
+                  行。プレビューまたは取り込みを選んでください。
+                </p>
+              )}
             </div>
-            <div className="shrink-0">
+            <div className="flex shrink-0 flex-col sm:flex-row gap-2 w-full sm:w-auto">
               <button
                 type="button"
-                disabled
-                className={`${buttonClass} bg-slate-100 text-slate-400 border border-slate-200`}
-                title="ファイル選択後、自動で実行します"
+                disabled={!salesPrepared || salesPreviewRunning || salesRunning}
+                onClick={handleSalesPreviewClick}
+                className={`${buttonClass} inline-flex items-center gap-2 bg-slate-100 text-slate-800 border border-slate-200 hover:bg-slate-200`}
               >
-                {salesRunning ? "インポートを実行中..." : "自動実行"}
+                <ScanSearch className="h-4 w-4 shrink-0" />
+                {salesPreviewRunning ? "プレビュー中…" : "プレビュー"}
+              </button>
+              <button
+                type="button"
+                disabled={!salesPrepared || salesPreviewRunning || salesRunning}
+                onClick={handleSalesImportClick}
+                className={`${buttonClass} bg-amber-600 text-white hover:bg-amber-700 border border-amber-700`}
+              >
+                {salesRunning ? "取り込み中…" : "DBに取り込む"}
               </button>
             </div>
           </div>
 
-          {salesRunning && (
+          {(salesRunning || salesPreviewRunning) && (
             <p className="mt-3 text-sm font-medium text-amber-800" aria-live="polite">
-              売上データを取り込み中…
+              {salesPreviewRunning ? "プレビュー送信中…" : "売上データを取り込み中…"}
               {salesImportProgress && (
                 <span className="ml-2 tabular-nums">
-                  進捗 {salesImportProgress.completedRows} / 全 {salesImportProgress.totalRows} 件（チャンク送信・反映済み）
+                  進捗 {salesImportProgress.completedRows} / 全 {salesImportProgress.totalRows} 件
                 </span>
               )}
             </p>
@@ -853,6 +1056,45 @@ export default function AmazonOrdersImportPage() {
           {salesError && (
             <div className="mt-4 rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-800">{salesError}</div>
           )}
+
+          {salesPreviewError && (
+            <div className="mt-4 rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-800">{salesPreviewError}</div>
+          )}
+
+          {salesPreviewResult?.ok ? (
+            <div className="mt-4 rounded-lg border border-sky-200 bg-sky-50/80 p-4">
+              <p className="font-medium text-sky-950">売上プレビュー（DB 未更新）</p>
+              <p className="mt-1 text-sm tabular-nums text-sky-900/90">
+                データ行 {salesPreviewResult.rows_read} / 縦展開 {salesPreviewResult.rows_expanded} / マージ後{" "}
+                {salesPreviewResult.rows_after_merge}（{salesPreviewResult.chunks} チャンク）
+              </p>
+              <p className="mt-2 text-sm text-sky-950/90">{salesPreviewResult.message}</p>
+              {salesPreviewResult.suspicious.length > 0 && (
+                <div className="mt-3 text-xs text-amber-900">
+                  <p className="font-medium">疑わしい idempotency 分裂（チャンク内）</p>
+                  <ul className="list-disc pl-5 mt-1 space-y-1 max-h-28 overflow-auto">
+                    {salesPreviewResult.suspicious.slice(0, 8).map((s, idx) => (
+                      <li key={idx}>
+                        keys {s.idempotency_keys.length} 件 / skus: {s.skus.filter(Boolean).join(", ") || "—"}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {salesPreviewResult.skipped_rows.length > 0 && (
+                <div className="mt-3 text-xs text-sky-950/90">
+                  <p className="font-medium">スキップ行（先頭）</p>
+                  <ul className="list-disc pl-5 mt-1 space-y-1 max-h-32 overflow-auto">
+                    {salesPreviewResult.skipped_rows.slice(0, 12).map((s, idx) => (
+                      <li key={idx}>
+                        <span className="font-mono text-[10px]">{s.code}</span> 行 {s.line}: {s.message}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          ) : null}
 
           {salesResult?.ok ? (
             <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50/70 p-4">
@@ -893,6 +1135,19 @@ export default function AmazonOrdersImportPage() {
                   <ul className="list-disc pl-5 mt-1 space-y-1 max-h-32 overflow-auto">
                     {salesResult.row_errors.slice(0, 10).map((x, idx) => (
                       <li key={idx}>{x}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {salesResult.skipped_rows && salesResult.skipped_rows.length > 0 && (
+                <div className="mt-3 text-xs text-amber-950/90">
+                  <p className="font-medium">スキップした行（コード付き・先頭）</p>
+                  <ul className="list-disc pl-5 mt-1 space-y-1 max-h-40 overflow-auto">
+                    {salesResult.skipped_rows.slice(0, 15).map((s, idx) => (
+                      <li key={idx}>
+                        <span className="font-mono text-[10px] text-amber-900/80">{s.code}</span> 行 {s.line}: {s.message}
+                        {s.amazon_order_id ? `（注文 ${s.amazon_order_id}）` : ""}
+                      </li>
                     ))}
                   </ul>
                 </div>

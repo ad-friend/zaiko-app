@@ -2,7 +2,16 @@ import { createHash } from "crypto";
 
 const SEP = "\u001f";
 
-/** 取込ロジック変更後も「同じ財務明細」で衝突するキー（upsert 用）。amazon_event_hash とは別に保持する。 */
+/**
+ * 取込ロジック変更後も「同じ財務明細」で衝突するキー（upsert 用）。amazon_event_hash とは別に保持する。
+ *
+ * ## バージョンを上げるとき（運用）
+ * 1. この定数を `stx_idem_v2` のように変更する（`computeSalesTransactionIdempotencyKey` の入力が変わるすべてのケース）。
+ * 2. [docs/sales_transactions_idempotency_versioning.md](docs/sales_transactions_idempotency_versioning.md) に沿い、既存行の `idempotency_key` を再計算する
+ *    （SQL の一括 UPDATE または `npm run backfill:sales-idem` の `--apply`）。
+ * 3. `docs/migration_sales_transactions_idempotency_key.sql` 内のリテラル `'stx_idem_v1'` を参照している新規マイグレーションを書く場合は、同じバージョン文字列に合わせる。
+ * 4. 再取込のみで揃える場合でも、旧キーが残ると重複行になるため、バックフィルまたは全削除→取込のどちらかを必ず決める。
+ */
 export const SALES_TX_IDEM_VERSION = "stx_idem_v1";
 
 function normalizePostedForIdempotency(postedDate: string): string {
