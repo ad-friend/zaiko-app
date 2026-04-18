@@ -192,6 +192,9 @@ function flattenShipmentEvents(list: ShipmentEvent[] | undefined, transactionTyp
             eventIndex,
             rowIndex++
           ),
+          item_quantity: 1,
+          finance_line_group_id: null,
+          needs_quantity_review: false,
         });
       }
       for (const f of fees) {
@@ -216,6 +219,9 @@ function flattenShipmentEvents(list: ShipmentEvent[] | undefined, transactionTyp
             eventIndex,
             rowIndex++
           ),
+          item_quantity: 1,
+          finance_line_group_id: null,
+          needs_quantity_review: false,
         });
       }
       const chargeAdj = item.ItemChargeAdjustmentList ?? [];
@@ -242,6 +248,9 @@ function flattenShipmentEvents(list: ShipmentEvent[] | undefined, transactionTyp
             eventIndex,
             rowIndex++
           ),
+          item_quantity: 1,
+          finance_line_group_id: null,
+          needs_quantity_review: false,
         });
       }
       for (const f of feeAdj) {
@@ -266,6 +275,9 @@ function flattenShipmentEvents(list: ShipmentEvent[] | undefined, transactionTyp
             eventIndex,
             rowIndex++
           ),
+          item_quantity: 1,
+          finance_line_group_id: null,
+          needs_quantity_review: false,
         });
       }
     }
@@ -348,6 +360,13 @@ function flattenAdjustmentEvents(list: AdjustmentEvent[] | undefined): SalesTran
     } else {
       if (eventBase == null) return;
       const amount = toSignedAmount(eventBase, false);
+      const eventGid = buildFinanceLineGroupId([
+        "adj_event",
+        String(eventIndex),
+        posted,
+        adjType,
+        String(amount),
+      ]);
       rows.push({
         amazon_order_id: null,
         sku: null,
@@ -358,7 +377,7 @@ function flattenAdjustmentEvents(list: AdjustmentEvent[] | undefined): SalesTran
         posted_date: posted,
         amazon_event_hash: buildEventHash(null, "Adjustment", adjType, null, amount, posted, eventIndex, rowIndex++),
         item_quantity: 1,
-        finance_line_group_id: null,
+        finance_line_group_id: eventGid,
         needs_quantity_review: true,
       });
     }

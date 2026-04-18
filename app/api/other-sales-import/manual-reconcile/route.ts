@@ -101,6 +101,9 @@ export async function POST(request: NextRequest) {
       amazon_event_hash: txEventHash,
       stock_id: stockId,
       unit_cost: unitCost,
+      item_quantity: 1,
+      finance_line_group_id: null,
+      needs_quantity_review: false,
     };
 
     const { error: insertTxErr } = await supabase

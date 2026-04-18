@@ -23,6 +23,9 @@ type SalesTxUpsertRow = {
   amount: number;
   posted_date: string;
   amazon_event_hash: string;
+  item_quantity: number;
+  finance_line_group_id: string | null;
+  needs_quantity_review: boolean;
 };
 
 /** 論理内訳（レスポンス・マージキー）。DB では amount_description に載せる */
@@ -573,6 +576,9 @@ export async function POST(request: NextRequest) {
                   settlementId: v.settlement_id,
                 })
             : hashStandaloneExpense(txType, v.amount_type, postedIsoFromKey, v.amount, expenseSeq, chunkIdxSafe),
+        item_quantity: 1,
+        finance_line_group_id: null,
+        needs_quantity_review: false,
       };
     });
 
