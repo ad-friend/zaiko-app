@@ -25,11 +25,21 @@ function mustInclude(rel, needles, label) {
 
 mustInclude(
   "lib/amazon-financial-events.ts",
-  ["upsertSalesTransactionRows", "flattenAdjustmentEvents", "adj_event", "item_quantity: 1", "finance_line_group_id: null", "needs_quantity_review: false"],
+  [
+    "upsertSalesTransactionRows",
+    "flattenAdjustmentEvents",
+    "adj_event",
+    "item_quantity: 1",
+    "finance_line_group_id: null",
+    "needs_quantity_review: false",
+    "onConflict: \"idempotency_key\"",
+  ],
   "amazon-financial-events"
 );
 
 mustInclude("app/api/amazon/fetch-finances/route.ts", ["upsertSalesTransactionRows"], "fetch-finances");
+
+mustInclude("app/api/amazon-sales-import/route.ts", ["onConflict: \"idempotency_key\""], "amazon-sales-import");
 
 mustInclude(
   "app/api/amazon/pending-finances/route.ts",

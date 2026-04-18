@@ -3,6 +3,7 @@ import { createHash } from "crypto";
 import { supabase } from "@/lib/supabase";
 import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
 import { parseFlexiblePostedDateToIso } from "@/lib/settlement-posted-date";
+import { attachSalesTransactionIdempotency } from "@/lib/sales-transaction-idempotency";
 
 type ParsedOtherSalesRow = {
   orderId: string;
@@ -22,7 +23,7 @@ const buildTxEventHash = (payload: {
   platform: string;
   sellPrice: number;
 }): string => {
-  // sales_transactions 側の一意制約(amazon_event_hash)用。stockId は含めない（手動確定で upsert し直すため）
+  // sales_transactions 側の表示用 amazon_event_hash。一意は idempotency_key。stockId は含めない（手動確定で upsert し直すため）
   const raw = [payload.orderId, payload.platform, String(payload.sellPrice), "OtherSales", "Sell"].join("_");
   return createHash("sha256").update(raw).digest("hex");
 };
@@ -262,7 +263,7 @@ export async function POST(request: NextRequest) {
 
         // 売上トランザクション作成
         const txEventHash = buildTxEventHash({ orderId, platform, sellPrice });
-        const insertPayload = {
+        const insertPayload = attachSalesTransactionIdempotency({
           amazon_order_id: orderId,
           sku: sku ?? null,
           transaction_type: "Order",
@@ -276,11 +277,12 @@ export async function POST(request: NextRequest) {
           item_quantity: 1,
           finance_line_group_id: null,
           needs_quantity_review: false,
-        };
+          dedupe_slot: 0,
+        });
 
         const { error: insertTxErr } = await supabase
           .from("sales_transactions")
-          .upsert([insertPayload], { onConflict: "amazon_event_hash" })
+          .upsert([insertPayload], { onConflict: "idempotency_key", ignoreDuplicates: false })
           .select("id");
 
         if (insertTxErr) throw insertTxErr;

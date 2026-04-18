@@ -3,6 +3,7 @@
  */
 import { createHash } from "crypto";
 import { supabase } from "@/lib/supabase";
+import { computeSalesTransactionIdempotencyKey } from "@/lib/sales-transaction-idempotency";
 
 const UPSERT_CHUNK = 500;
 
@@ -150,6 +151,8 @@ export type SalesTransactionRow = {
   amount: number;
   posted_date: string;
   amazon_event_hash: string;
+  /** 補填の数量分割などで同一ビジネスキーを区別。通常 0 */
+  dedupe_slot?: number;
   /** 既定 1。補填分割時も各行 1 */
   item_quantity?: number;
   finance_line_group_id?: string | null;
@@ -195,6 +198,7 @@ function flattenShipmentEvents(list: ShipmentEvent[] | undefined, transactionTyp
           item_quantity: 1,
           finance_line_group_id: null,
           needs_quantity_review: false,
+          dedupe_slot: 0,
         });
       }
       for (const f of fees) {
@@ -222,6 +226,7 @@ function flattenShipmentEvents(list: ShipmentEvent[] | undefined, transactionTyp
           item_quantity: 1,
           finance_line_group_id: null,
           needs_quantity_review: false,
+          dedupe_slot: 0,
         });
       }
       const chargeAdj = item.ItemChargeAdjustmentList ?? [];
@@ -251,6 +256,7 @@ function flattenShipmentEvents(list: ShipmentEvent[] | undefined, transactionTyp
           item_quantity: 1,
           finance_line_group_id: null,
           needs_quantity_review: false,
+          dedupe_slot: 0,
         });
       }
       for (const f of feeAdj) {
@@ -278,6 +284,7 @@ function flattenShipmentEvents(list: ShipmentEvent[] | undefined, transactionTyp
           item_quantity: 1,
           finance_line_group_id: null,
           needs_quantity_review: false,
+          dedupe_slot: 0,
         });
       }
     }
@@ -331,6 +338,7 @@ function flattenAdjustmentEvents(list: AdjustmentEvent[] | undefined): SalesTran
             item_quantity: 1,
             finance_line_group_id: gid,
             needs_quantity_review,
+            dedupe_slot: 0,
           });
           return;
         }
@@ -354,6 +362,7 @@ function flattenAdjustmentEvents(list: AdjustmentEvent[] | undefined): SalesTran
             item_quantity: 1,
             finance_line_group_id: gid,
             needs_quantity_review,
+            dedupe_slot: u,
           });
         }
       });
@@ -379,6 +388,7 @@ function flattenAdjustmentEvents(list: AdjustmentEvent[] | undefined): SalesTran
         item_quantity: 1,
         finance_line_group_id: eventGid,
         needs_quantity_review: true,
+        dedupe_slot: 0,
       });
     }
   });
@@ -497,19 +507,33 @@ export async function upsertSalesTransactionRows(allRows: SalesTransactionRow[])
   if (allRows.length === 0) {
     return { inserted: 0, skipped: 0, tableMissing: false };
   }
-  const insertPayload = allRows.map((r) => ({
-    amazon_order_id: r.amazon_order_id,
-    sku: r.sku,
-    transaction_type: r.transaction_type,
-    amount_type: r.amount_type,
-    amount_description: r.amount_description,
-    amount: r.amount,
-    posted_date: r.posted_date,
-    amazon_event_hash: r.amazon_event_hash,
-    item_quantity: r.item_quantity ?? 1,
-    finance_line_group_id: r.finance_line_group_id ?? null,
-    needs_quantity_review: r.needs_quantity_review ?? false,
-  }));
+  const insertPayload = allRows.map((r) => {
+    const dedupe_slot = r.dedupe_slot ?? 0;
+    return {
+      amazon_order_id: r.amazon_order_id,
+      sku: r.sku,
+      transaction_type: r.transaction_type,
+      amount_type: r.amount_type,
+      amount_description: r.amount_description,
+      amount: r.amount,
+      posted_date: r.posted_date,
+      amazon_event_hash: r.amazon_event_hash,
+      item_quantity: r.item_quantity ?? 1,
+      finance_line_group_id: r.finance_line_group_id ?? null,
+      needs_quantity_review: r.needs_quantity_review ?? false,
+      dedupe_slot,
+      idempotency_key: computeSalesTransactionIdempotencyKey({
+        amazon_order_id: r.amazon_order_id,
+        sku: r.sku,
+        transaction_type: r.transaction_type,
+        amount_type: r.amount_type,
+        amount_description: r.amount_description,
+        amount: r.amount,
+        posted_date: r.posted_date,
+        dedupe_slot,
+      }),
+    };
+  });
 
   let inserted = 0;
   let skipped = 0;
@@ -518,8 +542,8 @@ export async function upsertSalesTransactionRows(allRows: SalesTransactionRow[])
     const { data, error } = await supabase
       .from("sales_transactions")
       .upsert(chunk, {
-        onConflict: "amazon_event_hash",
-        ignoreDuplicates: true,
+        onConflict: "idempotency_key",
+        ignoreDuplicates: false,
       })
       .select("id");
 

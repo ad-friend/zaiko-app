@@ -8,6 +8,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createHash } from "crypto";
 import { supabase } from "@/lib/supabase";
 import { parseFlexiblePostedDateToIso } from "@/lib/settlement-posted-date";
+import { attachSalesTransactionIdempotency } from "@/lib/sales-transaction-idempotency";
 
 /** Vercel Hobby の上限。Pro では 300 などに変更可能 */
 export const maxDuration = 60;
@@ -26,6 +27,8 @@ type SalesTxUpsertRow = {
   item_quantity: number;
   finance_line_group_id: string | null;
   needs_quantity_review: boolean;
+  dedupe_slot: number;
+  idempotency_key: string;
 };
 
 /** 論理内訳（レスポンス・マージキー）。DB では amount_description に載せる */
@@ -546,7 +549,7 @@ export async function POST(request: NextRequest) {
 
     const chunkIdxSafe = chunkIndex ?? 0;
     let expenseSeq = 0;
-    const insertPayload: SalesTxUpsertRow[] = [...mergeMap.entries()].map(([key, v]) => {
+    const insertPayloadRaw: Omit<SalesTxUpsertRow, "idempotency_key">[] = [...mergeMap.entries()].map(([key, v]) => {
       const parts = key.split("\u0001");
       const orderId = parts[0] ?? "";
       const txType = parts[1] ?? "Order";
@@ -579,8 +582,11 @@ export async function POST(request: NextRequest) {
         item_quantity: 1,
         finance_line_group_id: null,
         needs_quantity_review: false,
+        dedupe_slot: 0,
       };
     });
+
+    const insertPayload: SalesTxUpsertRow[] = insertPayloadRaw.map((r) => attachSalesTransactionIdempotency(r));
 
     console.log(
       `[amazon-sales-import] chunk=${chunkIdxSafe}/${totalChunks ?? 1} skipped_prefix=${skippedPrefixLines} csv_rows=${data.length} expanded=${expanded.length} merged_out=${insertPayload.length} merged_orders=${mergedSplitPaymentOrders} merged_extra=${mergedSplitPaymentExtraRows}`
@@ -589,11 +595,12 @@ export async function POST(request: NextRequest) {
     let upserted = 0;
     for (let i = 0; i < insertPayload.length; i += UPSERT_CHUNK) {
       const chunk = insertPayload.slice(i, i + UPSERT_CHUNK);
-      const toUpsert = await mergeUpsertChunkWithExisting(chunk, batchMode, chunkIndex);
-      // amazon_event_hash 一意のため、再インポート時の上書き・分割チャンク間の合算に upsert を使用
+      const merged = await mergeUpsertChunkWithExisting(chunk, batchMode, chunkIndex);
+      const toUpsert = merged.map((r) => attachSalesTransactionIdempotency(r));
+      // idempotency_key で一意。再インポート時の上書き・分割チャンク間の合算に upsert を使用
       const { data: upData, error: upErr } = await supabase
         .from("sales_transactions")
-        .upsert(toUpsert, { onConflict: "amazon_event_hash" })
+        .upsert(toUpsert, { onConflict: "idempotency_key", ignoreDuplicates: false })
         .select("id");
 
       if (upErr) {

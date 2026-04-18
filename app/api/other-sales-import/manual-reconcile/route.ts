@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createHash } from "crypto";
 import { supabase } from "@/lib/supabase";
 import { parseFlexiblePostedDateToIso } from "@/lib/settlement-posted-date";
+import { attachSalesTransactionIdempotency } from "@/lib/sales-transaction-idempotency";
 
 type OtherOrderRow = {
   id: string;
@@ -90,7 +91,7 @@ export async function POST(request: NextRequest) {
       sellPrice: Number(otherOrder.sell_price),
     });
 
-    const insertPayload = {
+    const insertPayload = attachSalesTransactionIdempotency({
       amazon_order_id: otherOrder.order_id,
       sku: null,
       transaction_type: "Order",
@@ -104,11 +105,12 @@ export async function POST(request: NextRequest) {
       item_quantity: 1,
       finance_line_group_id: null,
       needs_quantity_review: false,
-    };
+      dedupe_slot: 0,
+    });
 
     const { error: insertTxErr } = await supabase
       .from("sales_transactions")
-      .upsert([insertPayload], { onConflict: "amazon_event_hash" })
+      .upsert([insertPayload], { onConflict: "idempotency_key", ignoreDuplicates: false })
       .select("id");
 
     if (insertTxErr) throw insertTxErr;
