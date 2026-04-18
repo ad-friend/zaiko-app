@@ -60,7 +60,7 @@
 
 - バージョン文字列を変える場合: [sales_transactions_idempotency_versioning.md](./sales_transactions_idempotency_versioning.md)
 - SQL のみで一括再キーする場合: [migration_sales_transactions_idempotency_key.sql](./migration_sales_transactions_idempotency_key.sql)（digest 内のバージョンリテラルとアプリを一致させること）
-- 売上全削除と在庫の unsettle 例（コメントのみ・実行は手動編集後）: [runbook_sales_transactions_full_reset.sql](./runbook_sales_transactions_full_reset.sql)
+- 売上**全行削除**＋在庫は `settled_at` のみ解除（`order_id` は維持）の例（コメントのみ・実行は手動編集後）: [runbook_sales_transactions_full_reset.sql](./runbook_sales_transactions_full_reset.sql)
 
 ---
 
