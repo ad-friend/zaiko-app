@@ -76,6 +76,10 @@ function toSignedAmount(amount: number, isFeeOrAdjustment: boolean): number {
   return amount;
 }
 
+/**
+ * 重複排除キー。従来どおり 8 要素のみで hash（デプロイ前の行と一致）。
+ * 補填を同一 AdjustmentItem から数量分割した行だけ、末尾に u0 / u1 / … を足して区別する。
+ */
 function buildEventHash(
   amazonOrderId: string | null,
   transactionType: string,
@@ -87,7 +91,7 @@ function buildEventHash(
   rowIndex: number,
   unitIndex?: number | null
 ): string {
-  const raw = [
+  const parts = [
     amazonOrderId ?? "",
     transactionType,
     amountType,
@@ -96,9 +100,11 @@ function buildEventHash(
     postedDate,
     String(eventIndex),
     String(rowIndex),
-    unitIndex != null && unitIndex >= 0 ? `u${unitIndex}` : "",
-  ].join("_");
-  return createHash("sha256").update(raw).digest("hex");
+  ];
+  if (unitIndex != null && unitIndex >= 0) {
+    parts.push(`u${unitIndex}`);
+  }
+  return createHash("sha256").update(parts.join("_")).digest("hex");
 }
 
 /** 円ベース: 1 円未満の誤差まで許容 */
@@ -309,7 +315,7 @@ function flattenAdjustmentEvents(list: AdjustmentEvent[] | undefined): SalesTran
             amount_description: null,
             amount: itemSignedTotal,
             posted_date: posted,
-            amazon_event_hash: buildEventHash(null, "Adjustment", adjType, null, itemSignedTotal, posted, eventIndex, rowIndex++, null),
+            amazon_event_hash: buildEventHash(null, "Adjustment", adjType, null, itemSignedTotal, posted, eventIndex, rowIndex++),
             item_quantity: 1,
             finance_line_group_id: gid,
             needs_quantity_review,
@@ -350,7 +356,7 @@ function flattenAdjustmentEvents(list: AdjustmentEvent[] | undefined): SalesTran
         amount_description: null,
         amount,
         posted_date: posted,
-        amazon_event_hash: buildEventHash(null, "Adjustment", adjType, null, amount, posted, eventIndex, rowIndex++, null),
+        amazon_event_hash: buildEventHash(null, "Adjustment", adjType, null, amount, posted, eventIndex, rowIndex++),
         item_quantity: 1,
         finance_line_group_id: null,
         needs_quantity_review: true,
