@@ -3,7 +3,10 @@
  */
 import { createHash } from "crypto";
 import { supabase } from "@/lib/supabase";
-import { computeSalesTransactionIdempotencyKey } from "@/lib/sales-transaction-idempotency";
+import {
+  computeSalesTransactionIdempotencyKey,
+  dedupeUpsertChunkByIdempotencyKey,
+} from "@/lib/sales-transaction-idempotency";
 
 const UPSERT_CHUNK = 500;
 
@@ -538,7 +541,7 @@ export async function upsertSalesTransactionRows(allRows: SalesTransactionRow[])
   let inserted = 0;
   let skipped = 0;
   for (let i = 0; i < insertPayload.length; i += UPSERT_CHUNK) {
-    const chunk = insertPayload.slice(i, i + UPSERT_CHUNK);
+    const chunk = dedupeUpsertChunkByIdempotencyKey(insertPayload.slice(i, i + UPSERT_CHUNK));
     const { data, error } = await supabase
       .from("sales_transactions")
       .upsert(chunk, {

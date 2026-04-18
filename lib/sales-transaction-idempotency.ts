@@ -50,6 +50,22 @@ export function computeSalesTransactionIdempotencyKey(p: SalesTransactionIdempot
   return createHash("sha256").update(parts.join(SEP), "utf8").digest("hex");
 }
 
+/**
+ * 同一 upsert 内で同じ idempotency_key が複数あると Postgres が
+ * 「ON CONFLICT DO UPDATE command cannot affect row a second time」(21000) で失敗する。
+ * 先頭の行だけ残す（同一キーなら正規化済みペイロードも同一想定）。
+ */
+export function dedupeUpsertChunkByIdempotencyKey<T extends { idempotency_key: string }>(rows: T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const row of rows) {
+    if (seen.has(row.idempotency_key)) continue;
+    seen.add(row.idempotency_key);
+    out.push(row);
+  }
+  return out;
+}
+
 export function attachSalesTransactionIdempotency<
   T extends {
     amazon_order_id: string | null;

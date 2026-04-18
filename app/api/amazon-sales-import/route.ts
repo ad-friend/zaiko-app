@@ -8,7 +8,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { createHash } from "crypto";
 import { supabase } from "@/lib/supabase";
 import { parseFlexiblePostedDateToIso } from "@/lib/settlement-posted-date";
-import { attachSalesTransactionIdempotency } from "@/lib/sales-transaction-idempotency";
+import {
+  attachSalesTransactionIdempotency,
+  dedupeUpsertChunkByIdempotencyKey,
+} from "@/lib/sales-transaction-idempotency";
 
 /** Vercel Hobby の上限。Pro では 300 などに変更可能 */
 export const maxDuration = 60;
@@ -596,7 +599,7 @@ export async function POST(request: NextRequest) {
     for (let i = 0; i < insertPayload.length; i += UPSERT_CHUNK) {
       const chunk = insertPayload.slice(i, i + UPSERT_CHUNK);
       const merged = await mergeUpsertChunkWithExisting(chunk, batchMode, chunkIndex);
-      const toUpsert = merged.map((r) => attachSalesTransactionIdempotency(r));
+      const toUpsert = dedupeUpsertChunkByIdempotencyKey(merged.map((r) => attachSalesTransactionIdempotency(r)));
       // idempotency_key で一意。再インポート時の上書き・分割チャンク間の合算に upsert を使用
       const { data: upData, error: upErr } = await supabase
         .from("sales_transactions")
