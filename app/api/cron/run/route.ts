@@ -2,7 +2,7 @@
  * Vercel Cron 用エンドポイント（サーバ側で処理を完走させる）
  * - Authorization: Bearer ${CRON_SECRET}
  * - GET /api/cron/run?jobKey=orders_poll
- * - GET /api/cron/run?jobKey=finances_poll（財務チャンク・要 cron_continuation_state）
+ * - GET /api/cron/run?jobKey=finances_poll（財務チャンク・要 cron_continuation_state。過去 FINANCES_LOOKBACK_DAYS 日・既定45。state キー finances:rolling:yyyy-MM-dd）
  * - GET /api/cron/run?jobKey=listing_report_poll（出品レポート段階実行）
  * - GET /api/cron/run?jobKey=reconcile_poll（自動消込の短いバッチ）
  * - GET /api/cron/run?jobKey=finances_daily&reconcile=1（日次5通知・消込のみ。財務/出品は上記ポールに依存）
@@ -14,6 +14,8 @@ import {
   clampFinancialQueryBounds,
   createAmazonFinancesSpClient,
   fetchFinancialEventsChunk,
+  parseFinancesLookbackDaysFromEnv,
+  rollingFinancesBoundsForCronDay,
   upsertSalesTransactionRows,
 } from "@/lib/amazon-financial-events";
 import { deleteCronState, getCronState, setCronState } from "@/lib/cron-continuation-state";
@@ -219,22 +221,23 @@ async function upsertSkuConditions(rows: Array<{ sku: string; asin: string | nul
 }
 
 async function runFinancesPoll(): Promise<{ fetched: number; summary: string; metrics: Record<string, unknown> }> {
-  const day = dayBoundsTokyoYesterday();
-  const stateKey = `finances:${day.dateKey}`;
+  const lookbackDays = parseFinancesLookbackDaysFromEnv();
+  const boundsFresh = rollingFinancesBoundsForCronDay(lookbackDays);
+  const stateKey = `finances:rolling:${boundsFresh.dateKey}`;
   const payload = await getCronState(stateKey);
 
   let postedAfter: string;
   let postedBefore: string;
   let startNextToken: string | null = null;
 
-  if (!payload || String(payload.dateKey ?? "") !== day.dateKey) {
-    const c = clampFinancialQueryBounds(day.startIso, day.endExclusiveIso);
+  if (!payload || String(payload.dateKey ?? "") !== boundsFresh.dateKey) {
+    const c = clampFinancialQueryBounds(boundsFresh.postedAfter, boundsFresh.postedBefore);
     postedAfter = c.postedAfter;
     postedBefore = c.postedBefore;
     startNextToken = null;
   } else {
-    postedAfter = String(payload.postedAfter ?? day.startIso);
-    postedBefore = String(payload.postedBefore ?? day.endExclusiveIso);
+    postedAfter = String(payload.postedAfter ?? boundsFresh.postedAfter);
+    postedBefore = String(payload.postedBefore ?? boundsFresh.postedBefore);
     const nt = payload.nextToken;
     startNextToken = nt != null && String(nt).length > 0 ? String(nt) : null;
     const c = clampFinancialQueryBounds(postedAfter, postedBefore);
@@ -259,8 +262,8 @@ async function runFinancesPoll(): Promise<{ fetched: number; summary: string; me
     await deleteCronState(stateKey);
   } else {
     await setCronState(stateKey, {
-      dateKey: day.dateKey,
-      dayLabel: day.label,
+      dateKey: boundsFresh.dateKey,
+      dayLabel: boundsFresh.label,
       postedAfter,
       postedBefore,
       nextToken: chunk.nextToken,
@@ -268,16 +271,17 @@ async function runFinancesPoll(): Promise<{ fetched: number; summary: string; me
   }
 
   const summary = chunk.complete
-    ? `財務ポール: 区間完走 (${day.dateKey}) / insert ${upsert.inserted} skip ${upsert.skipped} / 行 ${chunk.rows.length}`
-    : `財務ポール: 継続中 (${day.dateKey}) / ページ ${chunk.pagesFetched} / insert ${upsert.inserted}`;
+    ? `財務ポール: 区間完走 (${boundsFresh.dateKey} / 過去${lookbackDays}日) / insert ${upsert.inserted} skip ${upsert.skipped} / 行 ${chunk.rows.length}`
+    : `財務ポール: 継続中 (${boundsFresh.dateKey} / 過去${lookbackDays}日) / ページ ${chunk.pagesFetched} / insert ${upsert.inserted}`;
 
   return {
     fetched: chunk.rows.length,
     summary,
     metrics: {
       step: "finances_poll",
-      dateKey: day.dateKey,
-      dayLabel: day.label,
+      dateKey: boundsFresh.dateKey,
+      dayLabel: boundsFresh.label,
+      lookbackDays,
       pagesFetched: chunk.pagesFetched,
       rowsFlattened: chunk.rows.length,
       rowsInserted: upsert.inserted,

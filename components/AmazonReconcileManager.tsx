@@ -163,6 +163,9 @@ export default function AmazonReconcileManager() {
     return new Date().toISOString().slice(0, 10);
   });
   const [isFetchingFinances, setIsFetchingFinances] = useState(false);
+  /** listFinancialEventsByOrderId による単一注文の財務再取得 */
+  const [isFetchingFinancesByOrderId, setIsFetchingFinancesByOrderId] = useState(false);
+  const [financesByOrderIdInput, setFinancesByOrderIdInput] = useState("");
   const [financeResult, setFinanceResult] = useState<{
     message: string;
     type: "success" | "error";
@@ -423,6 +426,81 @@ export default function AmazonReconcileManager() {
       });
     } finally {
       setIsFetchingFinances(false);
+    }
+  };
+
+  const handleFetchFinancesByOrderId = async () => {
+    const normalized = financesByOrderIdInput.replace(/[\s\u3000]+/g, "").trim();
+    if (!normalized) {
+      setFinanceResult({ message: "注文番号を入力してください。", type: "error" });
+      return;
+    }
+    if (!/^\d{3}-\d{7}-\d{7}$/.test(normalized)) {
+      setFinanceResult({
+        message: "注文番号は 3-7-7 形式（例 503-1234567-1234567）で入力してください。",
+        type: "error",
+      });
+      return;
+    }
+
+    setIsFetchingFinancesByOrderId(true);
+    setFinanceResult(null);
+    try {
+      const res = await fetch("/api/amazon/fetch-finances-by-order-id", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ amazonOrderId: normalized }),
+      });
+      const { json, raw } = await readJsonAnySafe(res);
+      const data = json as Record<string, unknown> | null;
+      if (!res.ok) {
+        const msg =
+          (data && typeof data.error === "string" ? data.error : null) ?? raw.slice(0, 300);
+        throw new Error(msg || "財務の取得に失敗しました");
+      }
+      const baseMsg =
+        typeof data?.message === "string" ? data.message : `注文 ${normalized} の財務を取り込みました`;
+      let message = `${baseMsg} (取得: ${Number(data?.totalFetched ?? 0)}, 新規: ${Number(data?.rowsInserted ?? 0)}, スキップ: ${Number(data?.rowsSkipped ?? 0)})`;
+      if (data?.truncated === true) {
+        message += " 【注意】ページ上限により未取り込みのページがある可能性があります。";
+      }
+
+      const RECONCILE_SALES_MAX_ROUNDS = 300;
+      let totalReconciled = 0;
+      let totalSkippedReconcile = 0;
+      for (let round = 0; round < RECONCILE_SALES_MAX_ROUNDS; round += 1) {
+        const reconcileRes = await fetch("/api/amazon/reconcile-sales", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        const reconcileParsed = await readJsonAnySafe(reconcileRes);
+        const reconcileData = reconcileParsed.json as Record<string, unknown> | null;
+        if (!reconcileRes.ok) {
+          const rmsg =
+            reconcileData && typeof reconcileData.error === "string"
+              ? reconcileData.error
+              : reconcileParsed.raw.slice(0, 300);
+          message += ` / 自動消込: 失敗 (${rmsg || "エラー"})`;
+          break;
+        }
+        const processedOrders = Number(reconcileData?.processedOrders ?? 0);
+        totalReconciled += Number(reconcileData?.reconciledCount ?? 0);
+        totalSkippedReconcile += Number(reconcileData?.skippedCount ?? 0);
+        if (processedOrders <= 0) break;
+        await new Promise((r) => setTimeout(r, 150));
+      }
+      message += ` / 自動消込: ${totalReconciled}件成功 (保留: ${totalSkippedReconcile}件)`;
+      await fetchPendingFinances();
+
+      setFinanceResult({ message, type: "success" });
+    } catch (e) {
+      setFinanceResult({
+        message: e instanceof Error ? e.message : "財務の取得に失敗しました",
+        type: "error",
+      });
+    } finally {
+      setIsFetchingFinancesByOrderId(false);
     }
   };
 
@@ -843,7 +921,7 @@ export default function AmazonReconcileManager() {
                     <button
                       type="button"
                       onClick={handleFetchFinances}
-                      disabled={isFetchingFinances || isProcessingOnly}
+                      disabled={isFetchingFinances || isFetchingFinancesByOrderId || isProcessingOnly}
                       className={`${buttonClass} w-full bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed text-sm`}
                     >
                       {isFetchingFinances ? (
@@ -858,7 +936,7 @@ export default function AmazonReconcileManager() {
                     <button
                       type="button"
                       onClick={handleReconcileSalesOnly}
-                      disabled={isFetchingFinances || isProcessingOnly}
+                      disabled={isFetchingFinances || isFetchingFinancesByOrderId || isProcessingOnly}
                       className={`${buttonClass} w-full border border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60 disabled:cursor-not-allowed text-sm`}
                     >
                       {isProcessingOnly ? (
@@ -870,6 +948,45 @@ export default function AmazonReconcileManager() {
                         "未処理データの紐づけを実行"
                       )}
                     </button>
+                  </div>
+                  <div className="rounded-lg border border-slate-100 bg-slate-50/80 p-3 space-y-2">
+                    <p className="text-xs font-medium text-slate-700">注文番号で財務を再取得</p>
+                    <p className="text-[11px] text-slate-500 leading-snug">
+                      遅延返金など、期間指定の取得に載らないイベントを{" "}
+                      <code className="rounded bg-white/90 px-0.5">listFinancialEventsByOrderId</code> で取り込みます。
+                    </p>
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+                      <div className="min-w-0 flex-1">
+                        <label htmlFor="financesByOrderId" className="block text-xs font-medium text-slate-600 mb-1">
+                          Amazon 注文番号
+                        </label>
+                        <input
+                          id="financesByOrderId"
+                          type="text"
+                          inputMode="text"
+                          autoComplete="off"
+                          placeholder="503-1234567-1234567"
+                          value={financesByOrderIdInput}
+                          onChange={(e) => setFinancesByOrderIdInput(e.target.value)}
+                          className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void handleFetchFinancesByOrderId()}
+                        disabled={isFetchingFinances || isFetchingFinancesByOrderId || isProcessingOnly}
+                        className={`${buttonClass} shrink-0 border border-slate-600 bg-slate-700 text-white hover:bg-slate-800 disabled:opacity-60 disabled:cursor-not-allowed text-sm h-10 px-4`}
+                      >
+                        {isFetchingFinancesByOrderId ? (
+                          <span className="flex items-center justify-center gap-2">
+                            <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                            取得中...
+                          </span>
+                        ) : (
+                          "この注文の財務を再取得"
+                        )}
+                      </button>
+                    </div>
                   </div>
                   {financeResult && (
                     <div

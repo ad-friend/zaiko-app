@@ -446,6 +446,67 @@ export type FinancialChunkResult = {
   complete: boolean;
 };
 
+/** SP-API 応答から FinancialEvents ブロックを取り出す（payload ラップの差を吸収） */
+export function extractFinancialEventsPayload(res: unknown): FinancialEventsPayload {
+  const r = res as Record<string, unknown> | null;
+  if (!r || typeof r !== "object") return {};
+  const payload = r.payload as Record<string, unknown> | undefined;
+  if (payload && typeof payload === "object" && payload.FinancialEvents != null && typeof payload.FinancialEvents === "object") {
+    return payload.FinancialEvents as FinancialEventsPayload;
+  }
+  if (r.FinancialEvents != null && typeof r.FinancialEvents === "object") {
+    return r.FinancialEvents as FinancialEventsPayload;
+  }
+  return r as FinancialEventsPayload;
+}
+
+/** Shipment / Refund / Adjustment を sales_transactions 行に展開（listFinancialEvents / ByOrderId 共通） */
+export function financialEventsPayloadToRows(events: FinancialEventsPayload): SalesTransactionRow[] {
+  const list = Array.isArray(events.ShipmentEventList) ? events.ShipmentEventList : [];
+  const refundList = Array.isArray(events.RefundEventList) ? events.RefundEventList : [];
+  const adjList = Array.isArray(events.AdjustmentEventList) ? events.AdjustmentEventList : [];
+  return [
+    ...flattenShipmentEvents(list, "Order"),
+    ...flattenShipmentEvents(refundList, "Refund"),
+    ...flattenAdjustmentEvents(adjList),
+  ];
+}
+
+/** 環境変数 FINANCES_LOOKBACK_DAYS（未設定時 45、1～120 にクランプ） */
+export function parseFinancesLookbackDaysFromEnv(): number {
+  const raw = process.env.FINANCES_LOOKBACK_DAYS;
+  const n = raw != null && String(raw).trim() !== "" ? parseInt(String(raw).trim(), 10) : NaN;
+  if (!Number.isFinite(n)) return 45;
+  return Math.min(120, Math.max(1, Math.trunc(n)));
+}
+
+/**
+ * 日次 cron 用: 東京日付キーと、その日の最初の実行で固定する Posted 窓（同日中は state の postedAfter/Before を再利用）。
+ * 窓は「実行時点の now から lookback 日前」～「now（クランプ済み）」。
+ */
+export function rollingFinancesBoundsForCronDay(lookbackDays: number): {
+  postedAfter: string;
+  postedBefore: string;
+  dateKey: string;
+  label: string;
+} {
+  const lb = Math.min(120, Math.max(1, Math.trunc(lookbackDays)));
+  const tz = "Asia/Tokyo";
+  const fmtEn = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });
+  const dateKey = fmtEn.format(new Date());
+  const nowMs = Date.now();
+  const afterMs = nowMs - lb * 86400000;
+  const postedAfterRaw = new Date(afterMs).toISOString();
+  const postedBeforeRaw = new Date().toISOString();
+  const c = clampFinancialQueryBounds(postedAfterRaw, postedBeforeRaw);
+  return {
+    postedAfter: c.postedAfter,
+    postedBefore: c.postedBefore,
+    dateKey,
+    label: `過去${lb}日（東京日付 ${dateKey} 基準・実行時点の窓）`,
+  };
+}
+
 /**
  * listFinancialEvents を最大 maxPages ページまで取得。
  * maxPages が null / undefined のときは NextToken が尽きるまで取得。
@@ -478,21 +539,65 @@ export async function fetchFinancialEventsChunk(
       operation: "listFinancialEvents",
       endpoint: "finances",
       query,
-    })) as FinancialEventsPayload & { FinancialEvents?: FinancialEventsPayload; NextToken?: string };
+    })) as FinancialEventsPayload & { FinancialEvents?: FinancialEventsPayload; NextToken?: string; payload?: { FinancialEvents?: FinancialEventsPayload } };
 
-    const events = res?.FinancialEvents ?? res;
-    const list = Array.isArray(events.ShipmentEventList) ? events.ShipmentEventList : [];
-    const refundList = Array.isArray(events.RefundEventList) ? events.RefundEventList : [];
-    const adjList = Array.isArray(events.AdjustmentEventList) ? events.AdjustmentEventList : [];
-
-    rows.push(
-      ...flattenShipmentEvents(list, "Order"),
-      ...flattenShipmentEvents(refundList, "Refund"),
-      ...flattenAdjustmentEvents(adjList)
-    );
+    const events = extractFinancialEventsPayload(res);
+    rows.push(...financialEventsPayloadToRows(events));
 
     pagesFetched += 1;
-    nextToken = res.NextToken ?? events.NextToken ?? null;
+    const top = res as Record<string, unknown>;
+    nextToken = (top.NextToken as string | undefined) ?? (events as { NextToken?: string }).NextToken ?? null;
+    if (!nextToken) {
+      return { rows, nextToken: null, pagesFetched, complete: true };
+    }
+    if (pagesFetched >= maxPages) {
+      return { rows, nextToken, pagesFetched, complete: false };
+    }
+    await sleep(1500);
+  }
+
+  return { rows, nextToken, pagesFetched, complete: !nextToken };
+}
+
+/**
+ * 注文 ID 単位の財務イベント取得（listFinancialEventsByOrderId）。
+ * Posted 期間指定は不要。ページングは NextToken。
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function fetchFinancialEventsByOrderIdChunk(
+  spClient: any,
+  options: {
+    orderId: string;
+    startNextToken?: string | null;
+    maxPages?: number | null;
+  }
+): Promise<FinancialChunkResult> {
+  const orderId = String(options.orderId ?? "").trim();
+  if (!orderId) {
+    return { rows: [], nextToken: null, pagesFetched: 0, complete: true };
+  }
+  const maxPages = options.maxPages == null ? 30 : Math.max(1, options.maxPages);
+  let nextToken: string | null = options.startNextToken ?? null;
+  const rows: SalesTransactionRow[] = [];
+  let pagesFetched = 0;
+
+  while (pagesFetched < maxPages) {
+    const query: Record<string, unknown> = { MaxResultsPerPage: 100 };
+    if (nextToken) query.NextToken = nextToken;
+
+    const res = (await spClient.callAPI({
+      operation: "listFinancialEventsByOrderId",
+      endpoint: "finances",
+      path: { orderId },
+      query,
+    })) as FinancialEventsPayload & { FinancialEvents?: FinancialEventsPayload; NextToken?: string; payload?: { FinancialEvents?: FinancialEventsPayload } };
+
+    const events = extractFinancialEventsPayload(res);
+    rows.push(...financialEventsPayloadToRows(events));
+
+    pagesFetched += 1;
+    const top = res as Record<string, unknown>;
+    nextToken = (top.NextToken as string | undefined) ?? (events as { NextToken?: string }).NextToken ?? null;
     if (!nextToken) {
       return { rows, nextToken: null, pagesFetched, complete: true };
     }
