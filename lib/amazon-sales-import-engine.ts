@@ -14,6 +14,10 @@ import { attachSalesTransactionIdempotency } from "@/lib/sales-transaction-idemp
 export const MAX_ROWS_PER_REQUEST = 50;
 const MAX_SKIPPED_ROWS_IN_RESPONSE = 100;
 
+/** allowAdjustments=false のときの補填スキップ（skipped_rows / row_errors は行番号でユニーク化） */
+export const ADJUSTMENT_CSV_SKIP_CODE = "ADJUSTMENT_CSV_SKIPPED";
+export const ADJUSTMENT_CSV_SKIP_MESSAGE = "補填データのためスキップ";
+
 export type AmazonSalesCsvUpsertRow = {
   amazon_order_id: string | null;
   sku: string | null;
@@ -222,6 +226,34 @@ export type AmazonSalesCsvSkippedRow = {
   detail?: string;
 };
 
+function dedupeSkippedRowsByCsvLine(rows: AmazonSalesCsvSkippedRow[]): AmazonSalesCsvSkippedRow[] {
+  const seen = new Set<number>();
+  const out: AmazonSalesCsvSkippedRow[] = [];
+  for (const row of rows) {
+    if (seen.has(row.line)) continue;
+    seen.add(row.line);
+    out.push(row);
+  }
+  return out;
+}
+
+/** `行 N: ...` を元 CSV 行番号でユニーク化（先勝ち） */
+function dedupeRowErrorsByCsvLine(errors: string[]): string[] {
+  const seen = new Set<number>();
+  const out: string[] = [];
+  const re = /^行 (\d+):/;
+  for (const err of errors) {
+    const m = err.match(re);
+    if (m) {
+      const n = Number(m[1]);
+      if (!Number.isFinite(n) || seen.has(n)) continue;
+      seen.add(n);
+    }
+    out.push(err);
+  }
+  return out;
+}
+
 export type AmazonSalesImportRequestBody = {
   rows?: unknown;
   headers?: unknown;
@@ -231,6 +263,8 @@ export type AmazonSalesImportRequestBody = {
   totalChunks?: unknown;
   skippedPrefixLines?: unknown;
   rowOffsetBase?: unknown;
+  /** true のときのみ正規化後 Adjustment を CSV から取り込む（デフォルトは未指定=false） */
+  allowAdjustments?: unknown;
 };
 
 export type AmazonSalesCsvBuildOk = {
@@ -307,6 +341,7 @@ export function buildAmazonSalesCsvImportFromBody(body: AmazonSalesImportRequest
     typeof body.rowOffsetBase === "number" && Number.isFinite(body.rowOffsetBase) && body.rowOffsetBase >= 0
       ? Math.floor(body.rowOffsetBase)
       : 0;
+  const allowAdjustments = body.allowAdjustments === true;
 
   if (!Array.isArray(body.rows) || body.rows.length === 0) {
     return {
@@ -495,6 +530,10 @@ export function buildAmazonSalesCsvImportFromBody(body: AmazonSalesImportRequest
         amountDescription: "",
         descriptionColumn: descRaw,
       });
+      if (!allowAdjustments && norm.transaction_type === "Adjustment") {
+        pushSkip(lineNo, ADJUSTMENT_CSV_SKIP_CODE, ADJUSTMENT_CSV_SKIP_MESSAGE, null);
+        continue;
+      }
       expanded.push({
         amazon_order_id: null,
         posted_iso: postedIso,
@@ -535,7 +574,13 @@ export function buildAmazonSalesCsvImportFromBody(body: AmazonSalesImportRequest
         descriptionColumn: descRaw,
       });
 
+      if (!allowAdjustments && norm.transaction_type === "Adjustment") {
+        pushSkip(lineNo, ADJUSTMENT_CSV_SKIP_CODE, ADJUSTMENT_CSV_SKIP_MESSAGE, orderId);
+        continue;
+      }
+
       if (
+        allowAdjustments &&
         orderId &&
         norm.transaction_type === "Adjustment" &&
         norm.amount_type === "Adjustment" &&
@@ -589,8 +634,8 @@ export function buildAmazonSalesCsvImportFromBody(body: AmazonSalesImportRequest
       merged_split_payment_orders: 0,
       merged_split_payment_extra_rows: 0,
       merge_message: "取り込む有効行がありません（注文種別の行に金額が無い、または列が空です）。",
-      row_errors: rowErrors.slice(0, 50),
-      skipped_rows,
+      row_errors: dedupeRowErrorsByCsvLine(rowErrors).slice(0, 50),
+      skipped_rows: dedupeSkippedRowsByCsvLine(skipped_rows),
       insert_payload: [],
     };
   }
@@ -702,8 +747,8 @@ export function buildAmazonSalesCsvImportFromBody(body: AmazonSalesImportRequest
     merged_split_payment_orders: mergedSplitPaymentOrders,
     merged_split_payment_extra_rows: mergedSplitPaymentExtraRows,
     merge_message: mergeMessage,
-    row_errors: rowErrors.slice(0, 50),
-    skipped_rows,
+    row_errors: dedupeRowErrorsByCsvLine(rowErrors).slice(0, 50),
+    skipped_rows: dedupeSkippedRowsByCsvLine(skipped_rows),
     insert_payload,
   };
 }

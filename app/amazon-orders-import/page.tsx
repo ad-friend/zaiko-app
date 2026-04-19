@@ -336,6 +336,8 @@ export default function AmazonOrdersImportPage() {
     skippedPrefixLines: number;
   };
   const [salesPrepared, setSalesPrepared] = useState<SalesPreparedPayload | null>(null);
+  /** 未チェック時は CSV の補填・調整行を取り込まない（Finances API 側を正とする） */
+  const [allowAdjustments, setAllowAdjustments] = useState(false);
   const [salesPreviewRunning, setSalesPreviewRunning] = useState(false);
   const [salesPreviewError, setSalesPreviewError] = useState<string | null>(null);
   const [salesPreviewResult, setSalesPreviewResult] = useState<{
@@ -543,6 +545,7 @@ export default function AmazonOrdersImportPage() {
     setSalesPreviewError(null);
     setSalesPreviewResult(null);
     setSalesPrepared(null);
+    setAllowAdjustments(false);
     setSalesFileName(file.name);
     setSalesRunning(false);
     setSalesImportProgress(null);
@@ -664,6 +667,7 @@ export default function AmazonOrdersImportPage() {
           totalChunks,
           skippedPrefixLines,
           rowOffsetBase: start,
+          allowAdjustments,
         });
 
         const parsedRes = await readJsonOrTextSafe<SalesPreviewChunkApi>(res);
@@ -760,6 +764,7 @@ export default function AmazonOrdersImportPage() {
           totalChunks,
           skippedPrefixLines,
           rowOffsetBase: start,
+          allowAdjustments,
         });
 
         const parsedRes = await readJsonOrTextSafe<SalesImportApi>(res);
@@ -1019,6 +1024,17 @@ export default function AmazonOrdersImportPage() {
                   パース済み <span className="font-semibold tabular-nums">{salesPrepared.dataRows.length}</span>{" "}
                   行。プレビューまたは取り込みを選んでください。
                 </p>
+              )}
+              {salesPrepared && (
+                <label className="mt-3 flex cursor-pointer items-center gap-2 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={allowAdjustments}
+                    onChange={(e) => setAllowAdjustments(e.target.checked)}
+                    className="rounded border-slate-300"
+                  />
+                  <span>補填・調整データも取り込む</span>
+                </label>
               )}
             </div>
             <div className="flex shrink-0 flex-col sm:flex-row gap-2 w-full sm:w-auto">

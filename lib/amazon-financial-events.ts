@@ -505,6 +505,173 @@ export async function fetchFinancialEventsChunk(
   return { rows, nextToken, pagesFetched, complete: !nextToken };
 }
 
+/** `fetchFinancialEventsChunk` が現状 sales_transactions に展開している EventList キー */
+export const FINANCIAL_EVENT_LIST_KEYS_IMPORTED = new Set([
+  "ShipmentEventList",
+  "RefundEventList",
+  "AdjustmentEventList",
+]);
+
+function snippetForFinancialEventItem(ev: unknown): Record<string, unknown> {
+  if (ev == null) return { _note: "null" };
+  if (typeof ev !== "object") return { _type: typeof ev, _value: String(ev).slice(0, 200) };
+  const o = ev as Record<string, unknown>;
+  const sn: Record<string, unknown> = {};
+  for (const k of ["AmazonOrderId", "PostedDate", "SellerOrderId", "ShipmentId", "MarketplaceName"]) {
+    if (k in o) sn[k] = o[k];
+  }
+  sn._topKeys = Object.keys(o).slice(0, 60);
+  return sn;
+}
+
+function collectArrayKeysFromEventsBlock(events: Record<string, unknown>): string[] {
+  return Object.keys(events).filter((k) => Array.isArray(events[k]));
+}
+
+function countOrderHitsInArray(arr: unknown[], orderId: string): number {
+  if (!orderId) return 0;
+  let n = 0;
+  for (const item of arr) {
+    try {
+      if (item != null && JSON.stringify(item).includes(orderId)) n += 1;
+    } catch {
+      // 循環参照等は無視
+    }
+  }
+  return n;
+}
+
+export type DebugScanListFinancialEventsResult = {
+  postedAfter: string;
+  postedBefore: string;
+  pagesFetched: number;
+  complete: boolean;
+  nextTokenRemaining: string | null;
+  totalArrayLengths: Record<string, number>;
+  totalOrderHits: Record<string, number>;
+  /** 件数が >0 で、現行取込が未処理の配列キー */
+  unhandledNonEmptyArrayKeys: string[];
+  firstOrderHitSnippets: Array<{ listKey: string; snippet: Record<string, unknown> }>;
+  perPage: Array<{
+    pageIndex: number;
+    arrayLengths: Record<string, number>;
+    orderHits: Record<string, number>;
+  }>;
+};
+
+/**
+ * listFinancialEvents の生ブロックをページ走査し、配列キーごとの件数と
+ * 任意の amazon_order_id がどのリストに出現するかを集計する（DB には書かない）。
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function debugScanListFinancialEvents(
+  spClient: any,
+  options: {
+    postedAfter: string;
+    postedBefore: string;
+    amazonOrderId?: string | null;
+    maxPages?: number;
+  }
+): Promise<DebugScanListFinancialEventsResult> {
+  const maxPages = Math.min(100, Math.max(1, options.maxPages ?? 15));
+  const orderId = (options.amazonOrderId ?? "").trim();
+  let nextToken: string | null = null;
+  const { postedAfter, postedBefore } = clampFinancialQueryBounds(options.postedAfter, options.postedBefore);
+
+  const totalArrayLengths: Record<string, number> = {};
+  const totalOrderHits: Record<string, number> = {};
+  const perPage: DebugScanListFinancialEventsResult["perPage"] = [];
+  const firstOrderHitSnippets: Array<{ listKey: string; snippet: Record<string, unknown> }> = [];
+  const seenListForSnippet = new Set<string>();
+
+  let pagesFetched = 0;
+
+  const buildResult = (complete: boolean, remainder: string | null): DebugScanListFinancialEventsResult => {
+    const unhandledNonEmptyArrayKeys = Object.keys(totalArrayLengths)
+      .filter((k) => (totalArrayLengths[k] ?? 0) > 0 && !FINANCIAL_EVENT_LIST_KEYS_IMPORTED.has(k))
+      .sort();
+    return {
+      postedAfter,
+      postedBefore,
+      pagesFetched,
+      complete,
+      nextTokenRemaining: remainder,
+      totalArrayLengths,
+      totalOrderHits,
+      unhandledNonEmptyArrayKeys,
+      firstOrderHitSnippets,
+      perPage,
+    };
+  };
+
+  while (pagesFetched < maxPages) {
+    const query: Record<string, unknown> = {
+      PostedAfter: postedAfter,
+      PostedBefore: postedBefore,
+      MaxResultsPerPage: 100,
+    };
+    if (nextToken) query.NextToken = nextToken;
+
+    const res = (await spClient.callAPI({
+      operation: "listFinancialEvents",
+      endpoint: "finances",
+      query,
+    })) as FinancialEventsPayload & { FinancialEvents?: FinancialEventsPayload; NextToken?: string };
+
+    const events = (res as { FinancialEvents?: unknown }).FinancialEvents ?? res;
+    if (!events || typeof events !== "object") {
+      return buildResult(true, null);
+    }
+    const evObj = events as Record<string, unknown>;
+
+    const arrayLengths: Record<string, number> = {};
+    const orderHits: Record<string, number> = {};
+
+    for (const k of collectArrayKeysFromEventsBlock(evObj)) {
+      const arr = evObj[k] as unknown[];
+      arrayLengths[k] = arr.length;
+      totalArrayLengths[k] = (totalArrayLengths[k] ?? 0) + arr.length;
+      if (orderId) {
+        const hits = countOrderHitsInArray(arr, orderId);
+        orderHits[k] = hits;
+        totalOrderHits[k] = (totalOrderHits[k] ?? 0) + hits;
+        if (hits > 0 && !seenListForSnippet.has(k) && firstOrderHitSnippets.length < 10) {
+          const first = arr.find((item) => {
+            try {
+              return item != null && JSON.stringify(item).includes(orderId);
+            } catch {
+              return false;
+            }
+          });
+          if (first != null) {
+            seenListForSnippet.add(k);
+            firstOrderHitSnippets.push({ listKey: k, snippet: snippetForFinancialEventItem(first) });
+          }
+        }
+      }
+    }
+
+    perPage.push({
+      pageIndex: pagesFetched,
+      arrayLengths,
+      orderHits: orderId ? orderHits : {},
+    });
+
+    pagesFetched += 1;
+    nextToken = res.NextToken ?? (evObj as { NextToken?: string }).NextToken ?? null;
+
+    if (!nextToken) {
+      return buildResult(true, null);
+    }
+    if (pagesFetched >= maxPages) {
+      return buildResult(false, nextToken);
+    }
+    await sleep(1500);
+  }
+
+  return buildResult(!nextToken, nextToken);
+}
+
 export type UpsertSalesResult = { inserted: number; skipped: number; tableMissing: boolean };
 
 export async function upsertSalesTransactionRows(allRows: SalesTransactionRow[]): Promise<UpsertSalesResult> {
