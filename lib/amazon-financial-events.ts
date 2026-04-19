@@ -25,6 +25,8 @@ type ShipmentEvent = {
   AmazonOrderId?: string;
   PostedDate?: string;
   ShipmentItemList?: ShipmentItem[];
+  /** 返金などで ShipmentItemList が空のとき、明細がこちらにのみ載ることがある */
+  ShipmentItemAdjustmentList?: ShipmentItem[];
 };
 type AdjustmentItem = {
   SellerSKU?: string;
@@ -164,15 +166,39 @@ export type SalesTransactionRow = {
   needs_quantity_review?: boolean;
 };
 
+/** Shipment / Refund イベントの明細行（API により ShipmentItemList と ShipmentItemAdjustmentList のどちらか一方のみのことが多い） */
+function lineItemsFromShipmentEvent(ev: ShipmentEvent): ShipmentItem[] {
+  const a = Array.isArray(ev.ShipmentItemList) ? ev.ShipmentItemList : [];
+  const b = Array.isArray(ev.ShipmentItemAdjustmentList) ? ev.ShipmentItemAdjustmentList : [];
+  if (a.length === 0) return b;
+  if (b.length === 0) return a;
+  return [...a, ...b];
+}
+
+/** PostedDate が欠ける返金イベント向け。トップレベルの別名のみ（深い再帰はしない） */
+function postedDateForShipmentEvent(ev: ShipmentEvent): string {
+  const rec = ev as Record<string, unknown>;
+  const candidates = [
+    (ev.PostedDate ?? "").trim(),
+    String(rec.ShipmentDate ?? "").trim(),
+    String(rec.PostedDateTime ?? "").trim(),
+    String(rec.EffectiveDate ?? "").trim(),
+  ];
+  for (const c of candidates) {
+    if (c) return c;
+  }
+  return "";
+}
+
 function flattenShipmentEvents(list: ShipmentEvent[] | undefined, transactionType: string): SalesTransactionRow[] {
   const rows: SalesTransactionRow[] = [];
   if (!Array.isArray(list)) return rows;
   let rowIndex = 0;
   list.forEach((ev, eventIndex) => {
     const orderId = ev.AmazonOrderId?.trim() ?? null;
-    const posted = (ev.PostedDate ?? "").trim();
+    const posted = postedDateForShipmentEvent(ev);
     if (!posted) return;
-    const items = ev.ShipmentItemList ?? [];
+    const items = lineItemsFromShipmentEvent(ev);
     for (const item of items) {
       const sku = item.SellerSKU?.trim() ?? null;
       const charges = item.ItemChargeList ?? [];
@@ -446,18 +472,51 @@ export type FinancialChunkResult = {
   complete: boolean;
 };
 
+function isFinancialEventsShape(o: unknown): o is FinancialEventsPayload {
+  if (!o || typeof o !== "object") return false;
+  const x = o as Record<string, unknown>;
+  return (
+    Array.isArray(x.ShipmentEventList) ||
+    Array.isArray(x.RefundEventList) ||
+    Array.isArray(x.AdjustmentEventList)
+  );
+}
+
+function readFinancesNextToken(res: unknown, events: FinancialEventsPayload): string | null {
+  const top = res as Record<string, unknown>;
+  const fromTop = top.NextToken;
+  if (typeof fromTop === "string" && fromTop.length > 0) return fromTop;
+  const payload = top.payload;
+  if (payload && typeof payload === "object") {
+    const pt = (payload as Record<string, unknown>).NextToken;
+    if (typeof pt === "string" && pt.length > 0) return pt;
+  }
+  const evNt = (events as { NextToken?: string }).NextToken;
+  if (typeof evNt === "string" && evNt.length > 0) return evNt;
+  return null;
+}
+
 /** SP-API 応答から FinancialEvents ブロックを取り出す（payload ラップの差を吸収） */
 export function extractFinancialEventsPayload(res: unknown): FinancialEventsPayload {
   const r = res as Record<string, unknown> | null;
   if (!r || typeof r !== "object") return {};
-  const payload = r.payload as Record<string, unknown> | undefined;
-  if (payload && typeof payload === "object" && payload.FinancialEvents != null && typeof payload.FinancialEvents === "object") {
-    return payload.FinancialEvents as FinancialEventsPayload;
+  const payload = r.payload;
+  if (payload && typeof payload === "object") {
+    const pl = payload as Record<string, unknown>;
+    if (isFinancialEventsShape(pl.FinancialEvents)) {
+      return pl.FinancialEvents as FinancialEventsPayload;
+    }
+    if (isFinancialEventsShape(pl)) {
+      return pl as FinancialEventsPayload;
+    }
   }
-  if (r.FinancialEvents != null && typeof r.FinancialEvents === "object") {
+  if (isFinancialEventsShape(r.FinancialEvents)) {
     return r.FinancialEvents as FinancialEventsPayload;
   }
-  return r as FinancialEventsPayload;
+  if (isFinancialEventsShape(r)) {
+    return r as FinancialEventsPayload;
+  }
+  return {};
 }
 
 /** Shipment / Refund / Adjustment を sales_transactions 行に展開（listFinancialEvents / ByOrderId 共通） */
@@ -545,8 +604,7 @@ export async function fetchFinancialEventsChunk(
     rows.push(...financialEventsPayloadToRows(events));
 
     pagesFetched += 1;
-    const top = res as Record<string, unknown>;
-    nextToken = (top.NextToken as string | undefined) ?? (events as { NextToken?: string }).NextToken ?? null;
+    nextToken = readFinancesNextToken(res, events);
     if (!nextToken) {
       return { rows, nextToken: null, pagesFetched, complete: true };
     }
@@ -596,8 +654,7 @@ export async function fetchFinancialEventsByOrderIdChunk(
     rows.push(...financialEventsPayloadToRows(events));
 
     pagesFetched += 1;
-    const top = res as Record<string, unknown>;
-    nextToken = (top.NextToken as string | undefined) ?? (events as { NextToken?: string }).NextToken ?? null;
+    nextToken = readFinancesNextToken(res, events);
     if (!nextToken) {
       return { rows, nextToken: null, pagesFetched, complete: true };
     }
@@ -723,11 +780,8 @@ export async function debugScanListFinancialEvents(
       query,
     })) as FinancialEventsPayload & { FinancialEvents?: FinancialEventsPayload; NextToken?: string };
 
-    const events = (res as { FinancialEvents?: unknown }).FinancialEvents ?? res;
-    if (!events || typeof events !== "object") {
-      return buildResult(true, null);
-    }
-    const evObj = events as Record<string, unknown>;
+    const eventsPayload = extractFinancialEventsPayload(res);
+    const evObj = (eventsPayload && typeof eventsPayload === "object" ? eventsPayload : {}) as Record<string, unknown>;
 
     const arrayLengths: Record<string, number> = {};
     const orderHits: Record<string, number> = {};
@@ -763,7 +817,7 @@ export async function debugScanListFinancialEvents(
     });
 
     pagesFetched += 1;
-    nextToken = res.NextToken ?? (evObj as { NextToken?: string }).NextToken ?? null;
+    nextToken = readFinancesNextToken(res, eventsPayload);
 
     if (!nextToken) {
       return buildResult(true, null);
