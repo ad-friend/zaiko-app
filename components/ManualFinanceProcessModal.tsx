@@ -880,7 +880,7 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                       <div className="rounded-lg border border-slate-200 bg-white p-3">
                         <p className="text-xs font-semibold text-slate-700 mb-2">返品後のコンディション内訳（数量）</p>
                         <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-                          <label className="flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50/50 px-3 py-2">
+                          <label className="flex flex-col items-center rounded-md border border-slate-200 bg-slate-50/50 px-3 py-2">
                             <span className="text-xs font-medium text-slate-700">新品（new）</span>
                             <input
                               type="number"
@@ -893,10 +893,10 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                                 setDispositions((prev) => ({ ...prev, new: Number.isFinite(n) ? n : 0 }));
                                 setError(null);
                               }}
-                              className="w-20 rounded-md border border-slate-200 bg-white px-2 py-1 text-sm text-slate-800 text-right tabular-nums"
+                              className="mt-1 w-full max-w-24 rounded-md border border-slate-200 bg-white px-2 py-1 text-sm text-slate-800 text-center tabular-nums"
                             />
                           </label>
-                          <label className="flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50/50 px-3 py-2">
+                          <label className="flex flex-col items-center rounded-md border border-slate-200 bg-slate-50/50 px-3 py-2">
                             <span className="text-xs font-medium text-slate-700">中古（used）</span>
                             <input
                               type="number"
@@ -909,10 +909,10 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                                 setDispositions((prev) => ({ ...prev, used: Number.isFinite(n) ? n : 0 }));
                                 setError(null);
                               }}
-                              className="w-20 rounded-md border border-slate-200 bg-white px-2 py-1 text-sm text-slate-800 text-right tabular-nums"
+                              className="mt-1 w-full max-w-24 rounded-md border border-slate-200 bg-white px-2 py-1 text-sm text-slate-800 text-center tabular-nums"
                             />
                           </label>
-                          <label className="flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50/50 px-3 py-2">
+                          <label className="flex flex-col items-center rounded-md border border-slate-200 bg-slate-50/50 px-3 py-2">
                             <span className="text-xs font-medium text-slate-700">ジャンク（junk）</span>
                             <input
                               type="number"
@@ -925,7 +925,7 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                                 setDispositions((prev) => ({ ...prev, junk: Number.isFinite(n) ? n : 0 }));
                                 setError(null);
                               }}
-                              className="w-20 rounded-md border border-slate-200 bg-white px-2 py-1 text-sm text-slate-800 text-right tabular-nums"
+                              className="mt-1 w-full max-w-24 rounded-md border border-slate-200 bg-white px-2 py-1 text-sm text-slate-800 text-center tabular-nums"
                             />
                           </label>
                         </div>
