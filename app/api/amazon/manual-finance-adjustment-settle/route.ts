@@ -2,10 +2,12 @@
  * 補填（adjustment 系）の手動完結。
  * - 財務: 指定明細を reconciled に（在庫紐付けなしでも可）
  * - 任意: stockId 指定時、金額が正で経費スキップ対象でない行に stock_id / unit_cost を付与し、
- *   inbound_items.settled_at のみ更新（order_id は補填では変更しない）
+ *   inbound_items.settled_at を更新（order_id は補填では変更しない）
+ * - allocations 指定時: 同一売上明細に複数 inbound を割り当て可能（1対多）。sales_transactions の stock_id / unit_cost は更新しない。
+ *   割当在庫すべてに settled_at のみ反映する。
  * POST body: { salesTransactionIds: number[], stockId?: number | null, internal_note?: string | null,
  *   allocations?: { salesTransactionId: number; stockId: number }[] }
- * - allocations が指定され、かつ1件以上のとき: 正の経費以外の各行ごとに在庫を割り当て（stockId は無視）
+ * - allocations が指定され、かつ1件以上のとき: 正の経費以外の明細IDに在庫を割当（同一明細IDの複数行可）
  * - それ以外で stockId あり: 従来どおり全 attach 行に同一在庫
  */
 import { NextRequest, NextResponse } from "next/server";
@@ -140,12 +142,7 @@ export async function POST(request: NextRequest) {
 
       if (allocations != null) {
         const attachSet = new Set(attachIds);
-        const seenTx = new Set<number>();
         for (const a of allocations) {
-          if (seenTx.has(a.salesTransactionId)) {
-            return NextResponse.json({ error: "allocations に同一明細 ID が重複しています。" }, { status: 400 });
-          }
-          seenTx.add(a.salesTransactionId);
           if (!attachSet.has(a.salesTransactionId)) {
             return NextResponse.json(
               { error: "allocations に在庫紐付け対象外の明細 ID が含まれています。" },
@@ -153,29 +150,13 @@ export async function POST(request: NextRequest) {
             );
           }
         }
-        if (allocations.length !== attachIds.length) {
-          return NextResponse.json(
-            { error: "在庫紐付け対象の正の明細と allocations の件数が一致しません。" },
-            { status: 400 }
-          );
-        }
 
         const uniqueInbound = new Set<number>();
         for (const a of allocations) {
-          const { data: stock, error: stockErr } = await supabase
-            .from("inbound_items")
-            .select("id, effective_unit_price")
-            .eq("id", a.stockId)
-            .single();
+          const { data: stock, error: stockErr } = await supabase.from("inbound_items").select("id").eq("id", a.stockId).single();
           if (stockErr || !stock) {
             return NextResponse.json({ error: `在庫 id=${a.stockId} が見つかりません。` }, { status: 404 });
           }
-          const unitCost = Number(stock.effective_unit_price ?? 0);
-          const { error: uErr } = await supabase
-            .from("sales_transactions")
-            .update({ stock_id: a.stockId, unit_cost: unitCost })
-            .eq("id", a.salesTransactionId);
-          if (uErr) throw uErr;
           uniqueInbound.add(a.stockId);
         }
         for (const invId of uniqueInbound) {
@@ -227,7 +208,7 @@ export async function POST(request: NextRequest) {
       ok: true,
       message:
         allocations != null
-          ? "補填を在庫紐付け付きで消込しました（明細ごとに在庫を割当）。"
+          ? "補填を在庫紐付け付きで消込しました（割当在庫の settled_at を更新。明細は1対多可）。"
           : stockId != null
             ? "補填を在庫紐付け付きで消込しました。"
             : "補填明細を財務のみ消込しました（在庫は変更していません）。",

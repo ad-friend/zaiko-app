@@ -516,11 +516,20 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
     setError(null);
     try {
       // internal_note は adjustment-settle API 側でまとめて更新する（二重更新を避ける）
+      // 補填APIは1明細に複数在庫可のため、代表明細ID（正の明細の先頭）に全選択在庫を紐づけて送る
       const allocations = withStock
-        ? adjustmentAttachRows.map((r) => ({
-            salesTransactionId: r.id,
-            stockId: adjustmentStockByTxId[r.id] as number,
-          }))
+        ? (() => {
+            const repSalesTransactionId = adjustmentAttachRows[0]!.id;
+            const stockIdSet = new Set<number>();
+            for (const r of adjustmentAttachRows) {
+              const inv = adjustmentStockByTxId[r.id];
+              if (inv != null && Number(inv) >= 1) stockIdSet.add(Number(inv));
+            }
+            return [...stockIdSet].map((stockId) => ({
+              salesTransactionId: repSalesTransactionId,
+              stockId,
+            }));
+          })()
         : undefined;
       const res = await fetch("/api/amazon/manual-finance-adjustment-settle", {
         method: "POST",

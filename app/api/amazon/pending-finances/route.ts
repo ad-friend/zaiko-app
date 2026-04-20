@@ -1,7 +1,8 @@
 /**
  * 未処理財務データ（stock_id IS NULL）をグループ化して返す
- * GET: sales_transactions の未紐付き明細を amazon_order_id（または sku+posted_date）でグループ化し集計する。
+ * GET: sales_transactions の未紐付き明細を amazon_order_id、または補填用の論理キーでグループ化する。
  * - 注文番号が無くても adjustment 系の行は一覧に含める（補填の手動処理用）。
+ * - 補填（注文番号なし）: finance_line_group_id があればそれのみで1カード。無ければ同一暦日＋transaction_type＋amount_type で1カード（SKU や行 id はキーに含めない）。
  */
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
@@ -128,17 +129,19 @@ export async function GET() {
     for (const row of list) {
       const orderId = row.amazon_order_id?.trim() ?? null;
       const posted = row.posted_date ?? "";
-      const sku = row.sku?.trim() ?? null;
       const txType = row.transaction_type ?? "Unknown";
+      const amountType = String(row.amount_type ?? "Unknown").trim();
 
       const finGid = String((row as { finance_line_group_id?: string | null }).finance_line_group_id ?? "").trim();
+      const postedDay = posted.length >= 10 ? posted.slice(0, 10) : posted;
+
       let key: string;
       if (orderId) {
         key = orderId;
       } else if (finGid) {
-        key = `adj_${txType}_${sku ?? "n/a"}_${posted}_${finGid}`;
+        key = `adj_fin:${finGid}`;
       } else {
-        key = `adj_${txType}_${sku ?? "n/a"}_${posted}_${row.id}`;
+        key = `adj_day:${postedDay}_${txType}_${amountType}`;
       }
 
       if (!groupMap.has(key)) groupMap.set(key, []);
