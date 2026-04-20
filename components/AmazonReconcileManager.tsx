@@ -178,6 +178,7 @@ export default function AmazonReconcileManager() {
   const [isLoadingPendingFinances, setIsLoadingPendingFinances] = useState(false);
   const [selectedPendingFinance, setSelectedPendingFinance] = useState<PendingFinanceGroupData | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [pageToast, setPageToast] = useState<{ message: string; variant: "success" | "error" } | null>(null);
   const [expandedMemoGroupId, setExpandedMemoGroupId] = useState<string | null>(null);
   const [memoDraftByGroupId, setMemoDraftByGroupId] = useState<Record<string, string>>({});
   const [memoSavingGroupId, setMemoSavingGroupId] = useState<string | null>(null);
@@ -337,6 +338,12 @@ export default function AmazonReconcileManager() {
   useEffect(() => {
     fetchPendingFinances();
   }, [fetchPendingFinances]);
+
+  useEffect(() => {
+    if (!pageToast) return;
+    const id = setTimeout(() => setPageToast(null), 6000);
+    return () => clearTimeout(id);
+  }, [pageToast]);
 
   const runFetchOrders = async () => {
     setIsFetching(true);
@@ -662,6 +669,18 @@ export default function AmazonReconcileManager() {
 
   return (
     <div className="space-y-6">
+      {pageToast ? (
+        <div
+          className={`fixed bottom-6 right-6 z-[100] max-w-sm rounded-lg border px-4 py-3 text-sm shadow-lg ${
+            pageToast.variant === "success"
+              ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+              : "border-red-200 bg-red-50 text-red-900"
+          }`}
+          role="status"
+        >
+          {pageToast.message}
+        </div>
+      ) : null}
       {error && (
         <div className="rounded-lg bg-red-50 border border-red-200 p-4 text-sm text-red-800">
           {error}
@@ -1136,6 +1155,7 @@ export default function AmazonReconcileManager() {
         }}
         data={selectedPendingFinance}
         onSuccess={fetchPendingFinances}
+        onToast={(t) => setPageToast(t)}
       />
     </div>
   );

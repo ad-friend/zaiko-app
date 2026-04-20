@@ -40,6 +40,10 @@ export type PendingFinanceGroupData = {
   /** STEP5 カード用（API: pending-finances） */
   internal_note_summary?: string | null;
   needs_quantity_review?: boolean;
+  /** API: pending-finances の分類追加（無い環境でも動くよう optional） */
+  suggestedCategory?: "Refund" | "Adjustment" | "Mixed" | null;
+  hasRefund?: boolean;
+  hasAdjustment?: boolean;
 };
 
 export type CandidateStock = {
@@ -64,7 +68,16 @@ type Props = {
   onClose: () => void;
   data: PendingFinanceGroupData | null;
   onSuccess?: () => void;
+  onToast?: (t: { message: string; variant: "success" | "error" }) => void;
 };
+
+type CardCategory = "Refund" | "Adjustment" | "Mixed" | "Other";
+
+function toCardCategory(raw: unknown): CardCategory {
+  const s = String(raw ?? "").trim();
+  if (s === "Refund" || s === "Adjustment" || s === "Mixed") return s;
+  return "Other";
+}
 
 function normalizeTxType(raw: string | null | undefined): string {
   return String(raw ?? "").normalize("NFKC").trim().toLowerCase();
@@ -164,8 +177,9 @@ function mergeCandidateStocksById(base: CandidateStock[], extra: CandidateStock[
   return [...m.values()].sort((a, b) => a.id - b.id);
 }
 
-export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuccess }: Props) {
+export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuccess, onToast }: Props) {
   const [processMode, setProcessMode] = useState<ProcessMode>("order_reconcile");
+  const [cardCategory, setCardCategory] = useState<CardCategory>("Other");
   const [candidateStocks, setCandidateStocks] = useState<CandidateStock[]>([]);
   const [adjustmentCandidates, setAdjustmentCandidates] = useState<CandidateStock[]>([]);
   const [selectedStockId, setSelectedStockId] = useState<number | null>(null);
@@ -319,6 +333,7 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
     const allowed = new Set(opts.map((o) => o.id));
     const d = defaultProcessMode(data);
     setProcessMode(allowed.has(d) ? d : (opts[0]?.id ?? "order_reconcile"));
+    setCardCategory(toCardCategory(data.suggestedCategory));
     setSelectedStockId(null);
     {
       const m: Record<number, number | null> = {};
@@ -355,6 +370,7 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
     data?.can_order_reconcile,
     data?.can_refund_positive_offset,
     data?.is_principal_tax_quad,
+    data?.suggestedCategory,
     rawDetailsNoteSig,
   ]);
 
@@ -486,6 +502,57 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
     }
   };
 
+  const handleRefundRelease = async () => {
+    if (!data) return;
+    const ids = details.map((d) => d.id).filter((n) => Number.isFinite(n) && n >= 1);
+    if (ids.length === 0) {
+      setError("明細IDが不正です。");
+      return;
+    }
+
+    const ok = window.confirm(
+      "返金処理＆在庫戻しを実行します。\n" +
+        "在庫は「未処理のものだけ」戻し、返品済み・フリー在庫はスキップされます。\n" +
+        "続行しますか？"
+    );
+    if (!ok) return;
+
+    setSubmitting(true);
+    setError(null);
+    try {
+      await persistInternalNoteIfNeeded(ids);
+      const res = await fetch("/api/amazon/manual-finance-refund-release", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          salesTransactionIds: ids,
+          amazon_order_id: data.amazon_order_id ?? null,
+        }),
+      });
+      const json = (await res.json().catch(() => ({}))) as any;
+      if (!res.ok) throw new Error(json.error ?? "処理に失敗しました");
+
+      const updatedSales = Number(json.updated_sales_tx_count ?? 0);
+      const updatedInbound = Number(json.updated_inbound_count ?? 0);
+      const skipped =
+        Number(json.skipped_already_free ?? 0) + Number(json.skipped_return_flagged ?? 0);
+
+      onToast?.({
+        variant: "success",
+        message: `✅ ${updatedSales}件の明細を消込完了、${updatedInbound}件の在庫を戻しました（スキップ: ${skipped}件）`,
+      });
+
+      onSuccess?.();
+      onClose();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "処理に失敗しました";
+      onToast?.({ variant: "error", message: `❌ ${msg}` });
+      setError(msg);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const handleAdjustmentSettle = async (withStock: boolean) => {
     if (!data) return;
     const ids = details.map((d) => d.id);
@@ -582,7 +649,38 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
             処理内容を選んでから確定してください。返金の<strong>実物在庫</strong>は返品検品・在庫画面で扱い、ここでは<strong>財務上の相殺・本消込・補填の消込</strong>に限定します（補填で在庫に紐付ける場合は下で明示的に選択）。
           </p>
 
-          {modeOptions.length > 1 && (
+          {data ? (
+            <div className="mb-5 rounded-lg border border-slate-200 bg-white p-3">
+              <p className="text-xs font-semibold text-slate-700 mb-2">種別（手動）</p>
+              <select
+                value={cardCategory}
+                onChange={(e) => {
+                  const next = e.target.value as CardCategory;
+                  setCardCategory(next);
+                  setError(null);
+                  if (next === "Refund" || next === "Mixed") {
+                    // Refundは専用APIで処理する（在庫戻し含む）
+                    return;
+                  }
+                  if (next === "Adjustment") {
+                    setProcessMode("adjustment_finance_only");
+                  }
+                }}
+                className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800"
+              >
+                <option value="Refund">Refund（返金）</option>
+                <option value="Adjustment">Adjustment（補填）</option>
+                <option value="Mixed">Mixed（返品＆補填）</option>
+                <option value="Other">Other</option>
+              </select>
+              <p className="mt-2 text-[11px] text-slate-500 leading-relaxed">
+                初期値は自動判別（pending-finances）です。モーダルを閉じるとリセットされます（DB保存しません）。
+              </p>
+            </div>
+          ) : null}
+
+          {/* 種別=Other のときのみ従来の処理モードを表示 */}
+          {cardCategory === "Other" && modeOptions.length > 1 && (
             <div className="mb-5 rounded-lg border border-slate-200 bg-slate-50/80 p-3">
               <p className="text-xs font-semibold text-slate-700 mb-2">処理モード</p>
               <div className="flex flex-col gap-2">
@@ -601,6 +699,41 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                     <span>{o.label}</span>
                   </label>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {/* 種別=Adjustment のときは補填モードを明示（JAN検索UIを有効化） */}
+          {cardCategory === "Adjustment" && (
+            <div className="mb-5 rounded-lg border border-emerald-200 bg-emerald-50/60 p-3">
+              <p className="text-xs font-semibold text-emerald-950 mb-2">補填モード</p>
+              <div className="flex flex-col gap-2">
+                <label className="flex items-start gap-2 cursor-pointer text-sm text-emerald-950">
+                  <input
+                    type="radio"
+                    name="adjustment-mode"
+                    checked={processMode === "adjustment_finance_only"}
+                    onChange={() => {
+                      setProcessMode("adjustment_finance_only");
+                      setError(null);
+                    }}
+                    className="mt-0.5 border-slate-300 text-emerald-600"
+                  />
+                  <span>補填・財務のみ完結</span>
+                </label>
+                <label className="flex items-start gap-2 cursor-pointer text-sm text-emerald-950">
+                  <input
+                    type="radio"
+                    name="adjustment-mode"
+                    checked={processMode === "adjustment_with_stock"}
+                    onChange={() => {
+                      setProcessMode("adjustment_with_stock");
+                      setError(null);
+                    }}
+                    className="mt-0.5 border-slate-300 text-emerald-600"
+                  />
+                  <span>補填・在庫にも紐付け（JAN検索・引当）</span>
+                </label>
               </div>
             </div>
           )}
@@ -699,6 +832,28 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
             <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
               {error && <p className="text-sm text-red-600 px-4 pt-4">{error}</p>}
 
+              {(cardCategory === "Refund" || cardCategory === "Mixed") && (
+                <>
+                  <h3 className="bg-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-700 border-b border-slate-200">
+                    返金処理＆在庫戻し
+                  </h3>
+                  <div className="p-4 space-y-4">
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      このグループの明細を消込完了にし、返金数量分だけ在庫の引当（order_id / settled_at）を解除します。
+                      返品済み（return_inspection / disposed / junk_return）や既にフリーの在庫はスキップされます。
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => void handleRefundRelease()}
+                      disabled={submitting}
+                      className="w-full inline-flex items-center justify-center rounded-lg bg-amber-600 text-white py-2.5 px-4 text-sm font-semibold hover:bg-amber-700 disabled:opacity-50 transition-colors shadow-sm"
+                    >
+                      {submitting ? "処理中..." : "返金処理＆在庫戻しを実行"}
+                    </button>
+                  </div>
+                </>
+              )}
+
               {processMode === "principal_tax_offset" && isQuad && (
                 <>
                   <h3 className="bg-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-700 border-b border-slate-200">
@@ -737,7 +892,7 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                 </>
               )}
 
-              {processMode === "order_reconcile" && Boolean(data?.amazon_order_id?.trim()) && (
+              {cardCategory === "Other" && processMode === "order_reconcile" && Boolean(data?.amazon_order_id?.trim()) && (
                 <>
                   <h3 className="bg-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-700 border-b border-slate-200">
                     紐付ける在庫の選択
@@ -857,7 +1012,7 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                 </>
               )}
 
-              {processMode === "refund_positive_offset" && Boolean(data?.amazon_order_id?.trim()) && (
+              {cardCategory === "Other" && processMode === "refund_positive_offset" && Boolean(data?.amazon_order_id?.trim()) && (
                 <>
                   <h3 className="bg-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-700 border-b border-slate-200">
                     返金＋プラス売上の相殺
@@ -886,7 +1041,7 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                 </>
               )}
 
-              {processMode === "adjustment_finance_only" && isAdjustment && (
+              {(cardCategory === "Adjustment" || cardCategory === "Other") && processMode === "adjustment_finance_only" && isAdjustment && (
                 <>
                   <h3 className="bg-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-700 border-b border-slate-200">
                     補填・財務のみ
@@ -907,7 +1062,7 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                 </>
               )}
 
-              {processMode === "adjustment_with_stock" && isAdjustment && (
+              {(cardCategory === "Adjustment" || cardCategory === "Other") && processMode === "adjustment_with_stock" && isAdjustment && (
                 <>
                   <h3 className="bg-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-700 border-b border-slate-200">
                     補填・在庫にも紐付け

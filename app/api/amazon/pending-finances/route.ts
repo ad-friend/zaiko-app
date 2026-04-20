@@ -14,8 +14,10 @@ import {
   type PendingFinanceGroupKind,
 } from "@/lib/pending-finance-group-kind";
 import { isPrincipalTaxOffsetQuad } from "@/lib/amazon-principal-tax-quad";
-import { canRefundPositiveOffsetForRows } from "@/lib/amazon-refund-offset-like";
+import { canRefundPositiveOffsetForRows, isRefundLikeRow } from "@/lib/amazon-refund-offset-like";
 import { internalNoteSummaryForGroup } from "@/lib/amazon-pending-finance-internal-note";
+
+export type SuggestedCategory = "Refund" | "Adjustment" | "Mixed" | null;
 
 export type PendingFinanceDetail = {
   id: number;
@@ -55,14 +57,25 @@ export type PendingFinanceGroup = {
   internal_note_summary: string | null;
   /** 明細の needs_quantity_review の OR（要確認アラート） */
   needs_quantity_review?: boolean;
+
+  /** Refund系が含まれるか（正規化 + isRefundLikeRow） */
+  hasRefund: boolean;
+  /** Adjustment系が含まれるか（正規化 + isAdjustmentLike + goodwill） */
+  hasAdjustment: boolean;
+  /** UI初期選択の候補（未該当は null） */
+  suggestedCategory: SuggestedCategory;
 };
+
+function normLower(s: unknown): string {
+  return String(s ?? "").normalize("NFKC").trim().toLowerCase();
+}
 
 export async function GET() {
   try {
     const shouldExcludeByType = (transactionType: unknown, amountType: unknown, amountDescription: unknown): boolean => {
-      const tt = String(transactionType ?? "").normalize("NFKC").toLowerCase();
-      const at = String(amountType ?? "").normalize("NFKC").toLowerCase();
-      const ad = String(amountDescription ?? "").normalize("NFKC").toLowerCase();
+      const tt = normLower(transactionType);
+      const at = normLower(amountType);
+      const ad = normLower(amountDescription);
 
       const hay = [tt, at, ad].join("\n");
       const keywords = [
@@ -180,6 +193,25 @@ export async function GET() {
       const internal_note_summary = internalNoteSummaryForGroup(details);
       const needs_quantity_review = details.some((d) => Boolean((d as { needs_quantity_review?: boolean }).needs_quantity_review));
 
+      const hasRefund = details.some((d) =>
+        isRefundLikeRow({
+          amount: d.amount,
+          transaction_type: d.transaction_type,
+          amount_type: d.amount_type,
+          amount_description: d.amount_description,
+        })
+      );
+
+      const hasAdjustment =
+        isAdjustmentLike(details) ||
+        details.some((d) => {
+          const ad = normLower(d.amount_description);
+          return ad === "goodwill" || ad.includes("goodwill");
+        });
+
+      const suggestedCategory: SuggestedCategory =
+        hasRefund && hasAdjustment ? "Mixed" : hasRefund ? "Refund" : hasAdjustment ? "Adjustment" : null;
+
       groups.push({
         groupId,
         amazon_order_id: orderId,
@@ -196,6 +228,9 @@ export async function GET() {
         can_refund_positive_offset,
         internal_note_summary,
         needs_quantity_review,
+        hasRefund,
+        hasAdjustment,
+        suggestedCategory,
       });
     }
 
