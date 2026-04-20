@@ -223,13 +223,20 @@ export async function GET() {
           amount_description: d.amount_description,
         })
       );
-      const sumQty = refundRows.reduce((sum, r) => {
+      // Amazon返金は Principal/Tax/Commission... と複数行に分割され、各行 item_quantity=1 のことが多い。
+      // そのため「Refund行すべての item_quantity 合算」は行数ぶん過大になり得るので、
+      // 返品1点あたり概ね1行になる Principal だけで数量推定する。
+      const principalLikeRefundRows = refundRows.filter((r) => {
+        const ad = normLower(r.amount_description);
+        return ad === "principal" || ad.includes("principal");
+      });
+      const refundQtyByItemQuantity = principalLikeRefundRows.reduce((sum, r) => {
         const q = Number((r as { item_quantity?: unknown }).item_quantity);
         if (!Number.isFinite(q)) return sum;
         const n = Math.trunc(q);
         return n >= 1 ? sum + n : sum;
       }, 0);
-      const refund_qty = sumQty > 0 ? sumQty : hasRefund ? 1 : 0;
+      const refund_qty = refundQtyByItemQuantity > 0 ? refundQtyByItemQuantity : hasRefund ? 1 : 0;
 
       groups.push({
         groupId,
