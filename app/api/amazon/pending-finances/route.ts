@@ -229,7 +229,7 @@ export async function GET() {
         const n = Math.trunc(q);
         return n >= 1 ? sum + n : sum;
       }, 0);
-      const refund_qty = sumQty > 0 ? sumQty : refundRows.length > 0 ? refundRows.length : 0;
+      const refund_qty = sumQty > 0 ? sumQty : hasRefund ? 1 : 0;
 
       groups.push({
         groupId,
