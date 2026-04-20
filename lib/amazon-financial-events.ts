@@ -272,7 +272,8 @@ function flattenShipmentEvents(list: ShipmentEvent[] | undefined, transactionTyp
       for (const c of chargeAdj) {
         const base = toAmountMaybe(c.ChargeAmount);
         if (base == null) continue;
-        const amount = toSignedAmount(base, true);
+        // Refund の ChargeAdjustment は API の符号が会計上そのまま正しい。Order 等は従来どおり手数料系の符号寄せを維持。
+        const amount = transactionType === "Refund" ? base : toSignedAmount(base, true);
         rows.push({
           amazon_order_id: orderId,
           sku,
