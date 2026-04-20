@@ -190,6 +190,12 @@ function postedDateForShipmentEvent(ev: ShipmentEvent): string {
   return "";
 }
 
+function nfkcTrimFeeType(s: string | null | undefined): string {
+  return String(s ?? "")
+    .normalize("NFKC")
+    .trim();
+}
+
 function flattenShipmentEvents(list: ShipmentEvent[] | undefined, transactionType: string): SalesTransactionRow[] {
   const rows: SalesTransactionRow[] = [];
   if (!Array.isArray(list)) return rows;
@@ -232,9 +238,11 @@ function flattenShipmentEvents(list: ShipmentEvent[] | undefined, transactionTyp
         });
       }
       for (const f of fees) {
+        const feeType = nfkcTrimFeeType(f.FeeType);
         const base = toAmountMaybe(f.FeeAmount);
         if (base == null) continue;
-        const amount = toSignedAmount(base, true);
+        const amount =
+          transactionType === "Refund" && feeType === "Commission" ? base : toSignedAmount(base, true);
         rows.push({
           amazon_order_id: orderId,
           sku,
@@ -290,9 +298,11 @@ function flattenShipmentEvents(list: ShipmentEvent[] | undefined, transactionTyp
         });
       }
       for (const f of feeAdj) {
+        const feeType = nfkcTrimFeeType(f.FeeType);
         const base = toAmountMaybe(f.FeeAmount);
         if (base == null) continue;
-        const amount = toSignedAmount(base, true);
+        const amount =
+          transactionType === "Refund" && feeType === "Commission" ? base : toSignedAmount(base, true);
         rows.push({
           amazon_order_id: orderId,
           sku,
