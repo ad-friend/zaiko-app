@@ -129,11 +129,20 @@ export async function GET() {
     for (const row of list) {
       const orderId = row.amazon_order_id?.trim() ?? null;
       const posted = row.posted_date ?? "";
-      const txType = row.transaction_type ?? "Unknown";
-      const amountType = String(row.amount_type ?? "Unknown").trim();
+      const txType = String(row.transaction_type ?? "Unknown")
+        .normalize("NFKC")
+        .trim();
+      const amountType = String(row.amount_type ?? "Unknown")
+        .normalize("NFKC")
+        .trim();
 
       const finGid = String((row as { finance_line_group_id?: string | null }).finance_line_group_id ?? "").trim();
       const postedDay = posted.length >= 10 ? posted.slice(0, 10) : posted;
+      const safeSku = String(row.sku ?? "no_sku")
+        .normalize("NFKC")
+        .trim()
+        .toUpperCase();
+      const amountStr = Number(row.amount ?? 0).toFixed(4);
 
       let key: string;
       if (orderId) {
@@ -141,7 +150,7 @@ export async function GET() {
       } else if (finGid) {
         key = `adj_fin:${finGid}`;
       } else {
-        key = `adj_day:${postedDay}_${txType}_${amountType}`;
+        key = `adj_day:${postedDay}_${safeSku}_${txType}_${amountType}_${amountStr}`;
       }
 
       if (!groupMap.has(key)) groupMap.set(key, []);
