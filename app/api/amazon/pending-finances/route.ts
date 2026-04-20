@@ -64,6 +64,8 @@ export type PendingFinanceGroup = {
   hasAdjustment: boolean;
   /** UI初期選択の候補（未該当は null） */
   suggestedCategory: SuggestedCategory;
+  /** 返金で解除すべき数量（APIが正）。0 の場合は在庫更新しない */
+  refund_qty: number;
 };
 
 function normLower(s: unknown): string {
@@ -212,6 +214,23 @@ export async function GET() {
       const suggestedCategory: SuggestedCategory =
         hasRefund && hasAdjustment ? "Mixed" : hasRefund ? "Refund" : hasAdjustment ? "Adjustment" : null;
 
+      // refund_qty 優先順位（仕様固定）
+      const refundRows = details.filter((d) =>
+        isRefundLikeRow({
+          amount: d.amount,
+          transaction_type: d.transaction_type,
+          amount_type: d.amount_type,
+          amount_description: d.amount_description,
+        })
+      );
+      const sumQty = refundRows.reduce((sum, r) => {
+        const q = Number((r as { item_quantity?: unknown }).item_quantity);
+        if (!Number.isFinite(q)) return sum;
+        const n = Math.trunc(q);
+        return n >= 1 ? sum + n : sum;
+      }, 0);
+      const refund_qty = sumQty > 0 ? sumQty : refundRows.length > 0 ? refundRows.length : 0;
+
       groups.push({
         groupId,
         amazon_order_id: orderId,
@@ -231,6 +250,7 @@ export async function GET() {
         hasRefund,
         hasAdjustment,
         suggestedCategory,
+        refund_qty,
       });
     }
 

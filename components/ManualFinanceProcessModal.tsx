@@ -44,6 +44,8 @@ export type PendingFinanceGroupData = {
   suggestedCategory?: "Refund" | "Adjustment" | "Mixed" | null;
   hasRefund?: boolean;
   hasAdjustment?: boolean;
+  /** API: pending-finances が返す refund_qty（バックエンドを正） */
+  refund_qty?: number;
 };
 
 export type CandidateStock = {
@@ -180,6 +182,12 @@ function mergeCandidateStocksById(base: CandidateStock[], extra: CandidateStock[
 export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuccess, onToast }: Props) {
   const [processMode, setProcessMode] = useState<ProcessMode>("order_reconcile");
   const [cardCategory, setCardCategory] = useState<CardCategory>("Other");
+  const [refundQty, setRefundQty] = useState(0);
+  const [dispositions, setDispositions] = useState<{ new: number; used: number; junk: number }>({
+    new: 0,
+    used: 0,
+    junk: 0,
+  });
   const [candidateStocks, setCandidateStocks] = useState<CandidateStock[]>([]);
   const [adjustmentCandidates, setAdjustmentCandidates] = useState<CandidateStock[]>([]);
   const [selectedStockId, setSelectedStockId] = useState<number | null>(null);
@@ -206,6 +214,9 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
   const netAmount = data?.net_amount ?? 0;
   const isQuad = data != null && isQuadFromData(data);
   const isAdjustment = data != null && isAdjustmentGroupData(data);
+
+  const dispositionSum = dispositions.new + dispositions.used + dispositions.junk;
+  const dispositionSumOk = refundQty === 0 ? dispositionSum === 0 : dispositionSum === refundQty;
 
   const adjustmentAttachRows = useMemo(() => {
     return details.filter(
@@ -334,6 +345,12 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
     const d = defaultProcessMode(data);
     setProcessMode(allowed.has(d) ? d : (opts[0]?.id ?? "order_reconcile"));
     setCardCategory(toCardCategory(data.suggestedCategory));
+    {
+      const q = Number((data as { refund_qty?: unknown }).refund_qty ?? 0);
+      const qty = Number.isFinite(q) ? Math.max(0, Math.trunc(q)) : 0;
+      setRefundQty(qty);
+      setDispositions({ new: qty, used: 0, junk: 0 });
+    }
     setSelectedStockId(null);
     {
       const m: Record<number, number | null> = {};
@@ -371,6 +388,7 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
     data?.can_refund_positive_offset,
     data?.is_principal_tax_quad,
     data?.suggestedCategory,
+    data?.refund_qty,
     rawDetailsNoteSig,
   ]);
 
@@ -510,6 +528,11 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
       return;
     }
 
+    if (!dispositionSumOk) {
+      setError(refundQty === 0 ? "返金数量が0のため、内訳数量はすべて 0 にしてください。" : "新品/中古/ジャンクの合計が返金数量と一致しません。");
+      return;
+    }
+
     const ok = window.confirm(
       "返金処理＆在庫戻しを実行します。\n" +
         "在庫は「未処理のものだけ」戻し、返品済み・フリー在庫はスキップされます。\n" +
@@ -527,6 +550,8 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
         body: JSON.stringify({
           salesTransactionIds: ids,
           amazon_order_id: data.amazon_order_id ?? null,
+          refund_qty: refundQty,
+          dispositions,
         }),
       });
       const json = (await res.json().catch(() => ({}))) as any;
@@ -534,12 +559,14 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
 
       const updatedSales = Number(json.updated_sales_tx_count ?? 0);
       const updatedInbound = Number(json.updated_inbound_count ?? 0);
-      const skipped =
-        Number(json.skipped_already_free ?? 0) + Number(json.skipped_return_flagged ?? 0);
+      const skipped = Number(json.skipped_total ?? (Number(json.skipped_already_free ?? 0) + Number(json.skipped_return_flagged ?? 0)));
+      const updatedNew = Number(json.updated_inbound_new ?? 0);
+      const updatedUsed = Number(json.updated_inbound_used ?? 0);
+      const updatedJunk = Number(json.updated_inbound_junk ?? 0);
 
       onToast?.({
         variant: "success",
-        message: `✅ ${updatedSales}件の明細を消込完了、${updatedInbound}件の在庫を戻しました（スキップ: ${skipped}件）`,
+        message: `✅ ${updatedSales}件の明細を消込完了。在庫を${updatedInbound}件戻しました（新品: ${updatedNew}, 中古: ${updatedUsed}, ジャンク: ${updatedJunk} / スキップ: ${skipped}件）`,
       });
 
       onSuccess?.();
@@ -842,10 +869,76 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                       このグループの明細を消込完了にし、返金数量分だけ在庫の引当（order_id / settled_at）を解除します。
                       返品済み（return_inspection / disposed / junk_return）や既にフリーの在庫はスキップされます。
                     </p>
+
+                    {refundQty === 0 ? (
+                      <div className="rounded-lg border border-amber-200 bg-amber-50/60 p-3">
+                        <p className="text-xs text-amber-950 leading-relaxed">
+                          ※返金数量が特定できない（0）ため、在庫ステータスは更新されません（財務の消込のみ実行されます）。
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="rounded-lg border border-slate-200 bg-white p-3">
+                        <p className="text-xs font-semibold text-slate-700 mb-2">返品後のコンディション内訳（数量）</p>
+                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                          <label className="flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50/50 px-3 py-2">
+                            <span className="text-xs font-medium text-slate-700">新品（new）</span>
+                            <input
+                              type="number"
+                              min={0}
+                              step={1}
+                              value={dispositions.new}
+                              disabled={submitting}
+                              onChange={(e) => {
+                                const n = Math.max(0, Math.trunc(Number(e.target.value)));
+                                setDispositions((prev) => ({ ...prev, new: Number.isFinite(n) ? n : 0 }));
+                                setError(null);
+                              }}
+                              className="w-20 rounded-md border border-slate-200 bg-white px-2 py-1 text-sm text-slate-800 text-right tabular-nums"
+                            />
+                          </label>
+                          <label className="flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50/50 px-3 py-2">
+                            <span className="text-xs font-medium text-slate-700">中古（used）</span>
+                            <input
+                              type="number"
+                              min={0}
+                              step={1}
+                              value={dispositions.used}
+                              disabled={submitting}
+                              onChange={(e) => {
+                                const n = Math.max(0, Math.trunc(Number(e.target.value)));
+                                setDispositions((prev) => ({ ...prev, used: Number.isFinite(n) ? n : 0 }));
+                                setError(null);
+                              }}
+                              className="w-20 rounded-md border border-slate-200 bg-white px-2 py-1 text-sm text-slate-800 text-right tabular-nums"
+                            />
+                          </label>
+                          <label className="flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50/50 px-3 py-2">
+                            <span className="text-xs font-medium text-slate-700">ジャンク（junk）</span>
+                            <input
+                              type="number"
+                              min={0}
+                              step={1}
+                              value={dispositions.junk}
+                              disabled={submitting}
+                              onChange={(e) => {
+                                const n = Math.max(0, Math.trunc(Number(e.target.value)));
+                                setDispositions((prev) => ({ ...prev, junk: Number.isFinite(n) ? n : 0 }));
+                                setError(null);
+                              }}
+                              className="w-20 rounded-md border border-slate-200 bg-white px-2 py-1 text-sm text-slate-800 text-right tabular-nums"
+                            />
+                          </label>
+                        </div>
+                        <p className={`mt-2 text-[11px] leading-relaxed ${dispositionSumOk ? "text-slate-500" : "text-red-600 font-medium"}`}>
+                          返金数量: {refundQty} / 入力合計: {dispositionSum}
+                          {!dispositionSumOk ? "（合計が一致するよう調整してください）" : ""}
+                        </p>
+                      </div>
+                    )}
                     <button
                       type="button"
                       onClick={() => void handleRefundRelease()}
-                      disabled={submitting}
+                      disabled={submitting || !dispositionSumOk}
                       className="w-full inline-flex items-center justify-center rounded-lg bg-amber-600 text-white py-2.5 px-4 text-sm font-semibold hover:bg-amber-700 disabled:opacity-50 transition-colors shadow-sm"
                     >
                       {submitting ? "処理中..." : "返金処理＆在庫戻しを実行"}
