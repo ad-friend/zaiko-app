@@ -833,11 +833,76 @@ export async function debugScanListFinancialEvents(
 
 export type UpsertSalesResult = { inserted: number; skipped: number; tableMissing: boolean };
 
+const WAREHOUSE_DAMAGE_TYPE = "WAREHOUSE_DAMAGE";
+const WAREHOUSE_LOST_TYPE = "WAREHOUSE_LOST";
+
+function nfkcTrimDedupe(s: string | null | undefined): string {
+  return String(s ?? "")
+    .normalize("NFKC")
+    .trim();
+}
+
+/**
+ * Amazon が同一補填を WAREHOUSE_DAMAGE / WAREHOUSE_LOST の2行に分けて返す場合、片方（LOST）を除いて二重計上を防ぐ。
+ * amount_type に AdjustmentType が入る（transaction_type は Adjustment）。
+ * 厳密条件: 注文番号なし / Adjustment / 暦日・金額・SKU が一致 / 同一キー内が DAMAGE 1 行と LOST 1 行のみ。
+ */
+export function dedupeWarehouseDamageLostAdjustmentRows(rows: SalesTransactionRow[]): SalesTransactionRow[] {
+  const buckets = new Map<string, { damages: SalesTransactionRow[]; losts: SalesTransactionRow[] }>();
+  const nonBucket: SalesTransactionRow[] = [];
+
+  for (const r of rows) {
+    if (nfkcTrimDedupe(r.amazon_order_id)) {
+      nonBucket.push(r);
+      continue;
+    }
+    if (nfkcTrimDedupe(r.transaction_type) !== "Adjustment") {
+      nonBucket.push(r);
+      continue;
+    }
+    const at = nfkcTrimDedupe(r.amount_type).toUpperCase();
+    if (at !== WAREHOUSE_DAMAGE_TYPE && at !== WAREHOUSE_LOST_TYPE) {
+      nonBucket.push(r);
+      continue;
+    }
+    const day = nfkcTrimDedupe(r.posted_date).slice(0, 10);
+    if (day.length < 10) {
+      nonBucket.push(r);
+      continue;
+    }
+    const sku = nfkcTrimDedupe(r.sku).toUpperCase();
+    const amt = Number(r.amount);
+    if (!Number.isFinite(amt)) {
+      nonBucket.push(r);
+      continue;
+    }
+    const k = `${day}|${sku}|${amt.toFixed(4)}`;
+    let b = buckets.get(k);
+    if (!b) {
+      b = { damages: [], losts: [] };
+      buckets.set(k, b);
+    }
+    if (at === WAREHOUSE_DAMAGE_TYPE) b.damages.push(r);
+    else b.losts.push(r);
+  }
+
+  const out: SalesTransactionRow[] = [...nonBucket];
+  for (const [, b] of buckets) {
+    if (b.damages.length === 1 && b.losts.length === 1) {
+      out.push(b.damages[0]!);
+    } else {
+      out.push(...b.damages, ...b.losts);
+    }
+  }
+  return out;
+}
+
 export async function upsertSalesTransactionRows(allRows: SalesTransactionRow[]): Promise<UpsertSalesResult> {
   if (allRows.length === 0) {
     return { inserted: 0, skipped: 0, tableMissing: false };
   }
-  const rows = allRows.map(applyCanonicalToSalesTransactionRowForApi);
+  const deduped = dedupeWarehouseDamageLostAdjustmentRows(allRows);
+  const rows = deduped.map(applyCanonicalToSalesTransactionRowForApi);
   const insertPayload = rows.map((r) => {
     const dedupe_slot = r.dedupe_slot ?? 0;
     return {
