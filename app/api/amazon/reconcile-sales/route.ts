@@ -463,6 +463,14 @@ export async function POST(request: NextRequest) {
     const unlinkedRows = await fetchUnlinkedSalesTxRowsForOrderIds(orderIds);
     const typed = unlinkedRows as TxRow[];
 
+    // バッチ開始時点で未紐付の Refund が1件でもいる注文は、自己修復・メイン本消込のいずれも自動で触らない（手動へ）
+    const amazonOrderIdsWithUnlinkedRefund = new Set<string>();
+    for (const r of typed) {
+      if (!isRefundLikeRow(r)) continue;
+      const oid = String(r.amazon_order_id ?? "").trim();
+      if (oid) amazonOrderIdsWithUnlinkedRefund.add(oid);
+    }
+
     const parentCache = new Map<string, { stock_id: number; unit_cost: number } | null>();
     const getParent = async (amazonOrderId: string): Promise<{ stock_id: number; unit_cost: number } | null> => {
       const key = String(amazonOrderId ?? "").trim();
@@ -480,6 +488,7 @@ export async function POST(request: NextRequest) {
     for (const r of feeRows) {
       const orderId = String(r.amazon_order_id ?? "").trim();
       if (!orderId) continue;
+      if (amazonOrderIdsWithUnlinkedRefund.has(orderId)) continue;
       // 経費/調整（在庫紐づけ不要）は既存ルールで処理済みにする
       if (
         isExpenseSkipTx({
@@ -505,6 +514,7 @@ export async function POST(request: NextRequest) {
     for (const r of refundRows) {
       const orderId = String(r.amazon_order_id ?? "").trim();
       if (!orderId) continue;
+      if (amazonOrderIdsWithUnlinkedRefund.has(orderId)) continue;
       if (
         isExpenseSkipTx({
           amount_type: r.amount_type,
@@ -526,10 +536,9 @@ export async function POST(request: NextRequest) {
     const offsetOrderCount = await applyOffsetReconciliation(typedForMain);
     typedForMain = await fetchUnlinkedSalesTxRowsForOrderIds(orderIds);
 
-    /** order_id ごとにグループ化 */
+    /** order_id ごとにグループ化（Refund 行は行単位では除外。混在注文全体のスキップはメインループ先頭の Set で行う） */
     const byOrder = new Map<string, TxRow[]>();
     for (const r of typedForMain) {
-      // Refund は上の自己修復で処理済み（またはスキップ）なので、通常の在庫紐づけ対象には含めない
       if (isRefundLikeRow(r)) continue;
       const oid = String(r.amazon_order_id ?? "").trim();
       if (!oid) continue;
@@ -560,6 +569,10 @@ export async function POST(request: NextRequest) {
     }
 
     for (const [amazonOrderId, txGroup] of byOrder) {
+      if (amazonOrderIdsWithUnlinkedRefund.has(amazonOrderId)) {
+        continue;
+      }
+
       // 経費/調整（在庫紐づけ不要）を先にスキップして処理済みにする
       const expenseTx = txGroup.filter((r) =>
         isExpenseSkipTx({ amount_type: r.amount_type, transaction_type: r.transaction_type, amount_description: r.amount_description })
