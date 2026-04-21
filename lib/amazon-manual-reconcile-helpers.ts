@@ -29,6 +29,11 @@ export function isSetProductFromMappings(mapList: Array<{ quantity: unknown }>):
 }
 
 /** 単品・同一JANで orderQty 本分の在庫を選ぶ場合の検証 */
+/**
+ * Manual Only:
+ * この関数は「手動消込ルート専用」です（スタッフの目視確認を前提に、注文JANと在庫JANの不一致を許容します）。
+ * 自動引当/自動消込などから再利用しないでください。
+ */
 export async function validateSingleJanMultiQtyPicks(
   supabase: SupabaseClient,
   opts: {
@@ -38,7 +43,10 @@ export async function validateSingleJanMultiQtyPicks(
     orderJan: string | null;
     inboundIds: number[];
   }
-): Promise<{ ok: true; resolvedJan: string } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; pickedJan: string; orderJan: string | null; janMismatch: boolean }
+  | { ok: false; error: string }
+> {
   const { amazonOrderId, orderCond, orderQty, orderJan, inboundIds } = opts;
   if (inboundIds.length !== orderQty) {
     return { ok: false, error: `在庫は ${orderQty} 件選択してください（現在 ${inboundIds.length} 件）。` };
@@ -77,12 +85,10 @@ export async function validateSingleJanMultiQtyPicks(
     return { ok: false, error: "選択した在庫のJANが一致しません。" };
   }
   const [onlyJan] = [...jans];
-  const oj = orderJan != null ? String(orderJan).trim() : "";
-  if (oj && onlyJan !== oj) {
-    return { ok: false, error: "選択した在庫のJANが注文と一致しません。" };
-  }
-
-  return { ok: true, resolvedJan: onlyJan };
+  const oj = orderJan != null ? String(orderJan).trim() || null : null;
+  const janMismatch = Boolean(oj) && oj !== onlyJan;
+  // Manual Only: 注文JANと在庫JANの不一致は許容（ただし在庫同士のJAN混在はNG）
+  return { ok: true, pickedJan: onlyJan, orderJan: oj, janMismatch };
 }
 
 /** セット（seller_sku の sku_mappings）の手動割当検証 */

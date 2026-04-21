@@ -66,6 +66,41 @@ async function unlinkInboundsFromOrder(inboundIds: number[], amazonOrderId: stri
   await supabase.from("inbound_items").update({ order_id: null }).in("id", inboundIds).eq("order_id", amazonOrderId);
 }
 
+async function appendManualReconcileMemoOrLog(inboundIds: number[], message: string): Promise<void> {
+  if (inboundIds.length === 0) return;
+  const msg = message.trim();
+  if (!msg) return;
+
+  // internal_note → admin_memo のみに限定
+  {
+    const res = await supabase.from("inbound_items").select("id, internal_note").in("id", inboundIds);
+    if (!res.error) {
+      const rows = (res.data ?? []) as Array<{ id: number; internal_note: string | null }>;
+      for (const r of rows) {
+        const prev = String(r.internal_note ?? "").trim();
+        const next = [prev, msg].filter(Boolean).join("\n");
+        const u = await supabase.from("inbound_items").update({ internal_note: next }).eq("id", r.id);
+        if (u.error) throw u.error;
+      }
+      return;
+    }
+  }
+  {
+    const res = await supabase.from("inbound_items").select("id, admin_memo").in("id", inboundIds);
+    if (!res.error) {
+      const rows = (res.data ?? []) as Array<{ id: number; admin_memo: string | null }>;
+      for (const r of rows) {
+        const prev = String(r.admin_memo ?? "").trim();
+        const next = [prev, msg].filter(Boolean).join("\n");
+        const u = await supabase.from("inbound_items").update({ admin_memo: next }).eq("id", r.id);
+        if (u.error) throw u.error;
+      }
+      return;
+    }
+  }
+  console.log(msg, { inboundIds });
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = (await request.json()) as Record<string, unknown>;
@@ -144,7 +179,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "注文のコンディションが未設定です。カード上で新品/中古を設定してください。" }, { status: 400 });
     }
 
-    let janForOrder: string | null = null;
+    // 手動ルートのみ: 注文JAN≠在庫JANを許容。ただし不一致時は監査用に記録を残す。
+    let pickedJan: string | null = null;
+    let orderJan: string | null = orderRow.jan_code != null ? String(orderRow.jan_code).trim() || null : null;
+    let janMismatch = false;
 
     if (setReconcile) {
       if (!sellerSku) {
@@ -160,19 +198,24 @@ export async function POST(request: NextRequest) {
       if (!v.ok) {
         return NextResponse.json({ error: v.error }, { status: 400 });
       }
-      janForOrder = v.janForOrder;
+      // セットは構成上JANが複数になり得るため、単品の不一致ログ（orderJan/stockJan）とは別物になりやすい。
+      // 要件のログ形式は単品救済を主眼とし、ここでは janMismatch 記録は行わない。
+      pickedJan = v.janForOrder;
+      janMismatch = false;
     } else {
       const v = await validateSingleJanMultiQtyPicks(supabase, {
         amazonOrderId,
         orderCond,
         orderQty,
-        orderJan: orderRow.jan_code != null ? String(orderRow.jan_code).trim() || null : null,
+        orderJan,
         inboundIds,
       });
       if (!v.ok) {
         return NextResponse.json({ error: v.error }, { status: 400 });
       }
-      janForOrder = v.resolvedJan.length > 0 ? v.resolvedJan : null;
+      pickedJan = v.pickedJan;
+      orderJan = v.orderJan;
+      janMismatch = v.janMismatch;
     }
 
     const linked: number[] = [];
@@ -193,7 +236,6 @@ export async function POST(request: NextRequest) {
       .update({
         reconciliation_status: AMAZON_ORDER_STATUS_RECONCILED,
         updated_at: new Date().toISOString(),
-        jan_code: janForOrder,
       })
       .eq("id", orderRow.id)
       .eq("reconciliation_status", st)
@@ -209,6 +251,11 @@ export async function POST(request: NextRequest) {
         { error: "注文ステータスの更新に失敗しました（他処理で状態が変わった可能性があります）。" },
         { status: 409 }
       );
+    }
+
+    if (janMismatch) {
+      const msg = `[ManualReconcile] orderJan: ${orderJan ?? "—"}, stockJan: ${pickedJan ?? "—"}`;
+      await appendManualReconcileMemoOrLog(inboundIds, msg);
     }
 
     return NextResponse.json({ ok: true, message: "手動消込を確定しました。" });
