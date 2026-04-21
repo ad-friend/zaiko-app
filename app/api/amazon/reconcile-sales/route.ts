@@ -108,6 +108,13 @@ async function updateSalesTxWithOptionalStatus(ids: number[], patch: Record<stri
   throw err1;
 }
 
+/** Refund 系: 親在庫への紐付けのみ。status は変更しない（未処理カード維持の絶対要件） */
+async function updateSalesTxStockOnly(ids: number[], patch: Record<string, unknown>): Promise<void> {
+  if (!ids.length) return;
+  const { error } = await supabase.from("sales_transactions").update(patch as any).in("id", ids);
+  if (error) throw error;
+}
+
 function isRefundTxType(raw: string | null | undefined): boolean {
   const t = String(raw ?? "").trim().toLowerCase();
   if (!t) return false;
@@ -492,6 +499,7 @@ export async function POST(request: NextRequest) {
 
     // === 自己修復 2) Refund系を親売上にぶら下げる ===
     // 条件: transaction_type / amount_type / description が Refund/返金 を示す（表記揺れ対応）
+    // Refund 行には絶対に status=reconciled を付けない（経費スキップ分も含む）。stock_id のみ更新する。
     let healedRefundCount = 0;
     const refundRows = typed.filter((r) => isRefundLikeRow(r));
     for (const r of refundRows) {
@@ -504,12 +512,12 @@ export async function POST(request: NextRequest) {
           amount_description: r.amount_description,
         })
       ) {
-        await markSalesTxReconciled([r.id]);
+        // 経費相当の Refund 行も reconciled にしない（在庫紐付けも行わない）
         continue;
       }
       const parent = await getParent(orderId);
       if (!parent) continue;
-      await updateSalesTxWithOptionalStatus([r.id], { stock_id: parent.stock_id, unit_cost: parent.unit_cost });
+      await updateSalesTxStockOnly([r.id], { stock_id: parent.stock_id, unit_cost: parent.unit_cost });
       healedRefundCount += 1;
     }
 
