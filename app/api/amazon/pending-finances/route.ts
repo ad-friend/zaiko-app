@@ -13,7 +13,7 @@ import {
   type PendingFinanceGroupKind,
 } from "@/lib/pending-finance-group-kind";
 import { isPrincipalTaxOffsetQuad } from "@/lib/amazon-principal-tax-quad";
-import { canRefundPositiveOffsetForRows, isRefundLikeRow } from "@/lib/amazon-refund-offset-like";
+import { isRefundLikeRow } from "@/lib/amazon-refund-offset-like";
 import { internalNoteSummaryForGroup } from "@/lib/amazon-pending-finance-internal-note";
 
 export type SuggestedCategory = "Refund" | "Adjustment" | "Mixed" | null;
@@ -50,7 +50,7 @@ export type PendingFinanceGroup = {
   is_principal_tax_quad: boolean;
   /** 注文本消込（manual-reconcile-order）を出してよいか */
   can_order_reconcile: boolean;
-  /** 返金+プラス売上の相殺完結を出してよいか */
+  /** 旧: 返金+プラス相殺ボタン用。方針変更のため常に false（API 互換のためフィールドのみ残す） */
   can_refund_positive_offset: boolean;
   /** グループ内 internal_note の一覧用サマリ（STEP5 カード表示） */
   internal_note_summary: string | null;
@@ -216,7 +216,7 @@ export async function GET() {
       const can_order_reconcile =
         realOrder && !is_principal_tax_quad && group_kind !== "adjustment_like";
 
-      const can_refund_positive_offset = realOrder && canRefundPositiveOffsetForRows(details);
+      const can_refund_positive_offset = false;
       const internal_note_summary = internalNoteSummaryForGroup(details);
       const needs_quantity_review = details.some((d) => Boolean((d as { needs_quantity_review?: boolean }).needs_quantity_review));
 

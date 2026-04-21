@@ -61,7 +61,6 @@ export type CandidateStock = {
 type ProcessMode =
   | "principal_tax_offset"
   | "order_reconcile"
-  | "refund_positive_offset"
   | "adjustment_finance_only"
   | "adjustment_with_stock";
 
@@ -111,9 +110,6 @@ function buildModeOptions(data: PendingFinanceGroupData): { id: ProcessMode; lab
   if (data.amazon_order_id?.trim()) {
     opts.push({ id: "order_reconcile", label: "注文売上の本消込（在庫を選択）※調整では通常不要" });
   }
-  if (data.amazon_order_id?.trim()) {
-    opts.push({ id: "refund_positive_offset", label: "返金＋プラス売上の相殺完結（在庫は触らない）※条件により失敗します" });
-  }
   return opts;
 }
 
@@ -123,7 +119,6 @@ function defaultProcessMode(data: PendingFinanceGroupData | null): ProcessMode {
   if (isAdjustmentGroupData(data)) {
     return "adjustment_finance_only";
   }
-  if (data.can_refund_positive_offset) return "refund_positive_offset";
   if (data.can_order_reconcile) return "order_reconcile";
   return "adjustment_finance_only";
 }
@@ -371,7 +366,6 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
     data?.representative_transaction_type,
     data?.group_kind,
     data?.can_order_reconcile,
-    data?.can_refund_positive_offset,
     data?.is_principal_tax_quad,
     data?.suggestedCategory,
     data?.refund_qty,
@@ -478,29 +472,6 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
       onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : "本消込に失敗しました");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const handleRefundPositiveOffset = async () => {
-    if (!data?.amazon_order_id) return;
-    if (!confirmHeavyAction("返金＋プラス売上の相殺完結")) return;
-    setSubmitting(true);
-    setError(null);
-    try {
-      await persistInternalNoteIfNeeded(details.map((d) => d.id));
-      const res = await fetch("/api/amazon/manual-finance-refund-offset", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ groupId: data.amazon_order_id }),
-      });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error ?? "相殺に失敗しました");
-      onSuccess?.();
-      onClose();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "相殺に失敗しました");
     } finally {
       setSubmitting(false);
     }
@@ -1086,35 +1057,6 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                       className="w-full inline-flex items-center justify-center rounded-lg bg-blue-600 text-white py-2.5 px-4 text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
                     >
                       {submitting ? "処理中..." : "この在庫で売上確定（本消込）する"}
-                    </button>
-                  </div>
-                </>
-              )}
-
-              {cardCategory === "Other" && processMode === "refund_positive_offset" && Boolean(data?.amazon_order_id?.trim()) && (
-                <>
-                  <h3 className="bg-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-700 border-b border-slate-200">
-                    返金＋プラス売上の相殺
-                  </h3>
-                  <div className="p-4 space-y-4">
-                    <p className="text-xs text-slate-600">
-                      同一注文でプラスの売上行と返金行が揃っている場合、在庫を変えずに財務上だけ相殺済みにできます（自動本消込と同じ考え方）。
-                    </p>
-                    {!data?.can_refund_positive_offset ? (
-                      <p className="text-xs font-semibold text-amber-900 bg-amber-50 border border-amber-100 rounded px-2 py-1.5">
-                        注意: このグループは自動判定では「返金相殺」条件を満たしていません。実行するとAPI側で拒否される可能性があります。
-                      </p>
-                    ) : null}
-                    <p className="text-xs text-amber-800 bg-amber-50 border border-amber-100 rounded px-2 py-1.5">
-                      返品の実物在庫は「返品検品」等の在庫フローで処理してください。
-                    </p>
-                    <button
-                      type="button"
-                      onClick={() => void handleRefundPositiveOffset()}
-                      disabled={submitting}
-                      className="w-full inline-flex items-center justify-center rounded-lg bg-violet-600 text-white py-2.5 px-4 text-sm font-semibold hover:bg-violet-700 disabled:opacity-50 transition-colors shadow-sm"
-                    >
-                      {submitting ? "処理中..." : "相殺完結（在庫は触らない）"}
                     </button>
                   </div>
                 </>

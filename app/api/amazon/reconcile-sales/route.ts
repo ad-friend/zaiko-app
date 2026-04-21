@@ -145,34 +145,12 @@ function isPositiveSaleLikeRow(r: Pick<TxRow, "transaction_type" | "amount_type"
 }
 
 /**
- * 返品・返金運用: 同一注文に「プラス売上」と「返金」が揃ったら財務上は相殺済みだが、
- * 返品行は倉庫戻し等の手動処理が必須のため reconciled にしない（カードに残す）。
- * stock_id は触らず、Refund 以外の行のみ status=reconciled（未消込リストのうちプラス側等のみ除外）。
+ * 同一注文に未紐付の「返金らしき行」と「プラス売上」が同居する場合は、自動では status を更新しない（方針A）。
+ * UI が同一 amazon_order_id でグルーピングし相殺後の合計を出すため、行はすべて未処理のまま手動フローへ回す。
  */
 async function applyOffsetReconciliation(rows: TxRow[]): Promise<number> {
-  if (!rows.length) return 0;
-  const byOrder = new Map<string, TxRow[]>();
-  for (const r of rows) {
-    const oid = String(r.amazon_order_id ?? "").trim();
-    if (!oid) continue;
-    if (!byOrder.has(oid)) byOrder.set(oid, []);
-    byOrder.get(oid)!.push(r);
-  }
-
-  let offsetOrderCount = 0;
-  for (const [, group] of byOrder) {
-    const hasRefund = group.some((r) => isRefundLikeRow(r));
-    const hasPositiveSale = group.some((r) => isPositiveSaleLikeRow(r));
-    // 返金が無いグループ（Charge+Feeだけ浮いている等）は触らない（将来 Refund 取り込み後に相殺）
-    if (!hasRefund || !hasPositiveSale) continue;
-
-    const idsToReconcile = group.filter((r) => !isRefundLikeRow(r)).map((r) => r.id);
-    if (!idsToReconcile.length) continue;
-
-    await markSalesTxReconciled(idsToReconcile);
-    offsetOrderCount += 1;
-  }
-  return offsetOrderCount;
+  void rows;
+  return 0;
 }
 
 async function fetchUnlinkedSalesTxRows(): Promise<TxRow[]> {

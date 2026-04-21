@@ -1,17 +1,12 @@
 /**
- * 手動: 同一注文の未紐付売上で「プラス売上」と「返金」が揃っている場合に、
- * reconcile-sales の applyOffsetReconciliation と同様、プラス側等のみ status=reconciled（在庫は触らない）。
- * 返金・返品行は手動返品フロー用に reconciled にせず、処理待ちカードに残す。
+ * 手動「財務相殺」API（旧仕様）。
+ * 現在は reconcile-sales の方針Aに合わせ、返金とプラス売上が混在する注文では status を更新しない。
+ * 同一注文は一覧でひとまとめ表示されるため、本 API は成功させず案内のみ返す。
  * POST body: { groupId: string } — amazon_order_id（注文番号）
  */
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
-import {
-  canRefundPositiveOffsetForRows,
-  isRefundLikeRow,
-  isPositiveSaleLikeRow,
-} from "@/lib/amazon-refund-offset-like";
-import { markSalesTransactionsReconciled } from "@/lib/amazon-sales-tx-mark-reconciled";
+import { canRefundPositiveOffsetForRows } from "@/lib/amazon-refund-offset-like";
 
 type TxRow = {
   id: number;
@@ -69,23 +64,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const hasRefund = active.some((r) => isRefundLikeRow(r));
-    const hasPositive = active.some((r) => isPositiveSaleLikeRow(r));
-    if (!hasRefund || !hasPositive) {
-      return NextResponse.json({ error: "相殺条件を満たしません。" }, { status: 400 });
-    }
-
-    const idsToReconcile = active.filter((r) => !isRefundLikeRow(r)).map((r) => r.id);
-    if (!idsToReconcile.length) {
-      return NextResponse.json({ error: "相殺対象のプラス売上側の明細がありません。" }, { status: 400 });
-    }
-    await markSalesTransactionsReconciled(idsToReconcile);
-
-    return NextResponse.json({
-      ok: true,
-      message:
-        "プラス売上側を財務消込しました。返金・返品行は処理待ちのままです（在庫は変更していません）。",
-    });
+    return NextResponse.json(
+      {
+        error:
+          "返金とプラス売上が同一注文に未紐付で混在する場合の財務相殺は行っていません。一覧では注文ごとにまとめて表示されます。返品・在庫戻しは「返金処理」等のフローから操作してください。",
+      },
+      { status: 400 }
+    );
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "処理に失敗しました。";
     console.error("[manual-finance-refund-offset]", e);
