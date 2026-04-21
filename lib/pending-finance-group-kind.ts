@@ -6,6 +6,7 @@ import { isPrincipalTaxOffsetQuad, type PrincipalTaxQuadRowLike } from "@/lib/am
  */
 const ORDER_LIKE_ADJUSTMENT_FEE_EXCLUSIONS: readonly string[] = [
   "feeadjustment",
+  "chargeadjustment",
   "shippingadjustment",
   "shipmentadjustment",
   "taxadjustment",
