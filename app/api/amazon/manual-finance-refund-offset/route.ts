@@ -1,6 +1,7 @@
 /**
  * 手動: 同一注文の未紐付売上で「プラス売上」と「返金」が揃っている場合に、
- * reconcile-sales の applyOffsetReconciliation と同様に status のみ reconciled（在庫は触らない）。
+ * reconcile-sales の applyOffsetReconciliation と同様、プラス側等のみ status=reconciled（在庫は触らない）。
+ * 返金・返品行は手動返品フロー用に reconciled にせず、処理待ちカードに残す。
  * POST body: { groupId: string } — amazon_order_id（注文番号）
  */
 import { NextRequest, NextResponse } from "next/server";
@@ -74,10 +75,17 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "相殺条件を満たしません。" }, { status: 400 });
     }
 
-    const ids = active.map((r) => r.id);
-    await markSalesTransactionsReconciled(ids);
+    const idsToReconcile = active.filter((r) => !isRefundLikeRow(r)).map((r) => r.id);
+    if (!idsToReconcile.length) {
+      return NextResponse.json({ error: "相殺対象のプラス売上側の明細がありません。" }, { status: 400 });
+    }
+    await markSalesTransactionsReconciled(idsToReconcile);
 
-    return NextResponse.json({ ok: true, message: "返金・プラス売上の相殺として消込しました（在庫は変更していません）。" });
+    return NextResponse.json({
+      ok: true,
+      message:
+        "プラス売上側を財務消込しました。返金・返品行は処理待ちのままです（在庫は変更していません）。",
+    });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "処理に失敗しました。";
     console.error("[manual-finance-refund-offset]", e);
