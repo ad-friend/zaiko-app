@@ -115,6 +115,35 @@ async function readJsonAnySafe(res: Response): Promise<{ json: unknown | null; r
   }
 }
 
+function step5PendingFinanceBadgeClass(
+  g: Pick<
+    PendingFinanceGroupData,
+    "display_label" | "group_kind" | "hasRefund" | "hasAdjustment" | "is_principal_tax_quad"
+  >
+): string {
+  const label = (g.display_label ?? "").trim();
+  if (
+    label === "Principal/Tax（相殺）" ||
+    g.is_principal_tax_quad === true ||
+    g.group_kind === "offset_principal_tax"
+  ) {
+    return "bg-violet-100 text-violet-800";
+  }
+  if (label === "Refund/Adjustment（返金・補填混在）" || (Boolean(g.hasRefund) && Boolean(g.hasAdjustment))) {
+    return "bg-purple-100 text-purple-800";
+  }
+  if (label === "Refund（返金）" || (Boolean(g.hasRefund) && !g.hasAdjustment)) {
+    return "bg-amber-100 text-amber-800";
+  }
+  if (label === "Adjustment（補填）" || (Boolean(g.hasAdjustment) && !g.hasRefund)) {
+    return "bg-emerald-100 text-emerald-800";
+  }
+  if (label === "Order（注文）") {
+    return "bg-blue-100 text-blue-700";
+  }
+  return "bg-slate-200 text-slate-700";
+}
+
 const buttonClass =
   "inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 h-10 px-6 py-2 shadow-sm active:scale-[0.98] duration-100";
 
@@ -1046,17 +1075,7 @@ export default function AmazonReconcileManager() {
                             </p>
                             <div className="mt-0.5 flex items-center gap-1.5 flex-wrap">
                               <span
-                                className={`inline-flex shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${
-                                  g.group_kind === "offset_principal_tax"
-                                    ? "bg-violet-100 text-violet-800"
-                                    : g.group_kind === "adjustment_like"
-                                      ? "bg-emerald-100 text-emerald-800"
-                                      : g.group_kind === "order" || g.transaction_type === "Order"
-                                        ? "bg-blue-100 text-blue-700"
-                                        : g.group_kind === "refund" || g.transaction_type === "Refund"
-                                          ? "bg-amber-100 text-amber-700"
-                                          : "bg-slate-200 text-slate-700"
-                                }`}
+                                className={`inline-flex shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${step5PendingFinanceBadgeClass(g)}`}
                               >
                                 {g.display_label ?? g.transaction_type}
                               </span>

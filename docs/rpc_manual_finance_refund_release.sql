@@ -50,6 +50,9 @@ declare
   v_used integer := greatest(coalesce(p_disp_used, 0), 0);
   v_junk integer := greatest(coalesce(p_disp_junk, 0), 0);
   v_order_id text := nullif(btrim(coalesce(p_amazon_order_id, '')), '');
+  v_order_id_used text := null;
+  v_cand_ids bigint[] := '{}'::bigint[];
+  v_order_inbound_ids bigint[] := '{}'::bigint[];
   v_available_count integer := 0;
   v_skip_free integer := 0;
   v_skip_flagged integer := 0;
@@ -66,78 +69,69 @@ begin
     raise exception '内訳数量の合計が返金数量と一致しません（返金数: %, 合計: %）。', v_refund_qty, (v_new + v_used + v_junk);
   end if;
 
-  with tx as (
-    select
-      id,
-      nullif(btrim(amazon_order_id), '') as amazon_order_id,
-      stock_id::bigint as stock_id
-    from sales_transactions
-    where id = any(p_sales_transaction_ids)
-  ),
-  tx_order as (
+  -- 先に「使用する注文番号」を確定（ヒント優先、sales_transactions から一意に推定）
+  if v_order_id is not null then
+    v_order_id_used := v_order_id;
+  else
     select
       case
-        when v_order_id is not null then v_order_id
-        when (select count(distinct amazon_order_id) from tx where amazon_order_id is not null) = 1
-          then (select min(amazon_order_id) from tx where amazon_order_id is not null)
+        when count(distinct nullif(btrim(amazon_order_id), '')) = 1
+          then min(nullif(btrim(amazon_order_id), ''))
         else null
-      end as order_id_used
-  ),
-  cand_ids as (
-    select distinct stock_id as inbound_item_id
-    from tx
-    where stock_id is not null and stock_id >= 1
-    union
-    select distinct ii.id as inbound_item_id
-    from inbound_items ii
-    join tx_order o on o.order_id_used is not null
-    where nullif(btrim(ii.order_id), '') = o.order_id_used
-  ),
-  cand as (
-    select
-      ii.id,
-      ii.created_at,
-      nullif(btrim(ii.order_id), '') as order_id_norm,
-      ii.return_amazon_order_id,
-      ii.stock_status,
-      ii.exit_type
-    from inbound_items ii
-    join cand_ids c on c.inbound_item_id = ii.id
-  ),
-  blocked as (
-    select
-      id,
-      order_id_norm,
-      return_amazon_order_id,
-      stock_status,
-      exit_type
-    from cand
-    where
-      order_id_norm is null
-      or nullif(btrim(return_amazon_order_id), '') is not null
-      or lower(coalesce(stock_status, '')) in ('return_inspection', 'disposed')
-      or lower(coalesce(exit_type, '')) = 'junk_return'
-  ),
-  eligible as (
-    select
-      c.id,
-      c.created_at
-    from cand c
-    left join blocked b on b.id = c.id
-    where b.id is null
-      and c.order_id_norm is not null
-  ),
-  to_release as (
-    select e.id
-    from eligible e
-    order by e.created_at desc nulls last, e.id desc
-    limit v_refund_qty
-  )
-  select
-    (select count(*) from eligible),
-    (select count(*) from blocked where order_id_norm is null),
-    (select count(*) from blocked) - (select count(*) from blocked where order_id_norm is null)
-  into v_available_count, v_skip_free, v_skip_flagged;
+      end
+    from sales_transactions
+    where id = any(p_sales_transaction_ids)
+    into v_order_id_used;
+  end if;
+
+  -- 候補 inbound_items.id を Union（stock_id 経路 + order_id 逆引き）
+  -- ※Supabase環境での解釈揺れ回避のため、PL/pgSQL変数をサブクエリ内で直接参照しない
+  select coalesce(array_agg(distinct st.stock_id::bigint), '{}'::bigint[])
+  from sales_transactions st
+  where st.id = any(p_sales_transaction_ids)
+    and st.stock_id is not null
+    and st.stock_id::bigint >= 1
+  into v_cand_ids;
+
+  if v_order_id_used is not null then
+    -- 動的SQLで v_order_id_used の解釈揺れを完全回避
+    execute
+      'select coalesce(array_agg(distinct id::bigint), ''{}''::bigint[]) from inbound_items where nullif(btrim(order_id), '''') = $1'
+      into v_order_inbound_ids
+      using v_order_id_used;
+
+    select coalesce(array_agg(distinct x), '{}'::bigint[])
+    from unnest(array_cat(v_cand_ids, v_order_inbound_ids)) as x
+    into v_cand_ids;
+  end if;
+
+  -- スキップ集計（free / return-flagged）
+  select count(*)
+  from inbound_items ii
+  where ii.id = any(v_cand_ids)
+    and nullif(btrim(ii.order_id), '') is null
+  into v_skip_free;
+
+  select count(*)
+  from inbound_items ii
+  where ii.id = any(v_cand_ids)
+    and nullif(btrim(ii.order_id), '') is not null
+    and (
+      nullif(btrim(ii.return_amazon_order_id), '') is not null
+      or lower(coalesce(ii.stock_status, '')) in ('return_inspection', 'disposed')
+      or lower(coalesce(ii.exit_type, '')) = 'junk_return'
+    )
+  into v_skip_flagged;
+
+  -- 処理可能件数（ブロック除外 + order_id が入っている）
+  select count(*)
+  from inbound_items ii
+  where ii.id = any(v_cand_ids)
+    and nullif(btrim(ii.order_id), '') is not null
+    and nullif(btrim(ii.return_amazon_order_id), '') is null
+    and lower(coalesce(ii.stock_status, '')) not in ('return_inspection', 'disposed')
+    and lower(coalesce(ii.exit_type, '')) <> 'junk_return'
+  into v_available_count;
 
   if v_available_count < v_refund_qty then
     raise exception '在庫データが不足しています（返金数: %, 処理可能在庫: %）。データのズレや二重処理の可能性があるため、在庫状況を確認してください。', v_refund_qty, v_available_count;

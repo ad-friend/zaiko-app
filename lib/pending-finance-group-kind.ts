@@ -63,21 +63,3 @@ export function classifyPendingFinanceGroup(details: PendingFinanceDetailLike[])
 export function getRepresentativeTransactionType(details: PendingFinanceDetailLike[]): string {
   return String(representativeRow(details).transaction_type ?? "Unknown");
 }
-
-export function displayLabelForPendingFinanceKind(
-  kind: PendingFinanceGroupKind,
-  fallbackTransactionType: string
-): string {
-  switch (kind) {
-    case "offset_principal_tax":
-      return "相殺";
-    case "adjustment_like":
-      return "補填";
-    case "order":
-      return "Order";
-    case "refund":
-      return "Refund";
-    default:
-      return fallbackTransactionType || "その他";
-  }
-}

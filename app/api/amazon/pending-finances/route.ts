@@ -8,7 +8,6 @@ import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import {
   classifyPendingFinanceGroup,
-  displayLabelForPendingFinanceKind,
   getRepresentativeTransactionType,
   isAdjustmentLike,
   type PendingFinanceGroupKind,
@@ -70,6 +69,33 @@ export type PendingFinanceGroup = {
 
 function normLower(s: unknown): string {
   return String(s ?? "").normalize("NFKC").trim().toLowerCase();
+}
+
+/**
+ * STEP5 一覧バッジ用。hasRefund / hasAdjustment は本ルート既存の算出のみ使用。
+ * Principal/Tax 4行相殺はフラグが立ちにくいため先に分岐する（can_* / refund_qty 等には影響しない）。
+ */
+function step5ListDisplayLabelFromFlags(
+  hasRefund: boolean,
+  hasAdjustment: boolean,
+  orderId: string | null,
+  group_kind: PendingFinanceGroupKind,
+  isPrincipalTaxQuad: boolean
+): string {
+  if (isPrincipalTaxQuad || group_kind === "offset_principal_tax") {
+    return "Principal/Tax（相殺）";
+  }
+  const hasOrder = Boolean(orderId?.trim());
+  if (hasRefund && hasAdjustment) {
+    return "Refund/Adjustment（返金・補填混在）";
+  }
+  if (hasRefund) {
+    return "Refund（返金）";
+  }
+  if (hasAdjustment || (!hasOrder && !hasRefund && group_kind !== "order")) {
+    return "Adjustment（補填）";
+  }
+  return "Order（注文）";
 }
 
 export async function GET() {
@@ -182,7 +208,6 @@ export async function GET() {
       const transactionType = first.transaction_type ?? "Unknown";
       const postedDate = first.posted_date ?? "";
       const group_kind = classifyPendingFinanceGroup(details);
-      const display_label = displayLabelForPendingFinanceKind(group_kind, transactionType);
       const representative_transaction_type = getRepresentativeTransactionType(details);
       const is_principal_tax_quad =
         group_kind === "offset_principal_tax" || isPrincipalTaxOffsetQuad(details as Parameters<typeof isPrincipalTaxOffsetQuad>[0]);
@@ -210,6 +235,14 @@ export async function GET() {
           const ad = normLower(d.amount_description);
           return ad === "goodwill" || ad.includes("goodwill");
         });
+
+      const display_label = step5ListDisplayLabelFromFlags(
+        hasRefund,
+        hasAdjustment,
+        orderId,
+        group_kind,
+        is_principal_tax_quad
+      );
 
       const suggestedCategory: SuggestedCategory =
         hasRefund && hasAdjustment ? "Mixed" : hasRefund ? "Refund" : hasAdjustment ? "Adjustment" : null;
