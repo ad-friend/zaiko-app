@@ -263,7 +263,7 @@ begin
     v_skip_free,
     v_skip_flagged,
     v_refund_qty,
-    (select order_id_used from tx_order)
+    (select o.order_id_used from tx_order o)
   into
     updated_sales_tx_count,
     updated_inbound_count,
