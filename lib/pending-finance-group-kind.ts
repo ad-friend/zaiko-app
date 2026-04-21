@@ -58,7 +58,7 @@ function normalizedTransactionTypeForAdjustment(raw: string | null | undefined):
  * - seller_adjustment: 出品者起因の調整として使われる表記（実データで要確認・追加）
  * - 補填: 日本語トランザクションレポート等の種別列
  */
-const DEFINITE_SELLER_ADJUSTMENT_TRANSACTION_TYPES = new Set<string>(["adjustment", "seller_adjustment", "補填"]);
+const DEFINITE_SELLER_ADJUSTMENT_TRANSACTION_TYPES = new Set<string>(["seller_adjustment", "補填"]);
 
 function isPhase1DefiniteSellerAdjustmentTransactionType(txNorm: string): boolean {
   return txNorm.length > 0 && DEFINITE_SELLER_ADJUSTMENT_TRANSACTION_TYPES.has(txNorm);
