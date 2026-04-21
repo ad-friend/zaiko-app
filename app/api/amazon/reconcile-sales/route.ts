@@ -617,6 +617,9 @@ export async function POST(request: NextRequest) {
 
         if (updateStockError) throw updateStockError;
 
+        // normalTx は Refund 除外済み。在庫紐付け完了後に財務 status を付与（Refund 行は自己修復側で status 非更新）
+        await markSalesTxReconciled(ids);
+
         reconciledCount += 1;
         continue;
       }
@@ -697,6 +700,9 @@ export async function POST(request: NextRequest) {
         .eq("order_id", amazonOrderId);
 
       if (bulkSettleErr) throw bulkSettleErr;
+
+      const reconciledIds = plannedUpdates.map((u) => u.tx_id);
+      await markSalesTxReconciled(reconciledIds);
 
       reconciledCount += 1;
     }
