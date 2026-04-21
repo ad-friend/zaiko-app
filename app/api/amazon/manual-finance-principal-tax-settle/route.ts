@@ -7,6 +7,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { isPrincipalTaxOffsetQuad, type PrincipalTaxQuadRowLike } from "@/lib/amazon-principal-tax-quad";
 import { releaseInboundItemsForAmazonOrder } from "@/lib/amazon-order-inventory-release";
+import { AMAZON_ORDER_STATUS_MANUAL_REQUIRED } from "@/lib/amazon-order-reconciliation-status";
 
 async function markSalesTxReconciled(ids: number[]): Promise<void> {
   if (!ids.length) return;
@@ -102,6 +103,18 @@ export async function POST(request: NextRequest) {
       const rel = await releaseInboundItemsForAmazonOrder(amazonOrderId, "cancel");
       if (!rel.ok) {
         return NextResponse.json({ error: rel.message }, { status: 400 });
+      }
+
+      // 在庫引当を解除したのに注文が reconciled/completed のままだと STEP 3-2 不整合に落ち得るため、
+      // 該当注文を手動確認へ戻す（再処理させる）
+      const nowIso = new Date().toISOString();
+      const { error: updOrderErr } = await supabase
+        .from("amazon_orders")
+        .update({ reconciliation_status: AMAZON_ORDER_STATUS_MANUAL_REQUIRED, updated_at: nowIso })
+        .eq("amazon_order_id", amazonOrderId)
+        .in("reconciliation_status", ["reconciled", "completed"]);
+      if (updOrderErr) {
+        return NextResponse.json({ error: updOrderErr.message }, { status: 500 });
       }
     }
 

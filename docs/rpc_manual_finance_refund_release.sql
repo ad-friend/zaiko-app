@@ -2,23 +2,16 @@
 --
 -- 使い方（Supabase SQL Editor で実行）:
 -- 1) docs/migration_sales_transactions_status.sql を先に適用（status 列が無い場合）
--- 2) この関数を作成
+-- 2) この関数を作成（CREATE OR REPLACE）
 --
--- 要件（最終仕様）:
--- - refund_qty はバックエンド（pending-finances）が正。ここでは再計算しない（p_refund_qty を使用）。
--- - toRelease が p_refund_qty 未満の場合は、在庫も財務も一切更新せず例外で中断（ロールバック）。
--- - new/used/junk の内訳は created_at DESC NULLS LAST, id DESC の順で先頭から割り当て。
--- - ブロック条件:
---   - NULLIF(BTRIM(order_id), '') IS NULL（フリー/空文字含む）
---   - return_amazon_order_id IS NOT NULL（返品メタあり）
---   - stock_status in ('return_inspection','disposed')
---   - exit_type = 'junk_return'
--- - 抽出時は NULLIF(BTRIM(order_id), '') IS NOT NULL（正しく order_id が入っているもの）に限定。
--- - 更新:
---   - 解除: order_id=NULL, settled_at=NULL
---   - return メタ: return_amazon_order_id=NULL, amazon_return_received_at=NULL, exit_type は new/used で NULL、junk で 'junk_return'
---   - new/used: stock_status='available', condition_type='new'|'used'
---   - junk: stock_status='disposed'
+-- 既存仕様（維持）:
+-- - Refund ワープは return_inspection に送らず、available / disposed へ直接戻す
+-- - 在庫不足時は例外で中断し、在庫も財務も更新しない（ロールバック）
+--
+-- 追加要件（整合性の完全性）:
+-- - amazon_order_id が特定できない場合は例外で中断（ロールバック）
+-- - ワープして order_id を外す場合でも、amazon_orders を returned に更新し STEP 3-2 不整合に落ちないようにする
+-- - inbound_items の返品メタ（return_amazon_order_id / amazon_return_received_at）を保持（NULL クリアしない）
 
 create or replace function public.manual_finance_refund_release(
   p_sales_transaction_ids bigint[],
@@ -49,7 +42,7 @@ declare
   v_new integer := greatest(coalesce(p_disp_new, 0), 0);
   v_used integer := greatest(coalesce(p_disp_used, 0), 0);
   v_junk integer := greatest(coalesce(p_disp_junk, 0), 0);
-  v_order_id text := nullif(btrim(coalesce(p_amazon_order_id, '')), '');
+  v_order_id_hint text := nullif(btrim(coalesce(p_amazon_order_id, '')), '');
   v_order_id_used text := null;
   v_cand_ids bigint[] := '{}'::bigint[];
   v_order_inbound_ids bigint[] := '{}'::bigint[];
@@ -70,8 +63,8 @@ begin
   end if;
 
   -- 先に「使用する注文番号」を確定（ヒント優先、sales_transactions から一意に推定）
-  if v_order_id is not null then
-    v_order_id_used := v_order_id;
+  if v_order_id_hint is not null then
+    v_order_id_used := v_order_id_hint;
   else
     select
       case
@@ -84,6 +77,11 @@ begin
     into v_order_id_used;
   end if;
 
+  -- 整合性必須：注文番号が特定できない場合は中断（ロールバック）
+  if v_order_id_used is null then
+    raise exception 'amazon_order_id を特定できません（ヒント未指定、かつ明細内で一意になりません）。処理を中断します。';
+  end if;
+
   -- 候補 inbound_items.id を Union（stock_id 経路 + order_id 逆引き）
   -- ※Supabase環境での解釈揺れ回避のため、PL/pgSQL変数をサブクエリ内で直接参照しない
   select coalesce(array_agg(distinct st.stock_id::bigint), '{}'::bigint[])
@@ -93,17 +91,15 @@ begin
     and st.stock_id::bigint >= 1
   into v_cand_ids;
 
-  if v_order_id_used is not null then
-    -- 動的SQLで v_order_id_used の解釈揺れを完全回避
-    execute
-      'select coalesce(array_agg(distinct id::bigint), ''{}''::bigint[]) from inbound_items where nullif(btrim(order_id), '''') = $1'
-      into v_order_inbound_ids
-      using v_order_id_used;
+  -- 動的SQLで v_order_id_used の解釈揺れを完全回避
+  execute
+    'select coalesce(array_agg(distinct id::bigint), ''{}''::bigint[]) from inbound_items where nullif(btrim(order_id), '''') = $1'
+    into v_order_inbound_ids
+    using v_order_id_used;
 
-    select coalesce(array_agg(distinct x), '{}'::bigint[])
-    from unnest(array_cat(v_cand_ids, v_order_inbound_ids)) as x
-    into v_cand_ids;
-  end if;
+  select coalesce(array_agg(distinct x), '{}'::bigint[])
+  from unnest(array_cat(v_cand_ids, v_order_inbound_ids)) as x
+  into v_cand_ids;
 
   -- スキップ集計（free / return-flagged）
   select count(*)
@@ -146,15 +142,6 @@ begin
     from sales_transactions
     where id = any(p_sales_transaction_ids)
   ),
-  tx_order as (
-    select
-      case
-        when v_order_id is not null then v_order_id
-        when (select count(distinct amazon_order_id) from tx where amazon_order_id is not null) = 1
-          then (select min(amazon_order_id) from tx where amazon_order_id is not null)
-        else null
-      end as order_id_used
-  ),
   cand_ids as (
     select distinct stock_id as inbound_item_id
     from tx
@@ -162,8 +149,7 @@ begin
     union
     select distinct ii.id as inbound_item_id
     from inbound_items ii
-    join tx_order o on o.order_id_used is not null
-    where nullif(btrim(ii.order_id), '') = o.order_id_used
+    where nullif(btrim(ii.order_id), '') = v_order_id_used
   ),
   cand as (
     select
@@ -217,8 +203,8 @@ begin
       stock_status = 'available',
       condition_type = 'new',
       exit_type = null,
-      return_amazon_order_id = null,
-      amazon_return_received_at = null
+      return_amazon_order_id = v_order_id_used,
+      amazon_return_received_at = coalesce(ii.amazon_return_received_at, now())
     where ii.id in (select id from ids_new)
     returning ii.id
   ),
@@ -230,8 +216,8 @@ begin
       stock_status = 'available',
       condition_type = 'used',
       exit_type = null,
-      return_amazon_order_id = null,
-      amazon_return_received_at = null
+      return_amazon_order_id = v_order_id_used,
+      amazon_return_received_at = coalesce(ii.amazon_return_received_at, now())
     where ii.id in (select id from ids_used)
     returning ii.id
   ),
@@ -242,8 +228,8 @@ begin
       settled_at = null,
       stock_status = 'disposed',
       exit_type = 'junk_return',
-      return_amazon_order_id = null,
-      amazon_return_received_at = null
+      return_amazon_order_id = v_order_id_used,
+      amazon_return_received_at = coalesce(ii.amazon_return_received_at, now())
     where ii.id in (select id from ids_junk)
     returning ii.id
   ),
@@ -252,6 +238,15 @@ begin
     set status = 'reconciled'
     where st.id = any(p_sales_transaction_ids)
     returning st.id
+  ),
+  upd_orders as (
+    update amazon_orders ao
+    set
+      reconciliation_status = 'returned',
+      updated_at = now()
+    where nullif(btrim(ao.amazon_order_id), '') = v_order_id_used
+      and lower(coalesce(ao.reconciliation_status, '')) not in ('returned', 'canceled', 'cancelled')
+    returning ao.id
   )
   select
     (select count(*) from upd_sales),
@@ -263,7 +258,7 @@ begin
     v_skip_free,
     v_skip_flagged,
     v_refund_qty,
-    (select o.order_id_used from tx_order o)
+    v_order_id_used
   into
     updated_sales_tx_count,
     updated_inbound_count,
