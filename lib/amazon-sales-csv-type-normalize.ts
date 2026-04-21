@@ -5,6 +5,8 @@
  * - amount_description: 補填行は API と同様 null（idempotency_key の衝突を避ける）
  */
 
+import { isAdjustmentTransactionTypeNormalized } from "@/lib/pending-finance-group-kind";
+
 function nfkc(s: string): string {
   return String(s ?? "").normalize("NFKC").trim();
 }
@@ -23,13 +25,7 @@ function isAdjustmentLikeTransactionType(raw: string): boolean {
   const t = nfkc(raw);
   if (!t) return false;
   if (t === "Order" || t === "Refund") return false;
-  const lower = t.toLowerCase();
-  if (lower === "adjustment" || lower.includes("adjustment")) return true;
-  if (t.includes("調整")) return true;
-  if (t.includes("補填")) return true;
-  if (lower.includes("reimbursement") || t.includes("返金補填")) return true;
-  if (lower.includes("claim") || t.includes("クレーム")) return true;
-  return false;
+  return isAdjustmentTransactionTypeNormalized(raw);
 }
 
 function isStandardOrderLineAmountType(amountType: string, amountDescription: string): boolean {

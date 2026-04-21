@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { isPrincipalTaxOffsetQuad } from "@/lib/amazon-principal-tax-quad";
 import { consolidatedInternalNoteForEdit } from "@/lib/amazon-pending-finance-internal-note";
 import { isExpenseSkipTxForRefundOffset, toNumberAmount } from "@/lib/amazon-refund-offset-like";
-import type { PendingFinanceGroupKind } from "@/lib/pending-finance-group-kind";
+import { isAdjustmentTransactionTypeNormalized, type PendingFinanceGroupKind } from "@/lib/pending-finance-group-kind";
 
 export type PendingFinanceDetail = {
   id: number;
@@ -81,26 +81,12 @@ function toCardCategory(raw: unknown): CardCategory {
   return "Other";
 }
 
-function normalizeTxType(raw: string | null | undefined): string {
-  return String(raw ?? "").normalize("NFKC").trim().toLowerCase();
-}
-
-function isAdjustmentTransactionType(raw: string | null | undefined): boolean {
-  const t = normalizeTxType(raw);
-  if (!t) return false;
-  if (t === "adjustment") return true;
-  if (t.includes("adjustment")) return true;
-  // Amazon 日本語レポート
-  if (raw != null && String(raw).normalize("NFKC").includes("調整")) return true;
-  return false;
-}
-
 function isAdjustmentGroupData(data: PendingFinanceGroupData): boolean {
   if (data.group_kind === "adjustment_like") return true;
   const rows = data.raw_details ?? [];
-  if (rows.some((r) => isAdjustmentTransactionType(r.transaction_type))) return true;
-  if (isAdjustmentTransactionType(data.transaction_type)) return true;
-  if (isAdjustmentTransactionType(data.representative_transaction_type)) return true;
+  if (rows.some((r) => isAdjustmentTransactionTypeNormalized(r.transaction_type))) return true;
+  if (isAdjustmentTransactionTypeNormalized(data.transaction_type)) return true;
+  if (isAdjustmentTransactionTypeNormalized(data.representative_transaction_type)) return true;
   return false;
 }
 
