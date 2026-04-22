@@ -155,11 +155,6 @@ function isPositiveSaleLikeRow(r: Pick<TxRow, "transaction_type" | "amount_type"
  * 同一注文に未紐付の「返金らしき行」と「プラス売上」が同居する場合は、自動では status を更新しない（方針A）。
  * UI が同一 amazon_order_id でグルーピングし相殺後の合計を出すため、行はすべて未処理のまま手動フローへ回す。
  */
-async function applyOffsetReconciliation(rows: TxRow[]): Promise<number> {
-  void rows;
-  return 0;
-}
-
 async function fetchUnlinkedSalesTxRows(): Promise<TxRow[]> {
   // status カラムが存在する場合は reconciled を除外する（存在しないDBでも動くようにする）
   {
@@ -531,10 +526,7 @@ export async function POST(request: NextRequest) {
       healedRefundCount += 1;
     }
 
-    // === 相殺（Offset）: 同一注文にプラス売上と返金が揃い、在庫に紐づけられない行を status のみ完結 ===
-    let typedForMain = await fetchUnlinkedSalesTxRowsForOrderIds(orderIds);
-    const offsetOrderCount = await applyOffsetReconciliation(typedForMain);
-    typedForMain = await fetchUnlinkedSalesTxRowsForOrderIds(orderIds);
+    const typedForMain = await fetchUnlinkedSalesTxRowsForOrderIds(orderIds);
 
     /** order_id ごとにグループ化（Refund 行は行単位では除外。混在注文全体のスキップはメインループ先頭の Set で行う） */
     const byOrder = new Map<string, TxRow[]>();
@@ -727,7 +719,7 @@ export async function POST(request: NextRequest) {
       skippedCount,
       hadUnlinkedSales: true,
       batchOrderCount: orderIds.length,
-      message: `本消込: ${reconciledCount}注文を処理しました (保留: ${skippedCount}件) / 自己修復: 手数料 ${healedFeeCount}件, 返金 ${healedRefundCount}件 / 相殺: ${offsetOrderCount}注文`,
+      message: `本消込: ${reconciledCount}注文を処理しました (保留: ${skippedCount}件) / 自己修復: 手数料 ${healedFeeCount}件, 返金 ${healedRefundCount}件`,
     });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "本消込処理に失敗しました。";
