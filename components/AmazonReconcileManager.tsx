@@ -115,6 +115,11 @@ async function readJsonAnySafe(res: Response): Promise<{ json: unknown | null; r
   }
 }
 
+function step5NoOrderAdjustmentWarning(g: PendingFinanceGroupData): boolean {
+  if (g.no_amazon_order_id_adjustment_warning === true) return true;
+  return Boolean(g.hasAdjustment) && !String(g.amazon_order_id ?? "").trim();
+}
+
 function step5PendingFinanceBadgeClass(
   g: Pick<
     PendingFinanceGroupData,
@@ -1085,6 +1090,14 @@ export default function AmazonReconcileManager() {
                               {g.needs_quantity_review ? (
                                 <span className="inline-flex shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold bg-amber-200 text-amber-950 border border-amber-400/60">
                                   要確認
+                                </span>
+                              ) : null}
+                              {step5NoOrderAdjustmentWarning(g) ? (
+                                <span
+                                  className="inline-flex shrink-0 max-w-full rounded border-2 border-amber-600 bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-950"
+                                  title="注文IDなしの補填です。返品・返金カードを先に処理済みか確認してください。"
+                                >
+                                  ⚠️ 注文IDなし（二重処理注意）
                                 </span>
                               ) : null}
                             </div>

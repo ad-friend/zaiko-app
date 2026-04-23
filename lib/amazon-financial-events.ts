@@ -33,12 +33,16 @@ type AdjustmentItem = {
   TotalAmount?: Currency;
   Quantity?: string | number;
   PerUnitAmount?: Currency;
+  /** SP-API によっては明細に注文番号が載る場合がある */
+  AmazonOrderId?: string;
 };
 type AdjustmentEvent = {
   PostedDate?: string;
   AdjustmentType?: string;
   AdjustmentAmount?: Currency;
   AdjustmentItemList?: AdjustmentItem[];
+  /** イベント直下に注文番号が載る場合がある（型に無いキーも readAdjustmentAmazonOrderId で走査） */
+  AmazonOrderId?: string;
 };
 type FinancialEventsPayload = {
   ShipmentEventList?: ShipmentEvent[];
@@ -333,6 +337,35 @@ function flattenShipmentEvents(list: ShipmentEvent[] | undefined, transactionTyp
   return rows;
 }
 
+/** AdjustmentEvent / AdjustmentItem から注文番号を拾う（存在する場合のみ。無ければ null） */
+const ADJUSTMENT_AMAZON_ORDER_ID_KEYS = [
+  "AmazonOrderId",
+  "amazonOrderId",
+  "amazon_order_id",
+  "OrderId",
+  "orderId",
+  "MerchantOrderId",
+  "merchantOrderId",
+  "SellerOrderId",
+  "sellerOrderId",
+] as const;
+
+function readAdjustmentAmazonOrderId(source: unknown): string | null {
+  if (source == null || typeof source !== "object") return null;
+  const o = source as Record<string, unknown>;
+  for (const k of ADJUSTMENT_AMAZON_ORDER_ID_KEYS) {
+    const v = o[k];
+    if (v == null) continue;
+    const s = String(v).normalize("NFKC").trim();
+    if (s && s.toLowerCase() !== "null" && s.toLowerCase() !== "undefined") return s;
+  }
+  return null;
+}
+
+function amazonOrderIdForAdjustmentRow(ev: AdjustmentEvent, item: AdjustmentItem | undefined): string | null {
+  return readAdjustmentAmazonOrderId(ev) ?? (item ? readAdjustmentAmazonOrderId(item) : null);
+}
+
 function flattenAdjustmentEvents(list: AdjustmentEvent[] | undefined): SalesTransactionRow[] {
   const rows: SalesTransactionRow[] = [];
   if (!Array.isArray(list)) return rows;
@@ -345,6 +378,7 @@ function flattenAdjustmentEvents(list: AdjustmentEvent[] | undefined): SalesTran
     const items = ev.AdjustmentItemList ?? [];
     if (items.length > 0) {
       items.forEach((it, itemIdx) => {
+        const amazonOrderId = amazonOrderIdForAdjustmentRow(ev, it);
         const sku = it.SellerSKU?.trim() ?? null;
         const base = toAmountMaybe(it.TotalAmount);
         if (base == null) return;
@@ -368,14 +402,14 @@ function flattenAdjustmentEvents(list: AdjustmentEvent[] | undefined): SalesTran
 
         if (q <= 1) {
           rows.push({
-            amazon_order_id: null,
+            amazon_order_id: amazonOrderId,
             sku,
             transaction_type: "Adjustment",
             amount_type: adjType,
             amount_description: null,
             amount: itemSignedTotal,
             posted_date: posted,
-            amazon_event_hash: buildEventHash(null, "Adjustment", adjType, null, itemSignedTotal, posted, eventIndex, rowIndex++),
+            amazon_event_hash: buildEventHash(amazonOrderId, "Adjustment", adjType, null, itemSignedTotal, posted, eventIndex, rowIndex++),
             item_quantity: 1,
             finance_line_group_id: gid,
             needs_quantity_review,
@@ -392,14 +426,14 @@ function flattenAdjustmentEvents(list: AdjustmentEvent[] | undefined): SalesTran
         for (let u = 0; u < q; u += 1) {
           const amt = unitAmounts[u] ?? itemSignedTotal / q;
           rows.push({
-            amazon_order_id: null,
+            amazon_order_id: amazonOrderId,
             sku,
             transaction_type: "Adjustment",
             amount_type: adjType,
             amount_description: null,
             amount: amt,
             posted_date: posted,
-            amazon_event_hash: buildEventHash(null, "Adjustment", adjType, null, amt, posted, eventIndex, rowIndex++, u),
+            amazon_event_hash: buildEventHash(amazonOrderId, "Adjustment", adjType, null, amt, posted, eventIndex, rowIndex++, u),
             item_quantity: 1,
             finance_line_group_id: gid,
             needs_quantity_review,
@@ -409,6 +443,7 @@ function flattenAdjustmentEvents(list: AdjustmentEvent[] | undefined): SalesTran
       });
     } else {
       if (eventBase == null) return;
+      const amazonOrderId = amazonOrderIdForAdjustmentRow(ev, undefined);
       const amount = toSignedAmount(eventBase, false);
       const eventGid = buildFinanceLineGroupId([
         "adj_event",
@@ -418,14 +453,14 @@ function flattenAdjustmentEvents(list: AdjustmentEvent[] | undefined): SalesTran
         String(amount),
       ]);
       rows.push({
-        amazon_order_id: null,
+        amazon_order_id: amazonOrderId,
         sku: null,
         transaction_type: "Adjustment",
         amount_type: adjType,
         amount_description: null,
         amount,
         posted_date: posted,
-        amazon_event_hash: buildEventHash(null, "Adjustment", adjType, null, amount, posted, eventIndex, rowIndex++),
+        amazon_event_hash: buildEventHash(amazonOrderId, "Adjustment", adjType, null, amount, posted, eventIndex, rowIndex++),
         item_quantity: 1,
         finance_line_group_id: eventGid,
         needs_quantity_review: true,

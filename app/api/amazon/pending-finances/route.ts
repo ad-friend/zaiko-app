@@ -65,6 +65,8 @@ export type PendingFinanceGroup = {
   suggestedCategory: SuggestedCategory;
   /** 返金で解除すべき数量（APIが正）。0 の場合は在庫更新しない */
   refund_qty: number;
+  /** 注文番号が無い補填グループ（二重処理防止のため UI で強調） */
+  no_amazon_order_id_adjustment_warning: boolean;
 };
 
 function normLower(s: unknown): string {
@@ -271,6 +273,8 @@ export async function GET() {
       }, 0);
       const refund_qty = refundQtyByItemQuantity > 0 ? refundQtyByItemQuantity : hasRefund ? 1 : 0;
 
+      const no_amazon_order_id_adjustment_warning = Boolean(hasAdjustment) && !String(orderId ?? "").trim();
+
       groups.push({
         groupId,
         amazon_order_id: orderId,
@@ -291,6 +295,7 @@ export async function GET() {
         hasAdjustment,
         suggestedCategory,
         refund_qty,
+        no_amazon_order_id_adjustment_warning,
       });
     }
 

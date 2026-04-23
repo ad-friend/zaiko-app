@@ -8,6 +8,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { earliestPostedDateIso } from "@/lib/settlement-posted-date";
+import { isAdjustmentTransactionTypeNormalized } from "@/lib/pending-finance-group-kind";
 
 /** 1リクエストあたり処理する注文（amazon_order_id）数（サーバー固定。クライアントの指定は無視） */
 const RECONCILE_SALES_BATCH_ORDERS = 25;
@@ -59,6 +60,10 @@ function isExpenseSkipTx(row: Pick<TxRow, "amount_type" | "transaction_type" | "
   const amountType = String(row.amount_type ?? "");
   const txType = String(row.transaction_type ?? "");
   const desc = String(row.amount_description ?? "");
+
+  if (isAdjustmentTransactionTypeNormalized(txType)) {
+    return true;
+  }
 
   return (
     amountType.includes("PostageBilling") ||

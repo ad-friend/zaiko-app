@@ -46,6 +46,8 @@ export type PendingFinanceGroupData = {
   hasAdjustment?: boolean;
   /** API: pending-finances が返す refund_qty（バックエンドを正） */
   refund_qty?: number;
+  /** API: 注文IDなし補填（二重処理防止のため強調） */
+  no_amazon_order_id_adjustment_warning?: boolean;
 };
 
 export type CandidateStock = {
@@ -95,6 +97,11 @@ function isQuadFromData(data: PendingFinanceGroupData): boolean {
     data.group_kind === "offset_principal_tax" ||
     isPrincipalTaxOffsetQuad(data.raw_details ?? [])
   );
+}
+
+function noAmazonOrderIdAdjustmentWarning(data: PendingFinanceGroupData): boolean {
+  if (data.no_amazon_order_id_adjustment_warning === true) return true;
+  return Boolean(data.hasAdjustment) && !String(data.amazon_order_id ?? "").trim();
 }
 
 function buildModeOptions(data: PendingFinanceGroupData): { id: ProcessMode; label: string }[] {
@@ -544,6 +551,14 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
       setError("明細がありません。");
       return;
     }
+    if (withStock && noAmazonOrderIdAdjustmentWarning(data)) {
+      const ok = window.confirm(
+        "【注意】この補填グループには Amazon 注文番号がありません。\n" +
+          "返品・返金に対応する在庫操作を、別カードで既に実施していないか必ず確認してください。\n" +
+          "続行しますか？"
+      );
+      if (!ok) return;
+    }
     if (withStock) {
       if (adjustmentAttachRows.length === 0) {
         setError("在庫に紐付けられる正の明細がありません。");
@@ -632,6 +647,18 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
           <p className="mb-4 text-xs text-slate-600 leading-relaxed">
             処理内容を選んでから確定してください。返金の<strong>実物在庫</strong>は返品検品・在庫画面で扱い、ここでは<strong>財務上の相殺・本消込・補填の消込</strong>に限定します（補填で在庫に紐付ける場合は下で明示的に選択）。
           </p>
+
+          {data && noAmazonOrderIdAdjustmentWarning(data) ? (
+            <div
+              className="mb-4 rounded-lg border-2 border-amber-600 bg-amber-50 px-3 py-2.5 text-xs font-semibold text-amber-950 shadow-sm"
+              role="alert"
+            >
+              <span className="mr-1" aria-hidden>
+                ⚠️
+              </span>
+              注文IDなし：返品・返金カードを先に処理済みか確認してください。同一実物に対する在庫操作の二重実施に注意してください。
+            </div>
+          ) : null}
 
           {data ? (
             <div className="mb-5 rounded-lg border border-slate-200 bg-white p-3">
