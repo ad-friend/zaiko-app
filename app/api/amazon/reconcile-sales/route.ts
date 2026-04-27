@@ -303,19 +303,30 @@ async function upsertSalesTxStockUnitCost(
 ): Promise<void> {
   if (!updates.length) return;
 
-  // upsert（INSERT ON CONFLICT）は、INSERTフェーズで NOT NULL 列（例: amount）の欠損があると弾かれうるため、
-  // 「既存行へのUPDATEのみ」を安全に並列実行する（ビジネスロジックは不変。書き込み手段だけ変更）。
-  const UPDATE_CHUNK = 50;
-  for (const chunk of chunkArray(updates, UPDATE_CHUNK)) {
-    await Promise.all(
-      chunk.map(async (u) => {
-        const { error } = await supabase
-          .from("sales_transactions")
-          .update({ stock_id: u.stock_id, unit_cost: u.unit_cost })
-          .eq("id", u.id);
-        if (error) throw error;
-      })
-    );
+  // upsert（INSERT ON CONFLICT）は、INSERTフェーズで NOT NULL 列（例: amount）の欠損があると弾かれうるため回避。
+  // ただし明細数ぶんのUPDATE乱発もコネクション枯渇の原因になるため、
+  // 「(stock_id, unit_cost) が同じ行」を束ねて `.in('id', ids)` で一括更新し、DB往復回数を圧縮する。
+  //
+  // 結果不変の理由:
+  // - updates 配列が持つ (id -> stock_id/unit_cost) の対応関係はそのまま。
+  // - 同じ値になる行をまとめてUPDATEするだけで、割当ロジック・計算・スキップ条件は変更しない。
+  const groups = new Map<string, { stock_id: number; unit_cost: number; ids: number[] }>();
+  for (const u of updates) {
+    const key = `${u.stock_id}:${u.unit_cost}`;
+    if (!groups.has(key)) {
+      groups.set(key, { stock_id: u.stock_id, unit_cost: u.unit_cost, ids: [] });
+    }
+    groups.get(key)!.ids.push(u.id);
+  }
+
+  for (const g of groups.values()) {
+    for (const ids of chunkArray(g.ids, DB_CHUNK_SIZE)) {
+      const { error } = await supabase
+        .from("sales_transactions")
+        .update({ stock_id: g.stock_id, unit_cost: g.unit_cost })
+        .in("id", ids);
+      if (error) throw error;
+    }
   }
 }
 
