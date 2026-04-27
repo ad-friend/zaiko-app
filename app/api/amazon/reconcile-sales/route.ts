@@ -12,6 +12,8 @@ import { isAdjustmentTransactionTypeNormalized } from "@/lib/pending-finance-gro
 
 /** 1リクエストあたり処理する注文（amazon_order_id）数（サーバー固定。クライアントの指定は無視） */
 const RECONCILE_SALES_BATCH_ORDERS = 25;
+/** IN句 / upsert の安全装置（URL長/ペイロード肥大対策） */
+const DB_CHUNK_SIZE = 500;
 
 type TxRow = {
   id: number;
@@ -186,26 +188,6 @@ async function fetchUnlinkedSalesTxRows(): Promise<TxRow[]> {
   return (data ?? []) as TxRow[];
 }
 
-async function findParentLinkedSaleForOrderId(
-  amazonOrderId: string
-): Promise<{ stock_id: number; unit_cost: number } | null> {
-  // 親: 同一注文で、既に stock_id が付いていて、amount>0 の行（Charge/Principal等）
-  const { data, error } = await supabase
-    .from("sales_transactions")
-    .select("stock_id, unit_cost, amount, posted_date")
-    .eq("amazon_order_id", amazonOrderId)
-    .not("stock_id", "is", null)
-    .gt("amount", 0)
-    .order("posted_date", { ascending: true })
-    .limit(1);
-  if (error) throw error;
-  const first = (data ?? [])[0] as { stock_id?: unknown; unit_cost?: unknown } | undefined;
-  const stockId = first?.stock_id != null ? Number(first.stock_id) : NaN;
-  if (!Number.isFinite(stockId) || stockId < 1) return null;
-  const unitCost = first?.unit_cost != null ? Number(first.unit_cost) : 0;
-  return { stock_id: stockId, unit_cost: Number.isFinite(unitCost) ? unitCost : 0 };
-}
-
 async function buildSkuToJanMap(sellerSkus: string[]): Promise<Map<string, string | null>> {
   const out = new Map<string, string | null>();
   const uniq = [...new Set(sellerSkus.map((s) => s.trim()).filter(Boolean))];
@@ -253,6 +235,75 @@ function clampInt(v: unknown, def: number, min: number, max: number): number {
   const n = typeof v === "number" ? v : Number(v);
   if (!Number.isFinite(n)) return def;
   return Math.min(max, Math.max(min, Math.trunc(n)));
+}
+
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const n = clampInt(size, DB_CHUNK_SIZE, 1, 5000);
+  if (arr.length <= n) return [arr];
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += n) {
+    out.push(arr.slice(i, i + n));
+  }
+  return out;
+}
+
+/**
+ * 親売上探索（N+1排除版）。
+ * - 既存の `findParentLinkedSaleForOrderId()` と同じ条件:
+ *   - 同一 amazon_order_id
+ *   - stock_id IS NOT NULL
+ *   - amount > 0
+ *   - posted_date 昇順の「先頭1件」を親として採用
+ *
+ * 結果不変の理由:
+ * - 同じフィルタ条件の行集合から、同じ基準（posted_date 最早）で「先頭1件」を選ぶ点が同一。
+ * - 取得をまとめるだけで、決定手順（親の選択規則）は変えない。
+ */
+async function fetchParentLinkedSaleMapForOrderIds(
+  orderIds: string[]
+): Promise<Map<string, { stock_id: number; unit_cost: number } | null>> {
+  const ids = orderIds.map((s) => String(s).trim()).filter(Boolean);
+  const out = new Map<string, { stock_id: number; unit_cost: number } | null>();
+  for (const oid of ids) out.set(oid, null);
+  if (ids.length === 0) return out;
+
+  for (const chunk of chunkArray(ids, DB_CHUNK_SIZE)) {
+    const { data, error } = await supabase
+      .from("sales_transactions")
+      .select("amazon_order_id, stock_id, unit_cost, amount, posted_date")
+      .in("amazon_order_id", chunk)
+      .not("stock_id", "is", null)
+      .gt("amount", 0)
+      .order("posted_date", { ascending: true });
+    if (error) throw error;
+
+    // posted_date 昇順で返ってくるため、各注文で「最初に見つかった行」= 既存の limit(1) 相当
+    for (const row of (data ?? []) as Array<{
+      amazon_order_id?: unknown;
+      stock_id?: unknown;
+      unit_cost?: unknown;
+    }>) {
+      const oid = String((row as any).amazon_order_id ?? "").trim();
+      if (!oid) continue;
+      if (!out.has(oid)) continue;
+      if (out.get(oid) != null) continue;
+
+      const stockId = row.stock_id != null ? Number(row.stock_id) : NaN;
+      if (!Number.isFinite(stockId) || stockId < 1) continue;
+      const unitCost = row.unit_cost != null ? Number(row.unit_cost) : 0;
+      out.set(oid, { stock_id: stockId, unit_cost: Number.isFinite(unitCost) ? unitCost : 0 });
+    }
+  }
+
+  return out;
+}
+
+async function upsertSalesTxStockUnitCost(updates: Array<{ id: number; stock_id: number; unit_cost: number }>): Promise<void> {
+  if (!updates.length) return;
+  for (const chunk of chunkArray(updates, DB_CHUNK_SIZE)) {
+    const { error } = await supabase.from("sales_transactions").upsert(chunk as any, { onConflict: "id" } as any);
+    if (error) throw error;
+  }
 }
 
 /**
@@ -406,32 +457,6 @@ async function fetchUnlinkedSalesTxRowsForOrderIds(orderIds: string[]): Promise<
   return (data ?? []) as TxRow[];
 }
 
-function createPromisePool(opts: { concurrency: number }) {
-  const concurrency = clampInt(opts.concurrency, 5, 1, 10);
-  let active = 0;
-  const queue: Array<() => void> = [];
-
-  const next = () => {
-    active -= 1;
-    const fn = queue.shift();
-    if (fn) fn();
-  };
-
-  const run = async <T>(task: () => Promise<T>): Promise<T> => {
-    if (active >= concurrency) {
-      await new Promise<void>((resolve) => queue.push(resolve));
-    }
-    active += 1;
-    try {
-      return await task();
-    } finally {
-      next();
-    }
-  };
-
-  return { run };
-}
-
 export async function POST(request: NextRequest) {
   try {
     await request.json().catch(() => ({}));
@@ -471,25 +496,35 @@ export async function POST(request: NextRequest) {
       if (oid) amazonOrderIdsWithUnlinkedRefund.add(oid);
     }
 
-    const parentCache = new Map<string, { stock_id: number; unit_cost: number } | null>();
-    const getParent = async (amazonOrderId: string): Promise<{ stock_id: number; unit_cost: number } | null> => {
-      const key = String(amazonOrderId ?? "").trim();
-      if (!key) return null;
-      if (parentCache.has(key)) return parentCache.get(key) ?? null;
-      const parent = await findParentLinkedSaleForOrderId(key);
-      parentCache.set(key, parent);
-      return parent;
-    };
-
     // === 自己修復 1) Order手数料（マイナス）を親売上にぶら下げる ===
     // 条件: transaction_type が Order 系 かつ amount < 0（Commission/FBA Per Unit Fulfillment Fee 等）
     let healedFeeCount = 0;
     const feeRows = typed.filter((r) => isOrderTxType(r.transaction_type) && toNumber(r.amount) < 0);
+    // === 自己修復 2) Refund系を親売上にぶら下げる ===
+    // 条件: transaction_type / amount_type / description が Refund/返金 を示す（表記揺れ対応）
+    // Refund 行には絶対に status=reconciled を付けない（経費スキップ分も含む）。stock_id のみ更新する。
+    let healedRefundCount = 0;
+    const refundRows = typed.filter((r) => isRefundLikeRow(r));
+
+    // 親探索対象の注文IDを集め、一括取得してMap化（N+1排除）
+    const parentLookupOrderIds = new Set<string>();
+    for (const r of feeRows) {
+      const oid = String(r.amazon_order_id ?? "").trim();
+      if (oid) parentLookupOrderIds.add(oid);
+    }
+    for (const r of refundRows) {
+      const oid = String(r.amazon_order_id ?? "").trim();
+      if (oid) parentLookupOrderIds.add(oid);
+    }
+    const parentByOrderId = await fetchParentLinkedSaleMapForOrderIds([...parentLookupOrderIds]);
+
+    // 自己修復（手数料）: 経費スキップは status だけまとめて更新。親紐付けは親ごとにIDを束ねて一括UPDATE。
+    const feeExpenseIds: number[] = [];
+    const feeUpdateIdsByParentKey = new Map<string, { ids: number[]; stock_id: number; unit_cost: number }>();
     for (const r of feeRows) {
       const orderId = String(r.amazon_order_id ?? "").trim();
       if (!orderId) continue;
       if (amazonOrderIdsWithUnlinkedRefund.has(orderId)) continue;
-      // 経費/調整（在庫紐づけ不要）は既存ルールで処理済みにする
       if (
         isExpenseSkipTx({
           amount_type: r.amount_type,
@@ -497,20 +532,30 @@ export async function POST(request: NextRequest) {
           amount_description: r.amount_description,
         })
       ) {
-        await markSalesTxReconciled([r.id]);
+        feeExpenseIds.push(r.id);
         continue;
       }
-      const parent = await getParent(orderId);
+      const parent = parentByOrderId.get(orderId) ?? null;
       if (!parent) continue;
-      await updateSalesTxWithOptionalStatus([r.id], { stock_id: parent.stock_id, unit_cost: parent.unit_cost });
+      const key = `${parent.stock_id}:${parent.unit_cost}`;
+      if (!feeUpdateIdsByParentKey.has(key)) {
+        feeUpdateIdsByParentKey.set(key, { ids: [], stock_id: parent.stock_id, unit_cost: parent.unit_cost });
+      }
+      feeUpdateIdsByParentKey.get(key)!.ids.push(r.id);
       healedFeeCount += 1;
     }
 
-    // === 自己修復 2) Refund系を親売上にぶら下げる ===
-    // 条件: transaction_type / amount_type / description が Refund/返金 を示す（表記揺れ対応）
-    // Refund 行には絶対に status=reconciled を付けない（経費スキップ分も含む）。stock_id のみ更新する。
-    let healedRefundCount = 0;
-    const refundRows = typed.filter((r) => isRefundLikeRow(r));
+    for (const ids of chunkArray(feeExpenseIds, DB_CHUNK_SIZE)) {
+      await markSalesTxReconciled(ids);
+    }
+    for (const group of feeUpdateIdsByParentKey.values()) {
+      for (const ids of chunkArray(group.ids, DB_CHUNK_SIZE)) {
+        await updateSalesTxWithOptionalStatus(ids, { stock_id: group.stock_id, unit_cost: group.unit_cost });
+      }
+    }
+
+    // 自己修復（Refund）: 親ごとにIDを束ねて一括UPDATE（status非更新の要件を維持）
+    const refundUpdateIdsByParentKey = new Map<string, { ids: number[]; stock_id: number; unit_cost: number }>();
     for (const r of refundRows) {
       const orderId = String(r.amazon_order_id ?? "").trim();
       if (!orderId) continue;
@@ -525,10 +570,19 @@ export async function POST(request: NextRequest) {
         // 経費相当の Refund 行も reconciled にしない（在庫紐付けも行わない）
         continue;
       }
-      const parent = await getParent(orderId);
+      const parent = parentByOrderId.get(orderId) ?? null;
       if (!parent) continue;
-      await updateSalesTxStockOnly([r.id], { stock_id: parent.stock_id, unit_cost: parent.unit_cost });
+      const key = `${parent.stock_id}:${parent.unit_cost}`;
+      if (!refundUpdateIdsByParentKey.has(key)) {
+        refundUpdateIdsByParentKey.set(key, { ids: [], stock_id: parent.stock_id, unit_cost: parent.unit_cost });
+      }
+      refundUpdateIdsByParentKey.get(key)!.ids.push(r.id);
       healedRefundCount += 1;
+    }
+    for (const group of refundUpdateIdsByParentKey.values()) {
+      for (const ids of chunkArray(group.ids, DB_CHUNK_SIZE)) {
+        await updateSalesTxStockOnly(ids, { stock_id: group.stock_id, unit_cost: group.unit_cost });
+      }
     }
 
     const typedForMain = await fetchUnlinkedSalesTxRowsForOrderIds(orderIds);
@@ -574,7 +628,12 @@ export async function POST(request: NextRequest) {
       const expenseTx = txGroup.filter((r) =>
         isExpenseSkipTx({ amount_type: r.amount_type, transaction_type: r.transaction_type, amount_description: r.amount_description })
       );
-      if (expenseTx.length) await markSalesTxReconciled(expenseTx.map((r) => r.id));
+      if (expenseTx.length) {
+        const ids = expenseTx.map((r) => r.id);
+        for (const chunk of chunkArray(ids, DB_CHUNK_SIZE)) {
+          await markSalesTxReconciled(chunk);
+        }
+      }
 
       // 通常の在庫紐づけ対象のみで以降のロジックを回す
       const normalTx = txGroup.filter((r) => !expenseTx.some((e) => e.id === r.id));
@@ -691,17 +750,9 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      const pool = createPromisePool({ concurrency: 5 });
-      await Promise.all(
-        plannedUpdates.map((u) =>
-          pool.run(async () => {
-            const { error: uErr } = await supabase
-              .from("sales_transactions")
-              .update({ stock_id: u.stock_id, unit_cost: u.unit_cost })
-              .eq("id", u.tx_id);
-            if (uErr) throw uErr;
-          })
-        )
+      // N+1排除: 行ごとにUPDATEせず、id衝突の upsert でまとめて更新する（値は plannedUpdates と同一）
+      await upsertSalesTxStockUnitCost(
+        plannedUpdates.map((u) => ({ id: u.tx_id, stock_id: u.stock_id, unit_cost: u.unit_cost }))
       );
 
       const { error: bulkSettleErr } = await supabase
@@ -712,7 +763,9 @@ export async function POST(request: NextRequest) {
       if (bulkSettleErr) throw bulkSettleErr;
 
       const reconciledIds = plannedUpdates.map((u) => u.tx_id);
-      await markSalesTxReconciled(reconciledIds);
+      for (const ids of chunkArray(reconciledIds, DB_CHUNK_SIZE)) {
+        await markSalesTxReconciled(ids);
+      }
 
       reconciledCount += 1;
     }
