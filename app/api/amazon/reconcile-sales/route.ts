@@ -298,11 +298,24 @@ async function fetchParentLinkedSaleMapForOrderIds(
   return out;
 }
 
-async function upsertSalesTxStockUnitCost(updates: Array<{ id: number; stock_id: number; unit_cost: number }>): Promise<void> {
+async function upsertSalesTxStockUnitCost(
+  updates: Array<{ id: number; stock_id: number; unit_cost: number }>
+): Promise<void> {
   if (!updates.length) return;
-  for (const chunk of chunkArray(updates, DB_CHUNK_SIZE)) {
-    const { error } = await supabase.from("sales_transactions").upsert(chunk as any, { onConflict: "id" } as any);
-    if (error) throw error;
+
+  // upsert（INSERT ON CONFLICT）は、INSERTフェーズで NOT NULL 列（例: amount）の欠損があると弾かれうるため、
+  // 「既存行へのUPDATEのみ」を安全に並列実行する（ビジネスロジックは不変。書き込み手段だけ変更）。
+  const UPDATE_CHUNK = 50;
+  for (const chunk of chunkArray(updates, UPDATE_CHUNK)) {
+    await Promise.all(
+      chunk.map(async (u) => {
+        const { error } = await supabase
+          .from("sales_transactions")
+          .update({ stock_id: u.stock_id, unit_cost: u.unit_cost })
+          .eq("id", u.id);
+        if (error) throw error;
+      })
+    );
   }
 }
 
