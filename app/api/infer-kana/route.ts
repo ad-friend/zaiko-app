@@ -10,7 +10,7 @@ export async function POST(request: NextRequest) {
     if (!text || !apiKey) return NextResponse.json({ kana: "" });
 
     // JANシステムと全く同じURLの叩き方
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key=${apiKey}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=${apiKey}`;
     
     const res = await fetch(url, {
       method: "POST",

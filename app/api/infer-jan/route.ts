@@ -17,7 +17,7 @@ export type InferJanResponse = {
   asin?: string | null;
 };
 
-const GEMINI_MODEL = "gemini-3.1-flash-lite-preview";
+const GEMINI_MODEL = "gemini-3.1-flash-lite";
 const RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 16000];
 
 /** Gemini / Google Generative Language API 等の非 OK レスポンスをクライアントへ返す */
