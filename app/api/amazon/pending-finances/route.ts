@@ -14,6 +14,7 @@ import {
 } from "@/lib/pending-finance-group-kind";
 import { isPrincipalTaxOffsetQuad } from "@/lib/amazon-principal-tax-quad";
 import { isRefundLikeRow } from "@/lib/amazon-refund-offset-like";
+import { computeSuggestedRefundQty } from "@/lib/refund-qty-from-details";
 import { internalNoteSummaryForGroup } from "@/lib/amazon-pending-finance-internal-note";
 
 export type SuggestedCategory = "Refund" | "Adjustment" | "Mixed" | null;
@@ -249,29 +250,7 @@ export async function GET() {
       const suggestedCategory: SuggestedCategory =
         hasRefund && hasAdjustment ? "Mixed" : hasRefund ? "Refund" : hasAdjustment ? "Adjustment" : null;
 
-      // refund_qty 優先順位（仕様固定）
-      const refundRows = details.filter((d) =>
-        isRefundLikeRow({
-          amount: d.amount,
-          transaction_type: d.transaction_type,
-          amount_type: d.amount_type,
-          amount_description: d.amount_description,
-        })
-      );
-      // Amazon返金は Principal/Tax/Commission... と複数行に分割され、各行 item_quantity=1 のことが多い。
-      // そのため「Refund行すべての item_quantity 合算」は行数ぶん過大になり得るので、
-      // 返品1点あたり概ね1行になる Principal だけで数量推定する。
-      const principalLikeRefundRows = refundRows.filter((r) => {
-        const ad = normLower(r.amount_description);
-        return ad === "principal" || ad.includes("principal");
-      });
-      const refundQtyByItemQuantity = principalLikeRefundRows.reduce((sum, r) => {
-        const q = Number((r as { item_quantity?: unknown }).item_quantity);
-        if (!Number.isFinite(q)) return sum;
-        const n = Math.trunc(q);
-        return n >= 1 ? sum + n : sum;
-      }, 0);
-      const refund_qty = refundQtyByItemQuantity > 0 ? refundQtyByItemQuantity : hasRefund ? 1 : 0;
+      const refund_qty = computeSuggestedRefundQty(details);
 
       const no_amazon_order_id_adjustment_warning = Boolean(hasAdjustment) && !String(orderId ?? "").trim();
 

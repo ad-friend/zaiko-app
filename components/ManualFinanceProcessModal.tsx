@@ -171,6 +171,10 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
   const [processMode, setProcessMode] = useState<ProcessMode>("order_reconcile");
   const [cardCategory, setCardCategory] = useState<CardCategory>("Other");
   const [refundQty, setRefundQty] = useState(0);
+  const [suggestedRefundQty, setSuggestedRefundQty] = useState(0);
+  const [refundAvailableCount, setRefundAvailableCount] = useState<number | null>(null);
+  const [refundLinkedCount, setRefundLinkedCount] = useState<number | null>(null);
+  const [loadingRefundInventory, setLoadingRefundInventory] = useState(false);
   const [dispositions, setDispositions] = useState<{ new: number; used: number; junk: number }>({
     new: 0,
     used: 0,
@@ -205,6 +209,10 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
 
   const dispositionSum = dispositions.new + dispositions.used + dispositions.junk;
   const dispositionSumOk = refundQty === 0 ? dispositionSum === 0 : dispositionSum === refundQty;
+  const refundQtyExceedsAvailable =
+    refundQty > 0 && refundAvailableCount != null && refundQty > refundAvailableCount;
+  const refundReleaseDisabled =
+    submitting || !dispositionSumOk || refundQtyExceedsAvailable;
 
   const adjustmentAttachRows = useMemo(() => {
     return details.filter(
@@ -336,9 +344,12 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
     {
       const q = Number((data as { refund_qty?: unknown }).refund_qty ?? 0);
       const qty = Number.isFinite(q) ? Math.max(0, Math.trunc(q)) : 0;
+      setSuggestedRefundQty(qty);
       setRefundQty(qty);
       setDispositions({ new: qty, used: 0, junk: 0 });
     }
+    setRefundAvailableCount(null);
+    setRefundLinkedCount(null);
     setSelectedStockId(null);
     {
       const m: Record<number, number | null> = {};
@@ -378,6 +389,46 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
     data?.refund_qty,
     rawDetailsNoteSig,
   ]);
+
+  useEffect(() => {
+    const isRefundGroup =
+      data?.suggestedCategory === "Refund" ||
+      data?.suggestedCategory === "Mixed" ||
+      data?.hasRefund === true;
+    if (!isOpen || !data || !isRefundGroup || !data.amazon_order_id?.trim()) {
+      setRefundAvailableCount(null);
+      setRefundLinkedCount(null);
+      setLoadingRefundInventory(false);
+      return;
+    }
+
+    const ids = (data.raw_details ?? []).map((d) => d.id).filter((n) => Number.isFinite(n) && n >= 1);
+    const params = new URLSearchParams();
+    params.set("amazon_order_id", data.amazon_order_id.trim());
+    if (ids.length > 0) params.set("sales_transaction_ids", ids.join(","));
+
+    setLoadingRefundInventory(true);
+    fetch(`/api/amazon/refund-release-inventory?${params}`)
+      .then(async (res) => {
+        if (!res.ok) {
+          setRefundAvailableCount(null);
+          setRefundLinkedCount(null);
+          return;
+        }
+        const json = (await res.json()) as {
+          available_count?: number;
+          linked_inbound_count?: number;
+          suggested_refund_qty?: number;
+        };
+        setRefundAvailableCount(Number.isFinite(Number(json.available_count)) ? Number(json.available_count) : null);
+        setRefundLinkedCount(Number.isFinite(Number(json.linked_inbound_count)) ? Number(json.linked_inbound_count) : null);
+      })
+      .catch(() => {
+        setRefundAvailableCount(null);
+        setRefundLinkedCount(null);
+      })
+      .finally(() => setLoadingRefundInventory(false));
+  }, [isOpen, data?.groupId, data?.amazon_order_id, data?.suggestedCategory, data?.hasRefund, rawDetailsNoteSig]);
 
   useEffect(() => {
     if (!isOpen || !data || processMode !== "order_reconcile" || !data.amazon_order_id || isQuad) {
@@ -494,6 +545,10 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
 
     if (!dispositionSumOk) {
       setError(refundQty === 0 ? "返金数量が0のため、内訳数量はすべて 0 にしてください。" : "新品/中古/ジャンクの合計が返金数量と一致しません。");
+      return;
+    }
+    if (refundQtyExceedsAvailable) {
+      setError(`返金数量が処理可能在庫（${refundAvailableCount} 件）を超えています。`);
       return;
     }
 
@@ -861,7 +916,49 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                         </p>
                       </div>
                     ) : (
-                      <div className="rounded-lg border border-slate-200 bg-white p-3">
+                      <div className="rounded-lg border border-slate-200 bg-white p-3 space-y-3">
+                        <div>
+                          <p className="text-xs font-semibold text-slate-700 mb-2">返金数量</p>
+                          <label className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
+                            <input
+                              type="number"
+                              min={0}
+                              step={1}
+                              value={refundQty}
+                              disabled={submitting}
+                              onChange={(e) => {
+                                const n = Math.max(0, Math.trunc(Number(e.target.value)));
+                                const qty = Number.isFinite(n) ? n : 0;
+                                setRefundQty(qty);
+                                setDispositions({ new: qty, used: 0, junk: 0 });
+                                setError(null);
+                              }}
+                              className="w-full max-w-28 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 text-center tabular-nums font-medium"
+                            />
+                            <span className="text-xs text-slate-500">
+                              財務明細からの推定: {suggestedRefundQty}（Principal 行ベース）
+                            </span>
+                          </label>
+                          {loadingRefundInventory ? (
+                            <p className="mt-2 text-xs text-slate-500">在庫件数を確認中…</p>
+                          ) : refundAvailableCount != null ? (
+                            <p className="mt-2 text-xs text-slate-600 leading-relaxed">
+                              処理可能在庫: <span className="font-semibold text-slate-800">{refundAvailableCount}</span> 件
+                              {refundLinkedCount != null ? (
+                                <>
+                                  {" "}
+                                  / 注文引当（参考）: {refundLinkedCount} 件
+                                </>
+                              ) : null}
+                            </p>
+                          ) : null}
+                          {refundQtyExceedsAvailable ? (
+                            <p className="mt-2 text-xs font-medium text-red-600">
+                              返金数量が処理可能在庫（{refundAvailableCount} 件）を超えています。数量を見直してください。
+                            </p>
+                          ) : null}
+                        </div>
+                        <div>
                         <p className="text-xs font-semibold text-slate-700 mb-2">返品後のコンディション内訳（数量）</p>
                         <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
                           <label className="flex flex-col items-center rounded-md border border-slate-200 bg-slate-50/50 px-3 py-2">
@@ -917,12 +1014,13 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                           返金数量: {refundQty} / 入力合計: {dispositionSum}
                           {!dispositionSumOk ? "（合計が一致するよう調整してください）" : ""}
                         </p>
+                        </div>
                       </div>
                     )}
                     <button
                       type="button"
                       onClick={() => void handleRefundRelease()}
-                      disabled={submitting || !dispositionSumOk}
+                      disabled={refundReleaseDisabled}
                       className="w-full inline-flex items-center justify-center rounded-lg bg-amber-600 text-white py-2.5 px-4 text-sm font-semibold hover:bg-amber-700 disabled:opacity-50 transition-colors shadow-sm"
                     >
                       {submitting ? "処理中..." : "返金処理＆在庫戻しを実行"}
