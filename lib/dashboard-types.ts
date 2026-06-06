@@ -28,3 +28,22 @@ export type DashboardPayload = {
   };
   notices: DashboardNoticeRow[];
 };
+
+export type MonthlyDashboardRow = {
+  period: DashboardPeriod;
+  salesTotal: number;
+  consumptionTax: number;
+  monthlyPurchase: { count: number; totalAmount: number };
+  inventoryAtMonthEnd: { count: number; totalAmount: number };
+  soldCount: number;
+  netDeposit: number;
+  costOfGoodsSold: number;
+  monthlyLoss: { count: number; totalAmount: number };
+  profit: number;
+};
+
+export type MonthlyDashboardPayload = {
+  from: string;
+  to: string;
+  rows: MonthlyDashboardRow[];
+};

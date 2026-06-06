@@ -27,7 +27,11 @@ function isPrincipalRow(r: PrincipalTaxQuadRowLike): boolean {
   return t.includes("principal") || t.includes("商品代金") || t.includes("itemprice");
 }
 
-function isTaxRow(r: PrincipalTaxQuadRowLike): boolean {
+export function isSalesPrincipalRow(r: PrincipalTaxQuadRowLike): boolean {
+  return isPrincipalRow(r);
+}
+
+export function isSalesTaxRow(r: PrincipalTaxQuadRowLike): boolean {
   const t = rowText(r);
   return (
     (t.includes("tax") && !t.includes("principal")) ||
@@ -40,7 +44,7 @@ function isTaxRow(r: PrincipalTaxQuadRowLike): boolean {
 export function isPrincipalTaxOffsetQuad(rows: PrincipalTaxQuadRowLike[]): boolean {
   if (rows.length !== 4) return false;
   const principals = rows.filter(isPrincipalRow);
-  const taxes = rows.filter(isTaxRow);
+  const taxes = rows.filter(isSalesTaxRow);
   if (principals.length !== 2 || taxes.length !== 2) return false;
 
   const sum = (arr: PrincipalTaxQuadRowLike[]) =>

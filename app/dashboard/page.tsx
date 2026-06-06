@@ -1,8 +1,20 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { LayoutDashboard, Loader2, RefreshCw, AlertCircle, Package, TrendingUp, TrendingDown, Wallet, ShoppingCart, PieChart } from "lucide-react";
-import type { DashboardPayload } from "@/lib/dashboard-types";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
+import {
+  LayoutDashboard,
+  Loader2,
+  RefreshCw,
+  AlertCircle,
+  Package,
+  TrendingUp,
+  TrendingDown,
+  Wallet,
+  ShoppingCart,
+  PieChart,
+  Table2,
+} from "lucide-react";
+import type { DashboardPayload, MonthlyDashboardPayload } from "@/lib/dashboard-types";
 import DashboardNotices from "@/components/DashboardNotices";
 import QuickInventoryAdjustment from "@/components/QuickInventoryAdjustment";
 
@@ -11,8 +23,16 @@ function formatYen(n: number): string {
   return `${rounded.toLocaleString("ja-JP")} 円`;
 }
 
+function formatYenCompact(n: number): string {
+  return Math.round(n).toLocaleString("ja-JP");
+}
+
 function formatCount(n: number): string {
   return `${n.toLocaleString("ja-JP")} 個`;
+}
+
+function formatCountCompact(n: number): string {
+  return n.toLocaleString("ja-JP");
 }
 
 const cardBase =
@@ -25,6 +45,12 @@ export default function DashboardPage() {
   const [data, setData] = useState<DashboardPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const [monthlyFrom, setMonthlyFrom] = useState("");
+  const [monthlyTo, setMonthlyTo] = useState("");
+  const [monthlyData, setMonthlyData] = useState<MonthlyDashboardPayload | null>(null);
+  const [monthlyLoading, setMonthlyLoading] = useState(true);
+  const [monthlyError, setMonthlyError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -44,9 +70,40 @@ export default function DashboardPage() {
     }
   }, []);
 
+  const loadMonthly = useCallback(async (from?: string, to?: string) => {
+    setMonthlyLoading(true);
+    setMonthlyError(null);
+    try {
+      const params = new URLSearchParams();
+      if (from) params.set("from", from);
+      if (to) params.set("to", to);
+      const qs = params.toString();
+      const res = await fetch(`/api/dashboard/monthly${qs ? `?${qs}` : ""}`);
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(j.error || `月次データの取得に失敗しました (${res.status})`);
+      }
+      const payload = (await res.json()) as MonthlyDashboardPayload;
+      setMonthlyData(payload);
+      setMonthlyFrom(payload.from);
+      setMonthlyTo(payload.to);
+    } catch (e) {
+      setMonthlyData(null);
+      setMonthlyError(e instanceof Error ? e.message : "月次データの読み込みに失敗しました");
+    } finally {
+      setMonthlyLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     void load();
-  }, [load]);
+    void loadMonthly();
+  }, [load, loadMonthly]);
+
+  const handleMonthlySubmit = (e: FormEvent) => {
+    e.preventDefault();
+    void loadMonthly(monthlyFrom, monthlyTo);
+  };
 
   return (
     <div className="flex-1 flex flex-col">
@@ -219,6 +276,125 @@ export default function DashboardPage() {
                   </ul>
                 </div>
               </div>
+            </section>
+
+            <section className="mb-8 mt-10">
+              <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-700">
+                <Table2 className="h-4 w-4 text-primary" />
+                月次一覧
+              </h2>
+              <p className="mb-4 text-sm text-slate-600">
+                売上・入金・消費税は <span className="font-medium text-slate-800">sales_transactions.posted_date</span> 基準。
+                販売個数・原価は <span className="font-medium text-slate-800">settled_at</span> 基準。
+                月末在庫は履歴スナップショットがないため再計算です（上段の当月カードと数値が異なる場合があります）。
+              </p>
+
+              <form
+                onSubmit={handleMonthlySubmit}
+                className="mb-4 flex flex-wrap items-end gap-3 rounded-xl border border-slate-200/80 bg-white p-4 shadow-sm"
+              >
+                <label className="flex flex-col gap-1 text-sm">
+                  <span className="font-medium text-slate-700">開始月</span>
+                  <input
+                    type="month"
+                    value={monthlyFrom}
+                    onChange={(e) => setMonthlyFrom(e.target.value)}
+                    className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900"
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-sm">
+                  <span className="font-medium text-slate-700">終了月</span>
+                  <input
+                    type="month"
+                    value={monthlyTo}
+                    onChange={(e) => setMonthlyTo(e.target.value)}
+                    className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900"
+                  />
+                </label>
+                <button
+                  type="submit"
+                  disabled={monthlyLoading}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-primary/90 disabled:opacity-50"
+                >
+                  {monthlyLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                  表示
+                </button>
+              </form>
+
+              {monthlyError && (
+                <div
+                  className="mb-4 flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900"
+                  role="alert"
+                >
+                  <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-red-600" />
+                  <p>{monthlyError}</p>
+                </div>
+              )}
+
+              {monthlyLoading && !monthlyData && (
+                <div className="rounded-xl border border-slate-200/80 bg-white p-8 text-center text-sm text-slate-500">
+                  <Loader2 className="mx-auto mb-2 h-6 w-6 animate-spin text-primary" />
+                  月次データを集計しています…
+                </div>
+              )}
+
+              {monthlyData && (
+                <div className="overflow-x-auto rounded-xl border border-slate-200/80 bg-white shadow-sm">
+                  <table className="min-w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-slate-200 bg-slate-50/80 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
+                        <th className="whitespace-nowrap px-4 py-3">月</th>
+                        <th className="whitespace-nowrap px-4 py-3 text-right">売上総額</th>
+                        <th className="whitespace-nowrap px-4 py-3 text-right">消費税</th>
+                        <th className="whitespace-nowrap px-4 py-3 text-right">仕入金額</th>
+                        <th className="whitespace-nowrap px-4 py-3 text-right">月末在庫金額</th>
+                        <th className="whitespace-nowrap px-4 py-3 text-right">月末在庫数</th>
+                        <th className="whitespace-nowrap px-4 py-3 text-right">販売個数</th>
+                        <th className="whitespace-nowrap px-4 py-3 text-right">入金額</th>
+                        <th className="whitespace-nowrap px-4 py-3 text-right">利益額</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {monthlyData.rows.map((row) => (
+                        <tr key={row.period.dateStart} className="border-b border-slate-100 hover:bg-slate-50/50">
+                          <td className="whitespace-nowrap px-4 py-3 font-medium text-slate-900">{row.period.label}</td>
+                          <td className="whitespace-nowrap px-4 py-3 text-right tabular-nums text-slate-800">
+                            {formatYenCompact(row.salesTotal)}
+                          </td>
+                          <td className="whitespace-nowrap px-4 py-3 text-right tabular-nums text-slate-800">
+                            {formatYenCompact(row.consumptionTax)}
+                          </td>
+                          <td className="whitespace-nowrap px-4 py-3 text-right tabular-nums text-slate-800">
+                            {formatYenCompact(row.monthlyPurchase.totalAmount)}
+                          </td>
+                          <td className="whitespace-nowrap px-4 py-3 text-right tabular-nums text-slate-800">
+                            {formatYenCompact(row.inventoryAtMonthEnd.totalAmount)}
+                          </td>
+                          <td className="whitespace-nowrap px-4 py-3 text-right tabular-nums text-slate-800">
+                            {formatCountCompact(row.inventoryAtMonthEnd.count)}
+                          </td>
+                          <td className="whitespace-nowrap px-4 py-3 text-right tabular-nums text-slate-800">
+                            {formatCountCompact(row.soldCount)}
+                          </td>
+                          <td className="whitespace-nowrap px-4 py-3 text-right tabular-nums text-slate-800">
+                            {formatYenCompact(row.netDeposit)}
+                          </td>
+                          <td
+                            className={`whitespace-nowrap px-4 py-3 text-right tabular-nums font-medium ${
+                              row.profit < 0 ? "text-red-600" : "text-primary"
+                            }`}
+                          >
+                            {formatYenCompact(row.profit)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <p className="border-t border-slate-100 px-4 py-3 text-xs text-slate-500">
+                    利益 = 入金額 − 販売原価 − 当月損失。売上総額は Principal + Sell（消費税除く）。入金額は sales_transactions 全行合計。単位: 円 / 個。
+                  </p>
+                </div>
+              )}
             </section>
 
             <DashboardNotices
