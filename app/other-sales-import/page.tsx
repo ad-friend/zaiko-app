@@ -13,8 +13,49 @@ type OtherOrder = {
   stock_id: number | null;
   status: string;
   reconciliation_status?: string | null;
+  quantity?: number;
+  condition_id?: string | null;
   created_at?: string;
 };
+
+type InboundCandidate = {
+  id: number;
+  jan_code: string | null;
+  brand: string | null;
+  model_number: string | null;
+  effective_unit_price: number;
+  condition_type: string | null;
+  created_at: string;
+  order_id: string | null;
+};
+
+function mergeInboundById(base: InboundCandidate[], extra: InboundCandidate[]): InboundCandidate[] {
+  const m = new Map<number, InboundCandidate>();
+  for (const c of base) m.set(c.id, c);
+  for (const c of extra) m.set(c.id, c);
+  return [...m.values()].sort((a, b) => a.id - b.id);
+}
+
+function formatInboundOptionLabel(c: InboundCandidate): string {
+  const jan = (c.jan_code ?? "").trim() || "—";
+  const brand = (c.brand ?? "").trim() || "—";
+  const model = (c.model_number ?? "").trim() || "—";
+  const price = Number.isFinite(c.effective_unit_price) ? c.effective_unit_price : 0;
+  return `ID:${c.id} / JAN:${jan} / ${brand} / ${model} / 原価:${price}`;
+}
+
+function normalizeInboundCandidate(r: Record<string, unknown>): InboundCandidate {
+  return {
+    id: Number(r.id),
+    jan_code: r.jan_code != null ? String(r.jan_code) : null,
+    brand: r.brand != null ? String(r.brand) : null,
+    model_number: r.model_number != null ? String(r.model_number) : null,
+    effective_unit_price: Number(r.effective_unit_price ?? 0),
+    condition_type: r.condition_type != null ? String(r.condition_type) : null,
+    created_at: r.created_at != null ? String(r.created_at) : "",
+    order_id: r.order_id != null ? String(r.order_id) : null,
+  };
+}
 
 type CsvImportResult = {
   ok: boolean;
@@ -432,7 +473,7 @@ export default function OtherSalesImportPage() {
             </button>
           </div>
           <p className="text-sm text-slate-600 mb-4">
-            在庫を自動で見つけられなかった注文です。正しい在庫IDを指定して引当してください（本消込は STEP 3 で行います）。
+            在庫を自動で見つけられなかった注文です。JAN に一致する在庫を選んで引当してください（本消込は STEP 3 で行います）。
           </p>
 
           {manualError && (
@@ -539,84 +580,223 @@ function ManualOrderCards({
   orders: OtherOrder[];
   onReconciled: (otherOrderId: string) => void;
 }) {
-  const [cardSubmitting, setCardSubmitting] = useState<Record<string, boolean>>({});
-  const [cardErrors, setCardErrors] = useState<Record<string, string | null>>({});
-  const [selectedStockByOrderId, setSelectedStockByOrderId] = useState<Record<string, string>>({});
+  return (
+    <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3">
+      {orders.map((order) => (
+        <ManualOtherOrderCard key={order.id} order={order} onReconciled={onReconciled} />
+      ))}
+    </div>
+  );
+}
+
+function ManualOtherOrderCard({
+  order,
+  onReconciled,
+}: {
+  order: OtherOrder;
+  onReconciled: (otherOrderId: string) => void;
+}) {
+  const [candidates, setCandidates] = useState<InboundCandidate[]>([]);
+  const [loadingCandidates, setLoadingCandidates] = useState(true);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [rescueExtra, setRescueExtra] = useState<InboundCandidate[]>([]);
+  const [rescueQuery, setRescueQuery] = useState(() => (order.jan_code ?? "").trim());
+  const [rescueLoading, setRescueLoading] = useState(false);
+  const [rescueError, setRescueError] = useState<string | null>(null);
+
+  const mergedCandidates = useMemo(() => mergeInboundById(candidates, rescueExtra), [candidates, rescueExtra]);
 
   useEffect(() => {
-    const next: Record<string, string> = {};
-    for (const o of orders) {
-      next[o.id] = o.stock_id != null ? String(o.stock_id) : "";
-    }
-    setSelectedStockByOrderId(next);
-  }, [orders]);
+    setRescueExtra([]);
+    setRescueQuery((order.jan_code ?? "").trim());
+    setRescueError(null);
+    setSelectedId(null);
+  }, [order.id, order.jan_code]);
 
-  const confirm = async (order: OtherOrder) => {
-    const input = selectedStockByOrderId[order.id] ?? "";
-    const stockId = Number(input);
-    if (!Number.isFinite(stockId) || stockId < 1) {
-      setCardErrors((p) => ({ ...p, [order.id]: "有効な在庫IDを入力してください。" }));
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingCandidates(true);
+    setError(null);
+    const params = new URLSearchParams({
+      other_order_id: order.id,
+      order_id: order.order_id,
+      platform: order.platform,
+    });
+    fetch(`/api/other-platform/orders/candidates?${params}`)
+      .then(async (res) => {
+        const raw = await res.json().catch(() => null);
+        if (!res.ok) {
+          const msg =
+            raw && typeof raw === "object" && "error" in raw && typeof raw.error === "string"
+              ? raw.error
+              : "候補の取得に失敗しました";
+          throw new Error(msg);
+        }
+        return Array.isArray(raw) ? raw : [];
+      })
+      .then((data) => {
+        if (!cancelled) {
+          setCandidates(data.map((r) => normalizeInboundCandidate(r as Record<string, unknown>)));
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : "候補の取得に失敗しました");
+          setCandidates([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingCandidates(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [order.id, order.order_id, order.platform]);
+
+  const runRescueSearch = async () => {
+    const q = rescueQuery.trim();
+    if (!q) {
+      setRescueError("JAN または商品名を入力してください。");
       return;
     }
-    setCardErrors((p) => ({ ...p, [order.id]: null }));
-    setCardSubmitting((p) => ({ ...p, [order.id]: true }));
+    setRescueLoading(true);
+    setRescueError(null);
+    try {
+      const params = new URLSearchParams({ search: q, order_id: order.order_id });
+      const res = await fetch(`/api/other-platform/orders/candidates?${params}`);
+      const raw: unknown = await res.json().catch(() => null);
+      if (!res.ok) {
+        const msg =
+          raw && typeof raw === "object" && "error" in raw && typeof (raw as { error?: unknown }).error === "string"
+            ? (raw as { error: string }).error
+            : "検索に失敗しました";
+        throw new Error(msg);
+      }
+      const list = Array.isArray(raw) ? raw : [];
+      const mapped = list.map((r) => normalizeInboundCandidate(r as Record<string, unknown>));
+      setRescueExtra(mapped);
+      if (mapped.length === 0) setRescueError("該当する在庫がありませんでした");
+    } catch (e) {
+      setRescueError(e instanceof Error ? e.message : "検索に失敗しました");
+    } finally {
+      setRescueLoading(false);
+    }
+  };
 
+  const confirm = async () => {
+    if (selectedId == null) {
+      setError("在庫候補を選択してください。");
+      return;
+    }
+    setError(null);
+    setSubmitting(true);
     try {
       const res = await fetch("/api/other-platform/manual-reconcile-order", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ otherOrderId: order.id, stockId }),
+        body: JSON.stringify({ otherOrderId: order.id, stockId: selectedId }),
       });
-
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error ?? "手動引当に失敗しました");
-
       onReconciled(order.id);
     } catch (e) {
-      setCardErrors((p) => ({ ...p, [order.id]: e instanceof Error ? e.message : "手動引当に失敗しました" }));
+      setError(e instanceof Error ? e.message : "手動引当に失敗しました");
     } finally {
-      setCardSubmitting((p) => ({ ...p, [order.id]: false }));
+      setSubmitting(false);
     }
   };
 
   return (
-    <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3">
-      {orders.map((order) => (
-        <div key={order.id} className="rounded-lg border border-slate-200 bg-slate-50/50 p-4 shadow-sm">
-          <p className="text-sm font-mono font-bold text-slate-900 truncate" title={`${order.platform}/${order.order_id}`}>
-            {order.platform} / {order.order_id}
+    <div className="rounded-lg border border-slate-200 bg-slate-50/50 p-4 shadow-sm">
+      <p className="text-sm font-mono font-bold text-slate-900 truncate" title={`${order.platform}/${order.order_id}`}>
+        {order.platform} / {order.order_id}
+      </p>
+      <div className="mt-2 space-y-1 text-xs text-slate-600">
+        <p>
+          SKU: <span className="font-mono">{order.sku ?? "—"}</span>
+        </p>
+        <p>販売価格: {order.sell_price}</p>
+        <p>
+          JAN: <span className="font-mono">{order.jan_code ?? "—"}</span>
+        </p>
+        {order.condition_id && <p>コンディション: {order.condition_id}</p>}
+      </div>
+
+      {loadingCandidates ? (
+        <p className="mt-3 text-xs text-slate-500">在庫候補を取得中…</p>
+      ) : mergedCandidates.length === 0 ? (
+        <div className="mt-3 space-y-2 rounded-lg border border-red-100 bg-red-50/50 p-3">
+          <p className="text-xs font-semibold text-red-800">
+            JAN に一致する在庫がありません。下の検索で JAN または商品名を試してください。
           </p>
-          <div className="mt-2 space-y-1 text-xs text-slate-600">
-            <p>SKU: <span className="font-mono">{order.sku ?? "—"}</span></p>
-            <p>販売価格: {order.sell_price}</p>
-            <p>JAN: <span className="font-mono">{order.jan_code ?? "—"}</span></p>
-          </div>
+        </div>
+      ) : (
+        <div className="mt-3 space-y-2">
+          <label className="block text-xs font-semibold text-slate-600">在庫候補を選択</label>
+          <select
+            value={selectedId ?? ""}
+            onChange={(e) => setSelectedId(e.target.value ? Number(e.target.value) : null)}
+            disabled={submitting}
+            className="w-full rounded-md border-2 border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-800 focus:border-amber-400 focus:outline-none focus:ring-2 focus:ring-amber-400/30"
+          >
+            <option value="">選択してください</option>
+            {mergedCandidates.map((c) => (
+              <option key={c.id} value={c.id}>
+                {formatInboundOptionLabel(c)}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
 
-          <div className="mt-3">
-            <label className="block text-xs font-semibold text-slate-600 mb-1">紐付け先の在庫ID</label>
-            <input
-              value={selectedStockByOrderId[order.id] ?? ""}
-              onChange={(e) => setSelectedStockByOrderId((p) => ({ ...p, [order.id]: e.target.value }))}
-              inputMode="numeric"
-              placeholder="例: 123"
-              className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/50"
-            />
-          </div>
-
-          {cardErrors[order.id] && <p className="mt-2 text-xs text-red-700">{cardErrors[order.id]}</p>}
-
+      <div className="mt-3 space-y-2">
+        <label className="block text-xs font-semibold text-slate-600">JAN / 商品名で検索</label>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
+          <input
+            type="text"
+            value={rescueQuery}
+            onChange={(e) => setRescueQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void runRescueSearch();
+              }
+            }}
+            placeholder="例: 4901234567890 または 商品名の一部"
+            disabled={rescueLoading || submitting}
+            className="min-w-0 flex-1 rounded-md border border-sky-200 bg-white px-2.5 py-2 text-xs text-slate-800 placeholder:text-slate-400 focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-300/40"
+          />
           <button
             type="button"
-            disabled={cardSubmitting[order.id]}
-            onClick={() => confirm(order)}
-            className={`${buttonClass} mt-3 w-full ${
-              cardSubmitting[order.id] ? "bg-amber-300 cursor-not-allowed" : "bg-amber-500 text-white hover:bg-amber-600"
-            } text-sm`}
+            onClick={() => void runRescueSearch()}
+            disabled={rescueLoading || submitting}
+            className={`${buttonClass} h-9 shrink-0 bg-sky-700 text-white hover:bg-sky-800 text-xs px-4 disabled:bg-slate-300`}
           >
-            {cardSubmitting[order.id] ? "確定中..." : "この在庫で引当する"}
+            {rescueLoading ? "検索中…" : "検索"}
           </button>
         </div>
-      ))}
+        {rescueError && <p className="text-[11px] font-medium text-red-700">{rescueError}</p>}
+        {rescueExtra.length > 0 && (
+          <p className="text-[11px] text-sky-800/90">検索で {rescueExtra.length} 件ヒット（候補に反映）</p>
+        )}
+      </div>
+
+      {error && <p className="mt-2 text-xs text-red-700">{error}</p>}
+
+      <button
+        type="button"
+        disabled={submitting || selectedId == null}
+        onClick={() => void confirm()}
+        className={`${buttonClass} mt-3 w-full ${
+          submitting || selectedId == null
+            ? "bg-amber-300 cursor-not-allowed"
+            : "bg-amber-500 text-white hover:bg-amber-600"
+        } text-sm`}
+      >
+        {submitting ? "確定中..." : "この在庫で引当する"}
+      </button>
     </div>
   );
 }
