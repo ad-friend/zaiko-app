@@ -1,182 +1,69 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { FileUp, RefreshCcw } from "lucide-react";
+import { FileUp, Package, RefreshCcw, Banknote } from "lucide-react";
 
 type OtherOrder = {
   id: string;
   order_id: string;
   platform: string;
+  sku?: string | null;
   sell_price: number;
   jan_code: string | null;
   stock_id: number | null;
   status: string;
+  reconciliation_status?: string | null;
   created_at?: string;
 };
 
-type AutoReconcileResult = {
-  ok: true;
-  input: {
-    orderId: string;
-    platform: string;
-    sellPrice: number;
-    janCode?: string;
-    sku?: string;
-    postedDate?: string;
-    orderDate?: string;
-  };
-  otherOrderId: string | null;
-  status: "completed" | "manual_required";
-  matchedStockId?: number | null;
-} | {
-  ok: false;
-  input: {
-    orderId: string;
-    platform: string;
-    sellPrice: number;
-    janCode?: string;
-    sku?: string;
-    postedDate?: string;
-    orderDate?: string;
-  };
-  otherOrderId: string | null;
-  status: "error";
-  error: string;
+type CsvImportResult = {
+  ok: boolean;
+  ordersUpserted: number;
+  salesUpserted: number;
+  orderRows: number;
+  salesRows: number;
+  rowErrors: string[];
+  message: string;
+};
+
+type ReconcileResult = {
+  ok: boolean;
+  message: string;
+  processed: number;
+  completed: number;
+  manual_required: number;
+  skipped_used_safety?: number;
+};
+
+type ReconcileSalesResult = {
+  ok: boolean;
+  message: string;
+  processedOrders: number;
+  reconciledCount: number;
+  skippedCount: number;
 };
 
 const buttonClass =
   "inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 h-10 px-6 py-2 shadow-sm active:scale-[0.98] duration-100";
 
-const parseCsvLine = (line: string): string[] => {
-  const out: string[] = [];
-  let cur = "";
-  let inQ = false;
-
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (inQ) {
-      if (c === '"') {
-        if (line[i + 1] === '"') {
-          cur += '"';
-          i++;
-        } else inQ = false;
-      } else cur += c;
-    } else {
-      if (c === '"') inQ = true;
-      else if (c === ",") {
-        out.push(cur);
-        cur = "";
-      } else cur += c;
-    }
-  }
-  out.push(cur);
-  return out;
-};
-
-const parseMoneyToNumber = (raw: string): number => {
-  const cleaned = raw.trim().replace(/[^\d.-]/g, "");
-  const n = Number(cleaned);
-  return Number.isFinite(n) ? n : NaN;
-};
-
-const normalizeHeader = (s: string) => s.replace(/\s/g, "");
-
-const parseOtherSalesCsv = (csvText: string) => {
-  const lines = csvText
-    .replace(/^\uFEFF/, "")
-    .split(/\r?\n/)
-    .filter((l) => l.trim().length > 0);
-
-  if (lines.length < 2) throw new Error("CSVにデータ行がありません。");
-
-  const header = parseCsvLine(lines[0]).map((h) => normalizeHeader(h));
-
-  const idx = (label: string) => header.indexOf(normalizeHeader(label));
-  const iOrder = idx("注文番号");
-  const iPlatform = idx("プラットフォーム");
-  const iSell = idx("販売価格");
-  const iJan = idx("JAN");
-  const iSku = idx("SKU");
-  const iPosted = idx("決済日");
-  const iOrderDate = idx("注文日");
-
-  if (iOrder < 0 || iPlatform < 0 || iSell < 0) {
-    throw new Error("ヘッダーが不正です。注文番号/プラットフォーム/販売価格を確認してください。");
-  }
-  if (iPosted < 0 && iOrderDate < 0) {
-    throw new Error("ヘッダーに「決済日」または「注文日」列が必要です（在庫の決済完了日時の記録に使用します）。");
-  }
-
-  const rows: Array<{
-    orderId: string;
-    platform: string;
-    sellPrice: number;
-    janCode?: string;
-    sku?: string;
-    postedDate?: string;
-    orderDate?: string;
-  }> = [];
-  const rowErrors: string[] = [];
-
-  for (let i = 1; i < lines.length; i++) {
-    const cols = parseCsvLine(lines[i]);
-    const orderId = (cols[iOrder] ?? "").trim();
-    const platform = (cols[iPlatform] ?? "").trim();
-    const sellPriceRaw = (cols[iSell] ?? "").trim();
-    const sellPrice = parseMoneyToNumber(sellPriceRaw);
-    const janCode = iJan >= 0 ? (cols[iJan] ?? "").trim() : "";
-    const sku = iSku >= 0 ? (cols[iSku] ?? "").trim() : "";
-    const postedCell = iPosted >= 0 ? (cols[iPosted] ?? "").trim() : "";
-    const orderDateCell = iOrderDate >= 0 ? (cols[iOrderDate] ?? "").trim() : "";
-    const saleDateRaw = postedCell || orderDateCell;
-
-    if (!orderId || !platform) continue;
-    if (!Number.isFinite(sellPrice)) {
-      rowErrors.push(`行 ${i + 1}: 販売価格が数値として解釈できません`);
-      continue;
-    }
-    if (!saleDateRaw) {
-      rowErrors.push(`行 ${i + 1}: 決済日/注文日が空です`);
-      continue;
-    }
-
-    const item: {
-      orderId: string;
-      platform: string;
-      sellPrice: number;
-      janCode?: string;
-      sku?: string;
-      postedDate?: string;
-      orderDate?: string;
-    } = {
-      orderId,
-      platform,
-      sellPrice,
-    };
-
-    if (janCode) item.janCode = janCode;
-    if (sku) item.sku = sku;
-    if (postedCell) item.postedDate = postedCell;
-    else if (orderDateCell) item.orderDate = orderDateCell;
-
-    rows.push(item);
-  }
-
-  return { rows, rowErrors };
-};
+const SAMPLE_CSV = `注文番号,プラットフォーム,SKU,数量,コンディション,注文日,決済日,JAN,商品売上,消費税,送料,プラットフォーム手数料,その他手数料
+RK-20260706-0001,楽天,RAK-SKU-001,1,新品,2026-07-01,2026-07-05,4901234567890,2980,298,0,-358,0`;
 
 export default function OtherSalesImportPage() {
   const [selectedFileName, setSelectedFileName] = useState<string | null>(null);
-  const [selectedPreview, setSelectedPreview] = useState<ReturnType<typeof parseOtherSalesCsv> | null>(null);
-  const [autoResult, setAutoResult] = useState<{
-    ok: boolean;
-    processed: number;
-    completed: number;
-    manual_required: number;
-    results: AutoReconcileResult[];
-  } | null>(null);
-  const [autoError, setAutoError] = useState<string | null>(null);
-  const [autoRunning, setAutoRunning] = useState(false);
+  const [csvImportResult, setCsvImportResult] = useState<CsvImportResult | null>(null);
+  const [csvError, setCsvError] = useState<string | null>(null);
+  const [csvRunning, setCsvRunning] = useState(false);
+
+  const [reconcileResult, setReconcileResult] = useState<ReconcileResult | null>(null);
+  const [reconcileError, setReconcileError] = useState<string | null>(null);
+  const [reconcileRunning, setReconcileRunning] = useState(false);
+  const [reconcileRound, setReconcileRound] = useState(0);
+
+  const [salesResult, setSalesResult] = useState<ReconcileSalesResult | null>(null);
+  const [salesError, setSalesError] = useState<string | null>(null);
+  const [salesRunning, setSalesRunning] = useState(false);
+
   const [manualOrders, setManualOrders] = useState<OtherOrder[]>([]);
   const [manualLoading, setManualLoading] = useState(true);
   const [manualError, setManualError] = useState<string | null>(null);
@@ -184,7 +71,7 @@ export default function OtherSalesImportPage() {
   const fetchManualQueue = useCallback(async () => {
     setManualError(null);
     try {
-      const res = await fetch("/api/other-sales-import?status=manual_required");
+      const res = await fetch("/api/other-sales-import?reconciliation_status=manual_required");
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error ?? "手動キューの取得に失敗しました");
       setManualOrders(Array.isArray(data) ? data : []);
@@ -200,53 +87,27 @@ export default function OtherSalesImportPage() {
     fetchManualQueue();
   }, [fetchManualQueue]);
 
-  const parsedSummary = useMemo(() => {
-    const previewRows = selectedPreview?.rows?.length ?? 0;
-    const previewErrors = selectedPreview?.rowErrors?.length ?? 0;
-    return { previewRows, previewErrors };
-  }, [selectedPreview]);
-
   const handleCsvUpload = async (file: File) => {
-    setAutoError(null);
-    setAutoResult(null);
-    setAutoRunning(true);
+    setCsvError(null);
+    setCsvImportResult(null);
+    setCsvRunning(true);
     setSelectedFileName(file.name);
 
     try {
-      const text = await file.text();
-      const parsed = parseOtherSalesCsv(text);
-      setSelectedPreview(parsed);
-
-      if (parsed.rowErrors.length > 0) {
-        setAutoError(`CSVパースで一部エラー: ${parsed.rowErrors.slice(0, 3).join(" / ")}${parsed.rowErrors.length > 3 ? `(+${parsed.rowErrors.length - 3})` : ""}`);
-      }
-
-      if (!parsed.rows.length) {
-        setAutoResult({
-          ok: true,
-          processed: 0,
-          completed: 0,
-          manual_required: 0,
-          results: [],
-        });
-        return;
-      }
-
-      const res = await fetch("/api/other-sales-import", {
+      const csvText = await file.text();
+      const res = await fetch("/api/other-platform-import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(parsed.rows),
+        body: JSON.stringify({ csvText }),
       });
-
       const data = await res.json();
-      if (!res.ok) throw new Error(data?.error ?? "自動消込の実行に失敗しました");
-
-      setAutoResult(data);
+      if (!res.ok) throw new Error(data?.error ?? "CSV取込に失敗しました");
+      setCsvImportResult(data);
       await fetchManualQueue();
     } catch (e) {
-      setAutoError(e instanceof Error ? e.message : "自動消込に失敗しました");
+      setCsvError(e instanceof Error ? e.message : "CSV取込に失敗しました");
     } finally {
-      setAutoRunning(false);
+      setCsvRunning(false);
     }
   };
 
@@ -254,9 +115,107 @@ export default function OtherSalesImportPage() {
     const file = e.target.files?.[0];
     if (!file) return;
     await handleCsvUpload(file);
-    // 同じファイルを再選択できるように初期化
     e.target.value = "";
   };
+
+  const downloadSample = () => {
+    const blob = new Blob([`\uFEFF${SAMPLE_CSV}`], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "other-platform-import-sample.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const runReconcileLoop = async () => {
+    if (!confirm("在庫引当を実行しますか？（pending がなくなるまで繰り返します）")) return;
+    setReconcileError(null);
+    setReconcileResult(null);
+    setReconcileRunning(true);
+
+    let round = 0;
+    let totalCompleted = 0;
+    let totalManual = 0;
+    let totalSkipped = 0;
+
+    try {
+      for (;;) {
+        round += 1;
+        setReconcileRound(round);
+        const res = await fetch("/api/other-platform/reconcile", { method: "POST" });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error ?? "在庫引当に失敗しました");
+
+        const processed = Number(data?.processed ?? 0);
+        totalCompleted += Number(data?.completed ?? 0);
+        totalManual += Number(data?.manual_required ?? 0);
+        totalSkipped += Number(data?.skipped_used_safety ?? 0);
+
+        if (processed === 0) {
+          setReconcileResult({
+            ok: true,
+            message:
+              round === 1 && totalCompleted === 0 && totalManual === 0
+                ? "対象の pending 注文はありません。"
+                : "在庫引当が完了しました。",
+            processed: 0,
+            completed: totalCompleted,
+            manual_required: totalManual,
+            skipped_used_safety: totalSkipped,
+          });
+          await fetchManualQueue();
+          return;
+        }
+
+        if (round >= 12) {
+          setReconcileResult({
+            ok: true,
+            message: "一部のみ実行されました（繰り返し上限に達しました）。再度実行できます。",
+            processed,
+            completed: totalCompleted,
+            manual_required: totalManual,
+            skipped_used_safety: totalSkipped,
+          });
+          await fetchManualQueue();
+          return;
+        }
+      }
+    } catch (e) {
+      setReconcileError(e instanceof Error ? e.message : "在庫引当に失敗しました");
+      await fetchManualQueue();
+    } finally {
+      setReconcileRunning(false);
+      setReconcileRound(0);
+    }
+  };
+
+  const runReconcileSales = async () => {
+    if (!confirm("売上を本消込しますか？（在庫引当済みの注文のみ処理されます）")) return;
+    setSalesError(null);
+    setSalesResult(null);
+    setSalesRunning(true);
+
+    try {
+      const res = await fetch("/api/other-platform/reconcile-sales", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error ?? "本消込に失敗しました");
+      setSalesResult(data);
+    } catch (e) {
+      setSalesError(e instanceof Error ? e.message : "本消込に失敗しました");
+    } finally {
+      setSalesRunning(false);
+    }
+  };
+
+  const flowSummary = useMemo(
+    () => [
+      { step: "1", label: "CSV取込", desc: "注文・売上データをDBに保存（消込はしない）" },
+      { step: "2", label: "在庫引当", desc: "どの在庫か決める（まだ決済完了にはしない）" },
+      { step: "3", label: "売上本消込", desc: "在庫と売上を結び付け、決済日を記録" },
+    ],
+    []
+  );
 
   return (
     <main className="flex-1 py-8 w-full max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -266,103 +225,138 @@ export default function OtherSalesImportPage() {
             <FileUp className="h-6 w-6" />
           </div>
           <div>
-            <h1 className="text-2xl font-bold text-slate-900">他販路 売上CSV 自動消込</h1>
-            <p className="text-sm text-slate-500">CSV一括アップロード → 在庫引当 → 自動消込 / エラーは手動へ</p>
+            <h1 className="text-2xl font-bold text-slate-900">他販路 売上CSV 取込・消込</h1>
+            <p className="text-sm text-slate-500">CSV取込 → 在庫引当 → 売上本消込（Amazonと同じ流れ・ボタンで段階実行）</p>
           </div>
         </div>
 
-        {/* セクションA */}
+        <section className="rounded-xl border border-slate-200 bg-slate-50/80 p-4">
+          <ol className="flex flex-col sm:flex-row gap-4 sm:gap-8 text-sm text-slate-700">
+            {flowSummary.map((f) => (
+              <li key={f.step} className="flex gap-2">
+                <span className="font-bold text-primary shrink-0">STEP {f.step}</span>
+                <span>
+                  <span className="font-medium">{f.label}</span>
+                  <span className="text-slate-500"> — {f.desc}</span>
+                </span>
+              </li>
+            ))}
+          </ol>
+        </section>
+
+        {/* STEP 1: CSV */}
         <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-          <h2 className="text-lg font-bold text-slate-800 mb-3">セクションA：CSVアップロード</h2>
-          <p className="text-sm text-slate-600 mb-4">
-            CSVヘッダー要件:{" "}
-            <span className="font-mono">
-              注文番号, プラットフォーム, 販売価格, 決済日または注文日（必須・yyyy-MM-dd 推奨）, JAN, SKU
-            </span>
+          <h2 className="text-lg font-bold text-slate-800 mb-3">STEP 1：CSV取込</h2>
+          <p className="text-sm text-slate-600 mb-2">
+            統合CSV（注文番号・プラットフォーム・SKU・売上内訳）をアップロードします。DBに保存するだけで、消込はまだ行いません。
+          </p>
+          <p className="text-xs text-slate-500 mb-4 font-mono break-all">
+            注文番号, プラットフォーム, SKU, 数量, コンディション, 注文日, 決済日, JAN, 商品売上, 消費税, 送料, プラットフォーム手数料, その他手数料
           </p>
 
-          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
-            <div className="flex-1">
-              <input type="file" accept=".csv" onChange={onFileChange} disabled={autoRunning} className="block w-full text-sm text-slate-700" />
-              {selectedFileName && <p className="mt-2 text-xs text-slate-500">選択: {selectedFileName}</p>}
-            </div>
-            <div className="shrink-0">
-              <button
-                type="button"
-                disabled
-                className={`${buttonClass} bg-slate-100 text-slate-400 border border-slate-200`}
-                title="ファイル選択後、自動で実行します"
-              >
-                {autoRunning ? "処理中..." : "自動実行"}
-              </button>
-            </div>
+          <div className="flex flex-wrap items-center gap-3 mb-4">
+            <input
+              type="file"
+              accept=".csv"
+              onChange={onFileChange}
+              disabled={csvRunning}
+              className="block text-sm text-slate-700"
+            />
+            <button
+              type="button"
+              onClick={downloadSample}
+              className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50`}
+            >
+              サンプルCSV
+            </button>
           </div>
+          {selectedFileName && <p className="text-xs text-slate-500 mb-2">選択: {selectedFileName}</p>}
+          {csvRunning && <p className="text-sm text-slate-600">取込中...</p>}
 
-          {selectedPreview && (
-            <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50/80 p-4 text-sm text-slate-700">
-              <p className="font-medium">パース結果</p>
-              <p className="mt-1 text-xs text-slate-500">有効行: {parsedSummary.previewRows}件 / パース警告: {parsedSummary.previewErrors}件</p>
-            </div>
+          {csvError && (
+            <div className="mt-3 rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-800">{csvError}</div>
           )}
-
-          {autoError && (
-            <div className="mt-4 rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-800">
-              {autoError}
-            </div>
-          )}
-
-          {autoResult && (
-            <div className="mt-4 rounded-lg border border-slate-200 bg-emerald-50/60 p-4">
-              <p className="font-medium text-emerald-800">自動消込結果</p>
-              <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-emerald-900">
-                <span>処理: {autoResult.processed}件</span>
-                <span>成功: {autoResult.completed}件</span>
-                <span>手動: {autoResult.manual_required}件</span>
-              </div>
-              {autoResult.results?.length > 0 && (
-                <div className="mt-4 max-h-[220px] overflow-y-auto pr-0.5">
-                  <ul className="space-y-2">
-                    {autoResult.results.slice(0, 30).map((r, idx) => (
-                      <li key={idx} className="rounded border border-slate-200 bg-white p-3 text-xs text-slate-700">
-                        <div className="flex items-center justify-between gap-3">
-                          <p className="truncate font-mono" title={r.input.orderId}>
-                            {r.input.platform} / {r.input.orderId}
-                          </p>
-                          <p className={`font-semibold ${r.ok && r.status === "completed" ? "text-emerald-700" : r.ok && r.status === "manual_required" ? "text-amber-700" : "text-red-700"}`}>
-                            {r.ok ? r.status : "error"}
-                          </p>
-                        </div>
-                        <p className="mt-1">
-                          販売価格: {r.input.sellPrice}
-                          {" / "}
-                          JAN: {" "}
-                          {r.input.janCode ?? "—"}
-                          {" / "}
-                          SKU: {" "}
-                          {r.input.sku ?? "—"}
-                          {" / "}
-                          引当在庫ID: {" "}
-                          {r.ok && r.status === "completed" ? r.matchedStockId ?? "—" : "—"}
-                        </p>
-                        {!r.ok && <p className="mt-1 text-red-700">エラー: {r.error}</p>}
-                      </li>
-                    ))}
-                  </ul>
-                  {autoResult.results.length > 30 && <p className="mt-2 text-xs text-slate-500">結果表示は先頭30件のみです。</p>}
-                </div>
-              )}
+          {csvImportResult && (
+            <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50/60 p-4 text-sm text-emerald-900">
+              <p className="font-medium">{csvImportResult.message}</p>
+              <p className="mt-1 text-xs">
+                注文 {csvImportResult.ordersUpserted}件 / 売上行 {csvImportResult.salesUpserted}件
+                {csvImportResult.rowErrors?.length > 0 && ` / 警告 ${csvImportResult.rowErrors.length}件`}
+              </p>
             </div>
           )}
         </section>
 
-        {/* セクションB */}
+        {/* STEP 2: 在庫引当 */}
+        <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div className="flex items-center gap-2 mb-3">
+            <Package className="h-5 w-5 text-slate-600" />
+            <h2 className="text-lg font-bold text-slate-800">STEP 2：在庫引当</h2>
+          </div>
+          <p className="text-sm text-slate-600 mb-4">
+            CSV取込済みの注文について、在庫を紐付けます。結果を確認してから STEP 3 へ進んでください。
+          </p>
+          <button
+            type="button"
+            onClick={runReconcileLoop}
+            disabled={reconcileRunning}
+            className={`${buttonClass} bg-amber-500 text-white hover:bg-amber-600 disabled:bg-amber-300`}
+          >
+            {reconcileRunning ? `在庫引当中... (${reconcileRound}回目)` : "在庫引当を実行"}
+          </button>
+
+          {reconcileError && (
+            <div className="mt-3 rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-800">{reconcileError}</div>
+          )}
+          {reconcileResult && (
+            <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm">
+              <p className="font-medium text-slate-800">{reconcileResult.message}</p>
+              <p className="mt-1 text-slate-600">
+                成功: {reconcileResult.completed}件 / 手動: {reconcileResult.manual_required}件
+              </p>
+            </div>
+          )}
+        </section>
+
+        {/* STEP 3: 本消込 */}
+        <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div className="flex items-center gap-2 mb-3">
+            <Banknote className="h-5 w-5 text-slate-600" />
+            <h2 className="text-lg font-bold text-slate-800">STEP 3：売上本消込</h2>
+          </div>
+          <p className="text-sm text-slate-600 mb-4">
+            在庫引当が完了した注文について、売上明細と在庫を正式に結び付けます。
+          </p>
+          <button
+            type="button"
+            onClick={runReconcileSales}
+            disabled={salesRunning}
+            className={`${buttonClass} bg-emerald-600 text-white hover:bg-emerald-700 disabled:bg-emerald-300`}
+          >
+            {salesRunning ? "本消込中..." : "売上を本消込"}
+          </button>
+
+          {salesError && (
+            <div className="mt-3 rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-800">{salesError}</div>
+          )}
+          {salesResult && (
+            <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50/60 p-4 text-sm text-emerald-900">
+              <p className="font-medium">{salesResult.message}</p>
+              <p className="mt-1 text-xs">
+                処理注文: {salesResult.processedOrders} / 成功: {salesResult.reconciledCount} / 保留: {salesResult.skippedCount}
+              </p>
+            </div>
+          )}
+        </section>
+
+        {/* 手動キュー */}
         <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
           <div className="flex items-center justify-between gap-3 mb-3">
-            <h2 className="text-lg font-bold text-slate-800">セクションB：手動処理が必要なカード一覧</h2>
+            <h2 className="text-lg font-bold text-slate-800">手動引当が必要な注文</h2>
             <button
               type="button"
               onClick={fetchManualQueue}
-              className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300`}
+              className={`${buttonClass} bg-white text-slate-700 border border-slate-200 hover:bg-slate-50`}
               disabled={manualLoading}
             >
               <RefreshCcw className="mr-2 h-4 w-4" />
@@ -370,20 +364,18 @@ export default function OtherSalesImportPage() {
             </button>
           </div>
           <p className="text-sm text-slate-600 mb-4">
-            自動消込で在庫が見つからなかった注文（status: <span className="font-mono">manual_required</span>）を、正しい在庫IDで手動紐付けしてください。
+            在庫を自動で見つけられなかった注文です。正しい在庫IDを指定して引当してください（本消込は STEP 3 で行います）。
           </p>
 
           {manualError && (
-            <div className="rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-800 mb-4">
-              {manualError}
-            </div>
+            <div className="rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-800 mb-4">{manualError}</div>
           )}
 
           {manualLoading ? (
             <p className="text-sm text-slate-500">読み込み中...</p>
           ) : manualOrders.length === 0 ? (
             <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/80 p-5 text-sm text-slate-600">
-              手動処理対象の注文はありません。
+              手動引当対象の注文はありません。
             </div>
           ) : (
             <ManualOrderCards
@@ -409,11 +401,8 @@ function ManualOrderCards({
   const [cardSubmitting, setCardSubmitting] = useState<Record<string, boolean>>({});
   const [cardErrors, setCardErrors] = useState<Record<string, string | null>>({});
   const [selectedStockByOrderId, setSelectedStockByOrderId] = useState<Record<string, string>>({});
-  /** 空なら API 側で other_orders.created_at を決済日時として使用 */
-  const [postedDateByOrderId, setPostedDateByOrderId] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    // 初期値: other_orders に既に保存されている stock_id（ある場合）
     const next: Record<string, string> = {};
     for (const o of orders) {
       next[o.id] = o.stock_id != null ? String(o.stock_id) : "";
@@ -432,23 +421,18 @@ function ManualOrderCards({
     setCardSubmitting((p) => ({ ...p, [order.id]: true }));
 
     try {
-      const postedDate = (postedDateByOrderId[order.id] ?? "").trim();
-      const res = await fetch("/api/other-sales-import/manual-reconcile", {
+      const res = await fetch("/api/other-platform/manual-reconcile-order", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          otherOrderId: order.id,
-          stockId,
-          ...(postedDate ? { postedDate } : {}),
-        }),
+        body: JSON.stringify({ otherOrderId: order.id, stockId }),
       });
 
       const data = await res.json();
-      if (!res.ok) throw new Error(data?.error ?? "手動消込に失敗しました");
+      if (!res.ok) throw new Error(data?.error ?? "手動引当に失敗しました");
 
       onReconciled(order.id);
     } catch (e) {
-      setCardErrors((p) => ({ ...p, [order.id]: e instanceof Error ? e.message : "手動消込に失敗しました" }));
+      setCardErrors((p) => ({ ...p, [order.id]: e instanceof Error ? e.message : "手動引当に失敗しました" }));
     } finally {
       setCardSubmitting((p) => ({ ...p, [order.id]: false }));
     }
@@ -458,41 +442,17 @@ function ManualOrderCards({
     <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3">
       {orders.map((order) => (
         <div key={order.id} className="rounded-lg border border-slate-200 bg-slate-50/50 p-4 shadow-sm">
-          <div className="flex items-start justify-between gap-3 mb-2">
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-mono font-bold text-slate-900 truncate" title={`${order.platform}/${order.order_id}`}>
-                {order.platform} / {order.order_id}
-              </p>
-              <p className="text-xs text-slate-500 mt-1">
-                販売価格: {order.sell_price}
-              </p>
-            </div>
-          </div>
-
-          <div className="space-y-2 text-xs text-slate-600">
-            <p>
-              JAN: <span className="font-mono">{order.jan_code ?? "—"}</span>
-            </p>
-            <p>
-              指定在庫ID: <span className="font-mono">{order.stock_id ?? "—"}</span>
-            </p>
+          <p className="text-sm font-mono font-bold text-slate-900 truncate" title={`${order.platform}/${order.order_id}`}>
+            {order.platform} / {order.order_id}
+          </p>
+          <div className="mt-2 space-y-1 text-xs text-slate-600">
+            <p>SKU: <span className="font-mono">{order.sku ?? "—"}</span></p>
+            <p>販売価格: {order.sell_price}</p>
+            <p>JAN: <span className="font-mono">{order.jan_code ?? "—"}</span></p>
           </div>
 
           <div className="mt-3">
-            <label className="block text-xs font-semibold text-slate-600 mb-1">
-              決済日・注文日（任意）
-            </label>
-            <input
-              type="text"
-              inputMode="numeric"
-              placeholder="空欄＝CSV取込日時を使用 / yyyy-MM-dd"
-              value={postedDateByOrderId[order.id] ?? ""}
-              onChange={(e) => setPostedDateByOrderId((p) => ({ ...p, [order.id]: e.target.value }))}
-              className="mb-2 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-mono text-slate-800"
-            />
-            <label className="block text-xs font-semibold text-slate-600 mb-1">
-              紐付け先の在庫ID
-            </label>
+            <label className="block text-xs font-semibold text-slate-600 mb-1">紐付け先の在庫ID</label>
             <input
               value={selectedStockByOrderId[order.id] ?? ""}
               onChange={(e) => setSelectedStockByOrderId((p) => ({ ...p, [order.id]: e.target.value }))}
@@ -502,25 +462,20 @@ function ManualOrderCards({
             />
           </div>
 
-          {cardErrors[order.id] && (
-            <p className="mt-2 text-xs text-red-700">
-              {cardErrors[order.id]}
-            </p>
-          )}
+          {cardErrors[order.id] && <p className="mt-2 text-xs text-red-700">{cardErrors[order.id]}</p>}
 
           <button
             type="button"
             disabled={cardSubmitting[order.id]}
             onClick={() => confirm(order)}
             className={`${buttonClass} mt-3 w-full ${
-              cardSubmitting[order.id] ? "bg-amber-300 text-amber-50 cursor-not-allowed" : "bg-amber-500 text-white hover:bg-amber-600"
+              cardSubmitting[order.id] ? "bg-amber-300 cursor-not-allowed" : "bg-amber-500 text-white hover:bg-amber-600"
             } text-sm`}
           >
-            {cardSubmitting[order.id] ? "確定中..." : "この在庫で紐付ける"}
+            {cardSubmitting[order.id] ? "確定中..." : "この在庫で引当する"}
           </button>
         </div>
       ))}
     </div>
   );
 }
-

@@ -1,0 +1,856 @@
+/**
+ * 他販路 本消込: sales_transactions と在庫（inbound_items）を紐付ける
+ * other_orders に存在する注文のみ対象（Amazon 注文への誤適用防止）
+ * POST: stock_id が未設定の通常売上を、amazon_order_id 単位でまとめて処理する。
+ * - 同一注文の複数明細（FBA 分割発送・Principal 複数行等）は事前にグループ化し、金額を合算したサマリーをログに出す。
+ * - inbound_items が複数ある場合は seller SKU → sku_mappings → JAN で在庫行と突き合わせ、行ごとに stock_id / unit_cost を設定。
+ * - 在庫側は注文に紐づく全行に一度に settled_at（posted_date 最早）をセットする。
+ */
+import { NextRequest, NextResponse } from "next/server";
+import { supabase } from "@/lib/supabase";
+import { earliestPostedDateIso } from "@/lib/settlement-posted-date";
+import { isAdjustmentTransactionTypeNormalized } from "@/lib/pending-finance-group-kind";
+
+/** 1リクエストあたり処理する注文（amazon_order_id）数（サーバー固定。クライアントの指定は無視） */
+const RECONCILE_SALES_BATCH_ORDERS = 25;
+/** IN句 / upsert の安全装置（URL長/ペイロード肥大対策） */
+const DB_CHUNK_SIZE = 500;
+
+type TxRow = {
+  id: number;
+  amazon_order_id: string;
+  posted_date: string | null;
+  amount: unknown;
+  sku: string | null;
+  amount_type: string | null;
+  amount_description: string | null;
+  transaction_type: string | null;
+};
+
+type StockRow = {
+  id: number;
+  effective_unit_price: unknown;
+  settled_at: string | null;
+  jan_code: string | null;
+  created_at: string | null;
+  order_id?: string | null;
+};
+
+/** sku_mappings から JAN が一意に定まるときだけ返す（セット品は null） */
+function uniqueJanFromSkuMappings(mapList: Array<{ jan_code: unknown }>): string | null {
+  const jans = new Set<string>();
+  for (const m of mapList) {
+    const j = String(m.jan_code ?? "").trim();
+    if (j) jans.add(j);
+  }
+  if (jans.size !== 1) return null;
+  const [only] = [...jans];
+  return only ?? null;
+}
+
+function normalizeJan(j: string | null | undefined): string {
+  return String(j ?? "").trim();
+}
+
+function toNumber(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function isExpenseSkipTx(row: Pick<TxRow, "amount_type" | "transaction_type" | "amount_description">): boolean {
+  // このAPIでは transaction_type は常に "Order" を取得している想定だが、
+  // 要件通り amount_type / transaction_type の両方に文字列が含まれる場合に除外する。
+  const amountType = String(row.amount_type ?? "");
+  const txType = String(row.transaction_type ?? "");
+  const desc = String(row.amount_description ?? "");
+
+  if (isAdjustmentTransactionTypeNormalized(txType)) {
+    return true;
+  }
+
+  return (
+    amountType.includes("PostageBilling") ||
+    txType.includes("PostageBilling") ||
+    desc.includes("PostageBilling") ||
+    amountType.includes("adj_") ||
+    txType.includes("adj_") ||
+    desc.includes("adj_") ||
+    amountType.includes("ServiceFee") ||
+    txType.includes("ServiceFee") ||
+    desc.includes("ServiceFee")
+  );
+}
+
+async function markSalesTxReconciled(ids: number[]): Promise<void> {
+  if (!ids.length) return;
+
+  // 経費データは在庫と紐づけ不要のため、stock_id にダミー値を入れない（FK等で弾かれる可能性がある）。
+  // status カラムが存在する場合のみ「reconciled」で除外マークする。
+  const { error: err1 } = await supabase
+    .from("sales_transactions")
+    .update({ status: "reconciled" } as any)
+    .in("id", ids);
+  if (!err1) return;
+
+  const code = (err1 as any)?.code;
+  const msg = (err1 as any)?.message ?? "";
+  // status カラムが無いDBでは何も更新しない（表示側で amount_type 等による除外を行う）
+  if (code === "42703" || msg.includes("status")) return;
+  throw err1;
+}
+
+async function updateSalesTxWithOptionalStatus(ids: number[], patch: Record<string, unknown>): Promise<void> {
+  if (!ids.length) return;
+
+  const withStatus: Record<string, unknown> = { ...patch, status: "reconciled" };
+  const { error: err1 } = await supabase.from("sales_transactions").update(withStatus as any).in("id", ids);
+  if (!err1) return;
+
+  const code = (err1 as any)?.code;
+  const msg = (err1 as any)?.message ?? "";
+  if (code === "42703" || msg.includes("status")) {
+    const { error: err2 } = await supabase.from("sales_transactions").update(patch as any).in("id", ids);
+    if (err2) throw err2;
+    return;
+  }
+  throw err1;
+}
+
+/** Refund 系: 親在庫への紐付けのみ。status は変更しない（未処理カード維持の絶対要件） */
+async function updateSalesTxStockOnly(ids: number[], patch: Record<string, unknown>): Promise<void> {
+  if (!ids.length) return;
+  const { error } = await supabase.from("sales_transactions").update(patch as any).in("id", ids);
+  if (error) throw error;
+}
+
+function isRefundTxType(raw: string | null | undefined): boolean {
+  const t = String(raw ?? "").trim().toLowerCase();
+  if (!t) return false;
+  return t === "refund" || t.includes("refund") || t.includes("返金");
+}
+
+function isOrderTxType(raw: string | null | undefined): boolean {
+  const t = String(raw ?? "").trim().toLowerCase();
+  if (!t) return false;
+  return t === "order" || t.includes("order") || t.includes("注文");
+}
+
+function isRefundLikeRow(r: Pick<TxRow, "transaction_type" | "amount_type" | "amount_description" | "amount">): boolean {
+  const tt = String(r.transaction_type ?? "");
+  const at = String(r.amount_type ?? "");
+  const ad = String(r.amount_description ?? "");
+  // 表記揺れ対策: transaction_type / amount_type / description のどれで来ても拾う
+  return isRefundTxType(tt) || isRefundTxType(at) || isRefundTxType(ad) || (toNumber(r.amount) < 0 && isRefundTxType(ad));
+}
+
+/** 相殺判定用: プラス売上（Charge/Principal 等）。経費ラベルは除外。 */
+function isPositiveSaleLikeRow(r: Pick<TxRow, "transaction_type" | "amount_type" | "amount_description" | "amount">): boolean {
+  if (toNumber(r.amount) <= 0) return false;
+  if (isRefundLikeRow(r)) return false;
+  if (
+    isExpenseSkipTx({
+      amount_type: r.amount_type,
+      transaction_type: r.transaction_type,
+      amount_description: r.amount_description,
+    })
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * 同一注文に未紐付の「返金らしき行」と「プラス売上」が同居する場合は、自動では status を更新しない（方針A）。
+ * UI が同一 amazon_order_id でグルーピングし相殺後の合計を出すため、行はすべて未処理のまま手動フローへ回す。
+ */
+async function fetchUnlinkedSalesTxRows(): Promise<TxRow[]> {
+  // status カラムが存在する場合は reconciled を除外する（存在しないDBでも動くようにする）
+  {
+    const res = await supabase
+      .from("sales_transactions")
+      .select("id, amazon_order_id, posted_date, amount, sku, amount_type, amount_description, transaction_type, status")
+      .not("amazon_order_id", "is", null)
+      .is("stock_id", null)
+      .or("status.is.null,status.neq.reconciled")
+      .order("posted_date", { ascending: true });
+    if (!res.error) return (res.data ?? []) as TxRow[];
+    const code = (res.error as any)?.code;
+    const msg = (res.error as any)?.message ?? "";
+    if (code !== "42703" && !msg.includes("status")) throw res.error;
+  }
+
+  const { data, error } = await supabase
+    .from("sales_transactions")
+    .select("id, amazon_order_id, posted_date, amount, sku, amount_type, amount_description, transaction_type")
+    .not("amazon_order_id", "is", null)
+    .is("stock_id", null)
+    .order("posted_date", { ascending: true });
+  if (error) throw error;
+  return (data ?? []) as TxRow[];
+}
+
+async function fetchOtherPlatformOrderIdSet(): Promise<Set<string>> {
+  const { data, error } = await supabase.from("other_orders").select("order_id");
+  if (error) throw error;
+  const out = new Set<string>();
+  for (const row of data ?? []) {
+    const oid = String((row as { order_id?: unknown }).order_id ?? "").trim();
+    if (oid) out.add(oid);
+  }
+  return out;
+}
+
+async function fetchPlatformByOrderId(orderIds: string[]): Promise<Map<string, string>> {
+  const ids = [...new Set(orderIds.map((s) => String(s).trim()).filter(Boolean))];
+  const out = new Map<string, string>();
+  if (!ids.length) return out;
+  const { data, error } = await supabase.from("other_orders").select("order_id, platform").in("order_id", ids);
+  if (error) throw error;
+  for (const row of data ?? []) {
+    const oid = String((row as { order_id?: unknown }).order_id ?? "").trim();
+    const platform = String((row as { platform?: unknown }).platform ?? "").trim();
+    if (oid && platform && !out.has(oid)) out.set(oid, platform);
+  }
+  return out;
+}
+
+async function buildSkuToJanMap(sellerSkus: string[], platform: string): Promise<Map<string, string | null>> {
+  const out = new Map<string, string | null>();
+  const uniq = [...new Set(sellerSkus.map((s) => s.trim()).filter(Boolean))];
+  for (const s of uniq) out.set(s, null);
+  if (uniq.length === 0) return out;
+
+  const { data, error } = await supabase
+    .from("sku_mappings")
+    .select("sku, jan_code, quantity")
+    .in("sku", uniq)
+    .eq("platform", platform);
+
+  if (error) throw error;
+
+  const bySku = new Map<string, Array<{ jan_code: unknown }>>();
+  for (const row of data ?? []) {
+    const sku = String((row as { sku?: unknown }).sku ?? "").trim();
+    if (!bySku.has(sku)) bySku.set(sku, []);
+    bySku.get(sku)!.push(row as { jan_code: unknown });
+  }
+  for (const sku of uniq) {
+    const list = bySku.get(sku) ?? [];
+    out.set(sku, uniqueJanFromSkuMappings(list));
+  }
+  return out;
+}
+
+/** JAN ごとの在庫プール（先頭から割り当て） */
+function buildJanPools(stocks: StockRow[]): Map<string, StockRow[]> {
+  const pools = new Map<string, StockRow[]>();
+  const sorted = [...stocks].sort((a, b) => {
+    const ta = a.created_at ? Date.parse(a.created_at) : 0;
+    const tb = b.created_at ? Date.parse(b.created_at) : 0;
+    return ta - tb;
+  });
+  for (const s of sorted) {
+    const j = normalizeJan(s.jan_code) || "__EMPTY__";
+    if (!pools.has(j)) pools.set(j, []);
+    pools.get(j)!.push(s);
+  }
+  return pools;
+}
+
+function clampInt(v: unknown, def: number, min: number, max: number): number {
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return def;
+  return Math.min(max, Math.max(min, Math.trunc(n)));
+}
+
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const n = clampInt(size, DB_CHUNK_SIZE, 1, 5000);
+  if (arr.length <= n) return [arr];
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += n) {
+    out.push(arr.slice(i, i + n));
+  }
+  return out;
+}
+
+/**
+ * 親売上探索（N+1排除版）。
+ * - 既存の `findParentLinkedSaleForOrderId()` と同じ条件:
+ *   - 同一 amazon_order_id
+ *   - stock_id IS NOT NULL
+ *   - amount > 0
+ *   - posted_date 昇順の「先頭1件」を親として採用
+ *
+ * 結果不変の理由:
+ * - 同じフィルタ条件の行集合から、同じ基準（posted_date 最早）で「先頭1件」を選ぶ点が同一。
+ * - 取得をまとめるだけで、決定手順（親の選択規則）は変えない。
+ */
+async function fetchParentLinkedSaleMapForOrderIds(
+  orderIds: string[]
+): Promise<Map<string, { stock_id: number; unit_cost: number } | null>> {
+  const ids = orderIds.map((s) => String(s).trim()).filter(Boolean);
+  const out = new Map<string, { stock_id: number; unit_cost: number } | null>();
+  for (const oid of ids) out.set(oid, null);
+  if (ids.length === 0) return out;
+
+  for (const chunk of chunkArray(ids, DB_CHUNK_SIZE)) {
+    const { data, error } = await supabase
+      .from("sales_transactions")
+      .select("amazon_order_id, stock_id, unit_cost, amount, posted_date")
+      .in("amazon_order_id", chunk)
+      .not("stock_id", "is", null)
+      .gt("amount", 0)
+      .order("posted_date", { ascending: true });
+    if (error) throw error;
+
+    // posted_date 昇順で返ってくるため、各注文で「最初に見つかった行」= 既存の limit(1) 相当
+    for (const row of (data ?? []) as Array<{
+      amazon_order_id?: unknown;
+      stock_id?: unknown;
+      unit_cost?: unknown;
+    }>) {
+      const oid = String((row as any).amazon_order_id ?? "").trim();
+      if (!oid) continue;
+      if (!out.has(oid)) continue;
+      if (out.get(oid) != null) continue;
+
+      const stockId = row.stock_id != null ? Number(row.stock_id) : NaN;
+      if (!Number.isFinite(stockId) || stockId < 1) continue;
+      const unitCost = row.unit_cost != null ? Number(row.unit_cost) : 0;
+      out.set(oid, { stock_id: stockId, unit_cost: Number.isFinite(unitCost) ? unitCost : 0 });
+    }
+  }
+
+  return out;
+}
+
+async function upsertSalesTxStockUnitCost(
+  updates: Array<{ id: number; stock_id: number; unit_cost: number }>
+): Promise<void> {
+  if (!updates.length) return;
+
+  // upsert（INSERT ON CONFLICT）は、INSERTフェーズで NOT NULL 列（例: amount）の欠損があると弾かれうるため回避。
+  // ただし明細数ぶんのUPDATE乱発もコネクション枯渇の原因になるため、
+  // 「(stock_id, unit_cost) が同じ行」を束ねて `.in('id', ids)` で一括更新し、DB往復回数を圧縮する。
+  //
+  // 結果不変の理由:
+  // - updates 配列が持つ (id -> stock_id/unit_cost) の対応関係はそのまま。
+  // - 同じ値になる行をまとめてUPDATEするだけで、割当ロジック・計算・スキップ条件は変更しない。
+  const groups = new Map<string, { stock_id: number; unit_cost: number; ids: number[] }>();
+  for (const u of updates) {
+    const key = `${u.stock_id}:${u.unit_cost}`;
+    if (!groups.has(key)) {
+      groups.set(key, { stock_id: u.stock_id, unit_cost: u.unit_cost, ids: [] });
+    }
+    groups.get(key)!.ids.push(u.id);
+  }
+
+  for (const g of groups.values()) {
+    for (const ids of chunkArray(g.ids, DB_CHUNK_SIZE)) {
+      const { error } = await supabase
+        .from("sales_transactions")
+        .update({ stock_id: g.stock_id, unit_cost: g.unit_cost })
+        .in("id", ids);
+      if (error) throw error;
+    }
+  }
+}
+
+/**
+ * 未紐付け売上を posted_date 順にページ走査し、inbound_items.order_id が存在する注文だけを
+ * 同じ順序で最大 batchSizeOrders 件まで集める。
+ * 先頭に「在庫未引当」の注文だけが並んでいても、後続の処理可能注文に届く。
+ */
+async function fetchEligibleOrderIdsForBatch(
+  batchSizeOrders: number,
+  allowedOrderIds: Set<string>
+): Promise<{
+  orderIds: string[];
+  hadUnlinkedRows: boolean;
+  distinctOrdersSeen: number;
+}> {
+  const PAGE_SIZE = 500;
+  const MAX_PAGES = 50;
+  const INBOUND_CHECK_CHUNK = 80;
+
+  const eligible: string[] = [];
+  const globalSeenOid = new Set<string>();
+  let hadUnlinkedRows = false;
+  /** まだ inbound 照会していない候補（posted_date 初出順） */
+  const pendingCandidates: string[] = [];
+
+  async function flushPendingCandidates(): Promise<void> {
+    while (pendingCandidates.length > 0 && eligible.length < batchSizeOrders) {
+      const take = pendingCandidates.splice(0, INBOUND_CHECK_CHUNK);
+      const withInbound = await filterOrderIdsHavingInboundItems(take);
+      const has = new Set(withInbound);
+      for (const oid of take) {
+        if (eligible.length >= batchSizeOrders) break;
+        if (has.has(oid)) eligible.push(oid);
+      }
+    }
+  }
+
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const from = page * PAGE_SIZE;
+    const to = from + PAGE_SIZE - 1;
+
+    let rows: Array<{ amazon_order_id?: unknown }> = [];
+
+    {
+      const res = await supabase
+        .from("sales_transactions")
+        .select("amazon_order_id, posted_date, id, status")
+        .not("amazon_order_id", "is", null)
+        .is("stock_id", null)
+        .or("status.is.null,status.neq.reconciled")
+        .order("posted_date", { ascending: true })
+        .order("id", { ascending: true })
+        .range(from, to);
+      if (!res.error) {
+        rows = (res.data ?? []) as Array<{ amazon_order_id?: unknown }>;
+      } else {
+        const code = (res.error as any)?.code;
+        const msg = (res.error as any)?.message ?? "";
+        if (code !== "42703" && !msg.includes("status")) throw res.error;
+        const { data, error } = await supabase
+          .from("sales_transactions")
+          .select("amazon_order_id, posted_date, id")
+          .not("amazon_order_id", "is", null)
+          .is("stock_id", null)
+          .order("posted_date", { ascending: true })
+          .order("id", { ascending: true })
+          .range(from, to);
+        if (error) throw error;
+        rows = (data ?? []) as Array<{ amazon_order_id?: unknown }>;
+      }
+    }
+
+    if (!rows.length) break;
+    hadUnlinkedRows = true;
+
+    for (const r of rows) {
+      const oid = String((r as any).amazon_order_id ?? "").trim();
+      if (!oid || globalSeenOid.has(oid) || !allowedOrderIds.has(oid)) continue;
+      globalSeenOid.add(oid);
+      pendingCandidates.push(oid);
+      if (pendingCandidates.length >= INBOUND_CHECK_CHUNK) await flushPendingCandidates();
+      if (eligible.length >= batchSizeOrders) {
+        pendingCandidates.length = 0;
+        return {
+          orderIds: eligible.slice(0, batchSizeOrders),
+          hadUnlinkedRows,
+          distinctOrdersSeen: globalSeenOid.size,
+        };
+      }
+    }
+
+    await flushPendingCandidates();
+    if (eligible.length >= batchSizeOrders) {
+      pendingCandidates.length = 0;
+      return {
+        orderIds: eligible.slice(0, batchSizeOrders),
+        hadUnlinkedRows,
+        distinctOrdersSeen: globalSeenOid.size,
+      };
+    }
+    if (rows.length < PAGE_SIZE) break;
+  }
+
+  await flushPendingCandidates();
+
+  return {
+    orderIds: eligible.slice(0, batchSizeOrders),
+    hadUnlinkedRows,
+    distinctOrdersSeen: globalSeenOid.size,
+  };
+}
+
+async function filterOrderIdsHavingInboundItems(orderIds: string[]): Promise<string[]> {
+  const ids = orderIds.map((s) => String(s).trim()).filter(Boolean);
+  if (!ids.length) return [];
+  const { data, error } = await supabase.from("inbound_items").select("order_id").in("order_id", ids);
+  if (error) throw error;
+  const has = new Set<string>();
+  for (const r of (data ?? []) as Array<{ order_id?: unknown }>) {
+    const oid = String((r as any).order_id ?? "").trim();
+    if (oid) has.add(oid);
+  }
+  return ids.filter((oid) => has.has(oid));
+}
+
+async function fetchUnlinkedSalesTxRowsForOrderIds(orderIds: string[]): Promise<TxRow[]> {
+  const ids = orderIds.map((s) => String(s).trim()).filter(Boolean);
+  if (!ids.length) return [];
+
+  // status カラムが存在する場合は reconciled を除外する（存在しないDBでも動くようにする）
+  {
+    const res = await supabase
+      .from("sales_transactions")
+      .select("id, amazon_order_id, posted_date, amount, sku, amount_type, amount_description, transaction_type, status")
+      .in("amazon_order_id", ids)
+      .is("stock_id", null)
+      .or("status.is.null,status.neq.reconciled")
+      .order("posted_date", { ascending: true })
+      .order("id", { ascending: true });
+    if (!res.error) return (res.data ?? []) as TxRow[];
+    const code = (res.error as any)?.code;
+    const msg = (res.error as any)?.message ?? "";
+    if (code !== "42703" && !msg.includes("status")) throw res.error;
+  }
+
+  const { data, error } = await supabase
+    .from("sales_transactions")
+    .select("id, amazon_order_id, posted_date, amount, sku, amount_type, amount_description, transaction_type")
+    .in("amazon_order_id", ids)
+    .is("stock_id", null)
+    .order("posted_date", { ascending: true })
+    .order("id", { ascending: true });
+  if (error) throw error;
+  return (data ?? []) as TxRow[];
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    await request.json().catch(() => ({}));
+
+    const allowedOrderIds = await fetchOtherPlatformOrderIdSet();
+    if (allowedOrderIds.size === 0) {
+      return NextResponse.json({
+        ok: true,
+        processedOrders: 0,
+        reconciledCount: 0,
+        skippedCount: 0,
+        hadUnlinkedSales: false,
+        message: "other_orders に登録された注文がありません。先に CSV を取り込んでください。",
+      });
+    }
+
+    const { orderIds, hadUnlinkedRows, distinctOrdersSeen } = await fetchEligibleOrderIdsForBatch(
+      RECONCILE_SALES_BATCH_ORDERS,
+      allowedOrderIds
+    );
+    if (!orderIds.length) {
+      let message: string;
+      if (!hadUnlinkedRows) {
+        message = "本消込対象の売上明細がありません。";
+      } else if (distinctOrdersSeen > 0) {
+        message =
+          "未紐付けの売上はありますが、在庫（inbound_items.order_id）が付いた他販路注文が見つかりませんでした。先に「在庫引当を実行」するか、手動処理を行ってください。";
+      } else {
+        message = "本消込対象の売上明細がありません。";
+      }
+      return NextResponse.json({
+        ok: true,
+        processedOrders: 0,
+        reconciledCount: 0,
+        skippedCount: 0,
+        hadUnlinkedSales: hadUnlinkedRows,
+        scannedDistinctOrders: distinctOrdersSeen,
+        message,
+      });
+    }
+
+    const unlinkedRows = await fetchUnlinkedSalesTxRowsForOrderIds(orderIds);
+    const typed = unlinkedRows as TxRow[];
+
+    // バッチ開始時点で未紐付の Refund が1件でもいる注文は、自己修復・メイン本消込のいずれも自動で触らない（手動へ）
+    const amazonOrderIdsWithUnlinkedRefund = new Set<string>();
+    for (const r of typed) {
+      if (!isRefundLikeRow(r)) continue;
+      const oid = String(r.amazon_order_id ?? "").trim();
+      if (oid) amazonOrderIdsWithUnlinkedRefund.add(oid);
+    }
+
+    // === 自己修復 1) Order手数料（マイナス）を親売上にぶら下げる ===
+    // 条件: transaction_type が Order 系 かつ amount < 0（Commission/FBA Per Unit Fulfillment Fee 等）
+    let healedFeeCount = 0;
+    const feeRows = typed.filter((r) => isOrderTxType(r.transaction_type) && toNumber(r.amount) < 0);
+    // === 自己修復 2) Refund系を親売上にぶら下げる ===
+    // 条件: transaction_type / amount_type / description が Refund/返金 を示す（表記揺れ対応）
+    // Refund 行には絶対に status=reconciled を付けない（経費スキップ分も含む）。stock_id のみ更新する。
+    let healedRefundCount = 0;
+    const refundRows = typed.filter((r) => isRefundLikeRow(r));
+
+    // 親探索対象の注文IDを集め、一括取得してMap化（N+1排除）
+    const parentLookupOrderIds = new Set<string>();
+    for (const r of feeRows) {
+      const oid = String(r.amazon_order_id ?? "").trim();
+      if (oid) parentLookupOrderIds.add(oid);
+    }
+    for (const r of refundRows) {
+      const oid = String(r.amazon_order_id ?? "").trim();
+      if (oid) parentLookupOrderIds.add(oid);
+    }
+    const parentByOrderId = await fetchParentLinkedSaleMapForOrderIds([...parentLookupOrderIds]);
+
+    // 自己修復（手数料）: 経費スキップは status だけまとめて更新。親紐付けは親ごとにIDを束ねて一括UPDATE。
+    const feeExpenseIds: number[] = [];
+    const feeUpdateIdsByParentKey = new Map<string, { ids: number[]; stock_id: number; unit_cost: number }>();
+    for (const r of feeRows) {
+      const orderId = String(r.amazon_order_id ?? "").trim();
+      if (!orderId) continue;
+      if (amazonOrderIdsWithUnlinkedRefund.has(orderId)) continue;
+      if (
+        isExpenseSkipTx({
+          amount_type: r.amount_type,
+          transaction_type: r.transaction_type,
+          amount_description: r.amount_description,
+        })
+      ) {
+        feeExpenseIds.push(r.id);
+        continue;
+      }
+      const parent = parentByOrderId.get(orderId) ?? null;
+      if (!parent) continue;
+      const key = `${parent.stock_id}:${parent.unit_cost}`;
+      if (!feeUpdateIdsByParentKey.has(key)) {
+        feeUpdateIdsByParentKey.set(key, { ids: [], stock_id: parent.stock_id, unit_cost: parent.unit_cost });
+      }
+      feeUpdateIdsByParentKey.get(key)!.ids.push(r.id);
+      healedFeeCount += 1;
+    }
+
+    for (const ids of chunkArray(feeExpenseIds, DB_CHUNK_SIZE)) {
+      await markSalesTxReconciled(ids);
+    }
+    for (const group of feeUpdateIdsByParentKey.values()) {
+      for (const ids of chunkArray(group.ids, DB_CHUNK_SIZE)) {
+        await updateSalesTxWithOptionalStatus(ids, { stock_id: group.stock_id, unit_cost: group.unit_cost });
+      }
+    }
+
+    // 自己修復（Refund）: 親ごとにIDを束ねて一括UPDATE（status非更新の要件を維持）
+    const refundUpdateIdsByParentKey = new Map<string, { ids: number[]; stock_id: number; unit_cost: number }>();
+    for (const r of refundRows) {
+      const orderId = String(r.amazon_order_id ?? "").trim();
+      if (!orderId) continue;
+      if (amazonOrderIdsWithUnlinkedRefund.has(orderId)) continue;
+      if (
+        isExpenseSkipTx({
+          amount_type: r.amount_type,
+          transaction_type: r.transaction_type,
+          amount_description: r.amount_description,
+        })
+      ) {
+        // 経費相当の Refund 行も reconciled にしない（在庫紐付けも行わない）
+        continue;
+      }
+      const parent = parentByOrderId.get(orderId) ?? null;
+      if (!parent) continue;
+      const key = `${parent.stock_id}:${parent.unit_cost}`;
+      if (!refundUpdateIdsByParentKey.has(key)) {
+        refundUpdateIdsByParentKey.set(key, { ids: [], stock_id: parent.stock_id, unit_cost: parent.unit_cost });
+      }
+      refundUpdateIdsByParentKey.get(key)!.ids.push(r.id);
+      healedRefundCount += 1;
+    }
+    for (const group of refundUpdateIdsByParentKey.values()) {
+      for (const ids of chunkArray(group.ids, DB_CHUNK_SIZE)) {
+        await updateSalesTxStockOnly(ids, { stock_id: group.stock_id, unit_cost: group.unit_cost });
+      }
+    }
+
+    const typedForMain = await fetchUnlinkedSalesTxRowsForOrderIds(orderIds);
+
+    /** order_id ごとにグループ化（Refund 行は行単位では除外。混在注文全体のスキップはメインループ先頭の Set で行う） */
+    const byOrder = new Map<string, TxRow[]>();
+    for (const r of typedForMain) {
+      if (isRefundLikeRow(r)) continue;
+      const oid = String(r.amazon_order_id ?? "").trim();
+      if (!oid) continue;
+      if (!byOrder.has(oid)) byOrder.set(oid, []);
+      byOrder.get(oid)!.push(r);
+    }
+
+    let reconciledCount = 0;
+    let skippedCount = 0;
+
+    const platformByOrderId = await fetchPlatformByOrderId(orderIds);
+
+    const inboundByOrderId = new Map<string, StockRow[]>();
+    {
+      const wantOrderIds = [...byOrder.keys()].map((s) => String(s).trim()).filter(Boolean);
+      if (wantOrderIds.length > 0) {
+        const { data, error } = await supabase
+          .from("inbound_items")
+          .select("id, effective_unit_price, settled_at, jan_code, created_at, order_id")
+          .in("order_id", wantOrderIds)
+          .order("created_at", { ascending: true });
+        if (error) throw error;
+        for (const row of (data ?? []) as StockRow[]) {
+          const oid = String((row as any).order_id ?? "").trim();
+          if (!oid) continue;
+          if (!inboundByOrderId.has(oid)) inboundByOrderId.set(oid, []);
+          inboundByOrderId.get(oid)!.push(row);
+        }
+      }
+    }
+
+    for (const [amazonOrderId, txGroup] of byOrder) {
+      if (amazonOrderIdsWithUnlinkedRefund.has(amazonOrderId)) {
+        continue;
+      }
+
+      // 経費/調整（在庫紐づけ不要）を先にスキップして処理済みにする
+      const expenseTx = txGroup.filter((r) =>
+        isExpenseSkipTx({ amount_type: r.amount_type, transaction_type: r.transaction_type, amount_description: r.amount_description })
+      );
+      if (expenseTx.length) {
+        const ids = expenseTx.map((r) => r.id);
+        for (const chunk of chunkArray(ids, DB_CHUNK_SIZE)) {
+          await markSalesTxReconciled(chunk);
+        }
+      }
+
+      // 通常の在庫紐づけ対象のみで以降のロジックを回す
+      const normalTx = txGroup.filter((r) => !expenseTx.some((e) => e.id === r.id));
+      if (!normalTx.length) {
+        // この注文内は経費のみ → inbound_items 更新は行わない
+        continue;
+      }
+
+      const settledAt = earliestPostedDateIso(normalTx);
+      if (!settledAt) {
+        skippedCount += 1;
+        continue;
+      }
+
+      /** 注文単位のサマリー（ログ用） */
+      const totalAmount = normalTx.reduce((s, r) => s + toNumber(r.amount), 0);
+      const principalSum = normalTx
+        .filter((r) => String(r.amount_type ?? "") === "Charge" && String(r.amount_description ?? "").includes("Principal"))
+        .reduce((s, r) => s + toNumber(r.amount), 0);
+      console.log(
+        `[reconcile-sales] order=${amazonOrderId} tx_rows=${normalTx.length} sum_amount=${totalAmount.toFixed(2)} principal_like=${principalSum.toFixed(2)}`
+      );
+
+      const stocks = (inboundByOrderId.get(amazonOrderId) ?? []) as StockRow[];
+      if (stocks.length === 0) {
+        skippedCount += 1;
+        continue;
+      }
+
+      const txSorted = [...normalTx].sort((a, b) => a.id - b.id);
+
+      /** 単一的在庫: 従来どおり全明細に同一 stock */
+      if (stocks.length === 1) {
+        const stock = stocks[0];
+        const stockId = stock.id;
+        const unitCost = toNumber(stock.effective_unit_price);
+
+        const ids = txSorted.map((t) => t.id);
+        const { error: updateTxError } = await supabase
+          .from("sales_transactions")
+          .update({ stock_id: stockId, unit_cost: unitCost })
+          .in("id", ids);
+
+        if (updateTxError) throw updateTxError;
+
+        const { error: updateStockError } = await supabase
+          .from("inbound_items")
+          .update({ settled_at: settledAt })
+          .eq("order_id", amazonOrderId);
+
+        if (updateStockError) throw updateStockError;
+
+        // normalTx は Refund 除外済み。在庫紐付け完了後に財務 status を付与（Refund 行は自己修復側で status 非更新）
+        await markSalesTxReconciled(ids);
+
+        reconciledCount += 1;
+        continue;
+      }
+
+      /** 複数在庫: SKU → JAN でプールから割り当て */
+      const sellerSkus = txSorted.map((t) => String(t.sku ?? "").trim()).filter(Boolean);
+      const platform = platformByOrderId.get(amazonOrderId) ?? "";
+      const skuToJan = await buildSkuToJanMap(sellerSkus, platform);
+
+      const pools = buildJanPools(stocks);
+      const usedStockIds = new Set<number>();
+
+      const takeFromJan = (jan: string | null): StockRow | null => {
+        const key = normalizeJan(jan) || "__EMPTY__";
+        const arr = pools.get(key);
+        if (!arr?.length) return null;
+        const idx = arr.findIndex((s) => !usedStockIds.has(s.id));
+        if (idx < 0) return null;
+        const [s] = arr.splice(idx, 1);
+        usedStockIds.add(s.id);
+        return s;
+      };
+
+      const takeAnyUnused = (): StockRow | null => {
+        for (const s of stocks) {
+          if (!usedStockIds.has(s.id)) {
+            usedStockIds.add(s.id);
+            return s;
+          }
+        }
+        return null;
+      };
+
+      const plannedUpdates: Array<{ tx_id: number; stock_id: number; unit_cost: number }> = [];
+      for (const tx of txSorted) {
+        const sellerSku = String(tx.sku ?? "").trim();
+        let stock: StockRow | null = null;
+
+        if (sellerSku) {
+          const jan = skuToJan.get(sellerSku) ?? null;
+          if (jan) {
+            stock = takeFromJan(jan);
+          }
+        }
+
+        if (!stock) {
+          stock = takeFromJan(null);
+        }
+        if (!stock) {
+          stock = takeAnyUnused();
+        }
+        if (!stock) {
+          stock = stocks[0]!;
+        }
+
+        plannedUpdates.push({
+          tx_id: tx.id,
+          stock_id: stock.id,
+          unit_cost: toNumber(stock.effective_unit_price),
+        });
+      }
+
+      // N+1排除: 行ごとにUPDATEせず、id衝突の upsert でまとめて更新する（値は plannedUpdates と同一）
+      await upsertSalesTxStockUnitCost(
+        plannedUpdates.map((u) => ({ id: u.tx_id, stock_id: u.stock_id, unit_cost: u.unit_cost }))
+      );
+
+      const { error: bulkSettleErr } = await supabase
+        .from("inbound_items")
+        .update({ settled_at: settledAt })
+        .eq("order_id", amazonOrderId);
+
+      if (bulkSettleErr) throw bulkSettleErr;
+
+      const reconciledIds = plannedUpdates.map((u) => u.tx_id);
+      for (const ids of chunkArray(reconciledIds, DB_CHUNK_SIZE)) {
+        await markSalesTxReconciled(ids);
+      }
+
+      reconciledCount += 1;
+    }
+
+    return NextResponse.json({
+      ok: true,
+      processedOrders: byOrder.size,
+      reconciledCount,
+      skippedCount,
+      hadUnlinkedSales: true,
+      batchOrderCount: orderIds.length,
+      message: `本消込: ${reconciledCount}注文を処理しました (保留: ${skippedCount}件) / 自己修復: 手数料 ${healedFeeCount}件, 返金 ${healedRefundCount}件`,
+    });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "本消込処理に失敗しました。";
+    console.error("[other-platform/reconcile-sales]", e);
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}

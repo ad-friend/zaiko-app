@@ -4,6 +4,7 @@ import { supabase } from "@/lib/supabase";
 import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
 import { parseFlexiblePostedDateToIso } from "@/lib/settlement-posted-date";
 import { attachSalesTransactionIdempotency } from "@/lib/sales-transaction-idempotency";
+import { OTHER_ORDER_STATUS_MANUAL_REQUIRED } from "@/lib/other-platform-reconciliation-status";
 
 type ParsedOtherSalesRow = {
   orderId: string;
@@ -38,12 +39,21 @@ export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const status = searchParams.get("status") ?? undefined;
+    const reconciliationStatus = searchParams.get("reconciliation_status") ?? undefined;
 
     let q = supabase
       .from("other_orders")
-      .select("id, order_id, platform, sell_price, jan_code, stock_id, status, created_at, updated_at");
+      .select(
+        "id, order_id, platform, sku, sell_price, jan_code, stock_id, status, reconciliation_status, quantity, condition_id, order_date, posted_date, created_at, updated_at"
+      );
 
-    if (status) q = q.eq("status", status as OtherOrderStatus);
+    if (reconciliationStatus) {
+      q = q.eq("reconciliation_status", reconciliationStatus);
+    } else if (status === "manual_required") {
+      q = q.or(`reconciliation_status.eq.${OTHER_ORDER_STATUS_MANUAL_REQUIRED},status.eq.manual_required`);
+    } else if (status) {
+      q = q.eq("status", status as OtherOrderStatus);
+    }
 
     q = q.order("created_at", { ascending: false });
 
