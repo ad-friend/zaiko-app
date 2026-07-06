@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { FileUp, Package, RefreshCcw, Banknote } from "lucide-react";
+import { FileUp, Package, RefreshCcw, Banknote, ClipboardList } from "lucide-react";
 
 type OtherOrder = {
   id: string;
@@ -138,6 +138,48 @@ type ReconcileSalesResult = {
   reconciledCount: number;
   skippedCount: number;
 };
+
+type ReconciledInventoryRow = {
+  order_id: string;
+  platform: string;
+  sku: string | null;
+  jan_code: string | null;
+  sell_price: number;
+  posted_date: string | null;
+  condition_id: string | null;
+  quantity: number;
+  stock_id: number;
+  stock_jan_code: string | null;
+  brand: string | null;
+  model_number: string | null;
+  unit_cost: number;
+  settled_at: string | null;
+};
+
+function defaultDateRangeJst(): { from: string; to: string } {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const y = parts.find((p) => p.type === "year")?.value ?? "2026";
+  const m = parts.find((p) => p.type === "month")?.value ?? "01";
+  const d = parts.find((p) => p.type === "day")?.value ?? "01";
+  return { from: `${y}-${m}-01`, to: `${y}-${m}-${d}` };
+}
+
+function formatIsoDateShort(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return String(iso).slice(0, 10);
+  return new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(t));
+}
 
 const buttonClass =
   "inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 h-10 px-6 py-2 shadow-sm active:scale-[0.98] duration-100";
@@ -495,8 +537,215 @@ export default function OtherSalesImportPage() {
             />
           )}
         </section>
+
+        <ReconciledInventorySection />
       </div>
     </main>
+  );
+}
+
+function ReconciledInventorySection() {
+  const defaultRange = useMemo(() => defaultDateRangeJst(), []);
+  const [platformOptions, setPlatformOptions] = useState<string[]>([]);
+  const [selectedPlatforms, setSelectedPlatforms] = useState<Set<string>>(new Set());
+  const [platformsLoading, setPlatformsLoading] = useState(true);
+  const [platformsError, setPlatformsError] = useState<string | null>(null);
+  const [dateFrom, setDateFrom] = useState(defaultRange.from);
+  const [dateTo, setDateTo] = useState(defaultRange.to);
+  const [rows, setRows] = useState<ReconciledInventoryRow[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [searchMeta, setSearchMeta] = useState<{
+    orderCount: number;
+    stockCount: number;
+    truncated: boolean;
+  } | null>(null);
+  const [hasSearched, setHasSearched] = useState(false);
+
+  const fetchPlatforms = useCallback(async () => {
+    setPlatformsError(null);
+    setPlatformsLoading(true);
+    try {
+      const res = await fetch("/api/other-platform/reconciled-inventory?platforms_only=1");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error ?? "プラットフォーム一覧の取得に失敗しました");
+      const list = Array.isArray(data?.platforms) ? (data.platforms as string[]) : [];
+      setPlatformOptions(list);
+    } catch (e) {
+      setPlatformsError(e instanceof Error ? e.message : "プラットフォーム一覧の取得に失敗しました");
+      setPlatformOptions([]);
+    } finally {
+      setPlatformsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchPlatforms();
+  }, [fetchPlatforms]);
+
+  const togglePlatform = (platform: string) => {
+    setSelectedPlatforms((prev) => {
+      const next = new Set(prev);
+      if (next.has(platform)) next.delete(platform);
+      else next.add(platform);
+      return next;
+    });
+  };
+
+  const runSearch = async () => {
+    if (selectedPlatforms.size === 0) {
+      setSearchError("プラットフォームを1つ以上選択してください。");
+      return;
+    }
+    setSearchError(null);
+    setSearchLoading(true);
+    try {
+      const params = new URLSearchParams({ from: dateFrom, to: dateTo });
+      for (const p of selectedPlatforms) params.append("platform", p);
+      const res = await fetch(`/api/other-platform/reconciled-inventory?${params}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error ?? "消込在庫の取得に失敗しました");
+      setRows(Array.isArray(data?.rows) ? (data.rows as ReconciledInventoryRow[]) : []);
+      setSearchMeta({
+        orderCount: Number(data?.orderCount ?? 0),
+        stockCount: Number(data?.stockCount ?? 0),
+        truncated: Boolean(data?.truncated),
+      });
+      if (Array.isArray(data?.platforms)) {
+        setPlatformOptions(data.platforms as string[]);
+      }
+      setHasSearched(true);
+    } catch (e) {
+      setSearchError(e instanceof Error ? e.message : "消込在庫の取得に失敗しました");
+      setRows([]);
+      setSearchMeta(null);
+    } finally {
+      setSearchLoading(false);
+    }
+  };
+
+  return (
+    <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+      <div className="flex items-center gap-2 mb-3">
+        <ClipboardList className="h-5 w-5 text-slate-600" />
+        <h2 className="text-lg font-bold text-slate-800">消込在庫の確認</h2>
+      </div>
+      <p className="text-sm text-slate-600 mb-4">
+        プラットフォームと決済日の期間で、在庫引当済み（STEP2以降）の注文・在庫を表示します。
+      </p>
+
+      {platformsError && (
+        <div className="rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-800 mb-4">{platformsError}</div>
+      )}
+
+      <div className="space-y-4 mb-4">
+        <div>
+          <p className="text-xs font-semibold text-slate-600 mb-2">プラットフォーム（複数選択可）</p>
+          {platformsLoading ? (
+            <p className="text-sm text-slate-500">読み込み中...</p>
+          ) : platformOptions.length === 0 ? (
+            <p className="text-sm text-slate-500">取込済みのプラットフォームがありません。</p>
+          ) : (
+            <div className="flex flex-wrap gap-3">
+              {platformOptions.map((p) => (
+                <label key={p} className="inline-flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={selectedPlatforms.has(p)}
+                    onChange={() => togglePlatform(p)}
+                    className="rounded border-slate-300"
+                  />
+                  {p}
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-end gap-3">
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 mb-1">決済日（開始）</label>
+            <input
+              type="date"
+              value={dateFrom}
+              onChange={(e) => setDateFrom(e.target.value)}
+              className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 mb-1">決済日（終了）</label>
+            <input
+              type="date"
+              value={dateTo}
+              onChange={(e) => setDateTo(e.target.value)}
+              className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={() => void runSearch()}
+            disabled={searchLoading || platformsLoading || platformOptions.length === 0}
+            className={`${buttonClass} bg-slate-800 text-white hover:bg-slate-900 disabled:bg-slate-300`}
+          >
+            {searchLoading ? "表示中..." : "表示"}
+          </button>
+        </div>
+      </div>
+
+      {searchError && (
+        <div className="rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-800 mb-4">{searchError}</div>
+      )}
+
+      {hasSearched && searchMeta && (
+        <p className="text-xs text-slate-500 mb-3">
+          注文 {searchMeta.orderCount}件 / 在庫行 {searchMeta.stockCount}件
+          {searchMeta.truncated ? "（先頭500注文まで）" : ""}
+        </p>
+      )}
+
+      {hasSearched && !searchLoading && rows.length === 0 && !searchError && (
+        <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/80 p-5 text-sm text-slate-600">
+          該当する在庫はありません。
+        </div>
+      )}
+
+      {rows.length > 0 && (
+        <div className="overflow-x-auto rounded-lg border border-slate-200">
+          <table className="min-w-full text-xs text-left">
+            <thead className="bg-slate-50 text-slate-600">
+              <tr>
+                <th className="px-3 py-2 font-semibold whitespace-nowrap">決済日</th>
+                <th className="px-3 py-2 font-semibold whitespace-nowrap">プラットフォーム</th>
+                <th className="px-3 py-2 font-semibold whitespace-nowrap">注文番号</th>
+                <th className="px-3 py-2 font-semibold whitespace-nowrap">JAN</th>
+                <th className="px-3 py-2 font-semibold whitespace-nowrap">在庫ID</th>
+                <th className="px-3 py-2 font-semibold whitespace-nowrap">メーカー</th>
+                <th className="px-3 py-2 font-semibold whitespace-nowrap">型番</th>
+                <th className="px-3 py-2 font-semibold whitespace-nowrap text-right">原価</th>
+                <th className="px-3 py-2 font-semibold whitespace-nowrap text-right">販売価格</th>
+                <th className="px-3 py-2 font-semibold whitespace-nowrap">本消込日</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {rows.map((row) => (
+                <tr key={`${row.order_id}-${row.stock_id}`} className="text-slate-800">
+                  <td className="px-3 py-2 whitespace-nowrap tabular-nums">{formatIsoDateShort(row.posted_date)}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">{row.platform}</td>
+                  <td className="px-3 py-2 font-mono whitespace-nowrap">{row.order_id}</td>
+                  <td className="px-3 py-2 font-mono whitespace-nowrap">{row.jan_code ?? "—"}</td>
+                  <td className="px-3 py-2 font-mono whitespace-nowrap">{row.stock_id}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">{row.brand ?? "—"}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">{row.model_number ?? "—"}</td>
+                  <td className="px-3 py-2 whitespace-nowrap text-right tabular-nums">{row.unit_cost}</td>
+                  <td className="px-3 py-2 whitespace-nowrap text-right tabular-nums">{row.sell_price}</td>
+                  <td className="px-3 py-2 whitespace-nowrap tabular-nums">{formatIsoDateShort(row.settled_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   );
 }
 
