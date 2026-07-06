@@ -248,7 +248,7 @@ export default function OtherSalesImportPage() {
         <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
           <h2 className="text-lg font-bold text-slate-800 mb-3">STEP 1：CSV取込</h2>
           <p className="text-sm text-slate-600 mb-2">
-            統合CSV（注文番号・プラットフォーム・SKU・売上内訳）をアップロードします。DBに保存するだけで、消込はまだ行いません。
+            統合CSV（注文番号・プラットフォーム・売上内訳）をアップロードします。SKU が無い場合は JAN 列を埋めてください。
           </p>
           <p className="text-xs text-slate-500 mb-4 font-mono break-all">
             注文番号, プラットフォーム, SKU, 数量, コンディション, 注文日, 決済日, JAN, 商品売上, 消費税, 送料, プラットフォーム手数料, その他手数料

@@ -174,14 +174,15 @@ export function parseOtherPlatformCsv(csvText: string): ParseOtherPlatformCsvRes
   const iPosted = idx("postedDate");
   const iJan = idx("jan");
 
-  if (iOrder < 0 || iPlatform < 0 || iSku < 0) {
-    throw new Error("ヘッダーが不正です。注文番号・プラットフォーム・SKU が必要です。");
+  if (iOrder < 0 || iPlatform < 0) {
+    throw new Error("ヘッダーが不正です。注文番号・プラットフォーム列が必要です。");
   }
   if (iPosted < 0 && iOrderDate < 0) {
     throw new Error("ヘッダーに「決済日」または「注文日」列が必要です。");
   }
-  if (amountIdx.Principal == null && amountIdx.Tax == null) {
-    throw new Error("金額列がありません。商品売上 または 販売価格 列を追加してください。");
+  const hasAmountColumn = (Object.keys(AMOUNT_HEADERS) as AmountKind[]).some((k) => amountIdx[k] != null);
+  if (!hasAmountColumn) {
+    throw new Error("金額列がありません。「商品売上」または「販売価格」列を追加してください。");
   }
 
   const orders: OtherPlatformOrderRow[] = [];
@@ -192,8 +193,14 @@ export function parseOtherPlatformCsv(csvText: string): ParseOtherPlatformCsvRes
     const cols = parseCsvLine(lines[i]);
     const orderId = (cols[iOrder] ?? "").trim();
     const platform = (cols[iPlatform] ?? "").trim();
-    const sku = (cols[iSku] ?? "").trim();
-    if (!orderId || !platform || !sku) continue;
+    const sku = iSku >= 0 ? (cols[iSku] ?? "").trim() : "";
+    const jan_code = iJan >= 0 ? (cols[iJan] ?? "").trim() || null : null;
+
+    if (!orderId || !platform) continue;
+    if (!sku && !jan_code) {
+      rowErrors.push(`行 ${i + 1}: SKU または JAN のどちらかが必要です`);
+      continue;
+    }
 
     const orderDateRaw = iOrderDate >= 0 ? (cols[iOrderDate] ?? "").trim() : "";
     const postedRaw = iPosted >= 0 ? (cols[iPosted] ?? "").trim() : "";
@@ -213,7 +220,6 @@ export function parseOtherPlatformCsv(csvText: string): ParseOtherPlatformCsvRes
     const qtyRaw = iQty >= 0 ? parseMoneyToNumber((cols[iQty] ?? "").trim()) : null;
     const quantity = qtyRaw != null && qtyRaw > 0 ? Math.floor(qtyRaw) : 1;
     const condition_id = iCond >= 0 ? normalizeCondition(cols[iCond] ?? "") : "New";
-    const jan_code = iJan >= 0 ? (cols[iJan] ?? "").trim() || null : null;
 
     let principalAmount = 0;
     let hasAnyAmount = false;
@@ -235,7 +241,7 @@ export function parseOtherPlatformCsv(csvText: string): ParseOtherPlatformCsvRes
 
       const base = {
         amazon_order_id: orderId,
-        sku,
+        sku: sku || null,
         transaction_type: "Order",
         amount_type,
         amount_description,
