@@ -26,6 +26,61 @@ type CsvImportResult = {
   message: string;
 };
 
+type CsvImportErrorDetails = {
+  error: string;
+  details?: string | null;
+  hint?: string | null;
+  code?: string | null;
+  step?: string;
+  rowErrors?: string[];
+  httpStatus?: number;
+  rawBody?: string;
+};
+
+async function readApiJson(res: Response): Promise<{ data: Record<string, unknown> | null; raw: string }> {
+  const raw = await res.text();
+  try {
+    return { data: JSON.parse(raw) as Record<string, unknown>, raw };
+  } catch {
+    return { data: null, raw };
+  }
+}
+
+function pickString(data: Record<string, unknown>, key: string): string | undefined {
+  const v = data[key];
+  return typeof v === "string" && v.trim() ? v.trim() : undefined;
+}
+
+function pickStringArray(data: Record<string, unknown>, key: string): string[] | undefined {
+  const v = data[key];
+  if (!Array.isArray(v)) return undefined;
+  return v.filter((x): x is string => typeof x === "string");
+}
+
+function buildCsvImportErrorDetails(
+  data: Record<string, unknown> | null,
+  raw: string,
+  res: Response,
+  fallback: string
+): CsvImportErrorDetails {
+  if (!data) {
+    return {
+      error: `サーバー応答を解釈できません（HTTP ${res.status}）`,
+      rawBody: raw.slice(0, 800) || undefined,
+      httpStatus: res.status,
+    };
+  }
+  return {
+    error: pickString(data, "error") ?? fallback,
+    details: pickString(data, "details") ?? null,
+    hint: pickString(data, "hint") ?? null,
+    code: pickString(data, "code") ?? null,
+    step: pickString(data, "step"),
+    rowErrors: pickStringArray(data, "rowErrors"),
+    httpStatus: res.status,
+  };
+}
+
 type ReconcileResult = {
   ok: boolean;
   message: string;
@@ -53,6 +108,7 @@ export default function OtherSalesImportPage() {
   const [selectedFileName, setSelectedFileName] = useState<string | null>(null);
   const [csvImportResult, setCsvImportResult] = useState<CsvImportResult | null>(null);
   const [csvError, setCsvError] = useState<string | null>(null);
+  const [csvErrorDetails, setCsvErrorDetails] = useState<CsvImportErrorDetails | null>(null);
   const [csvRunning, setCsvRunning] = useState(false);
 
   const [reconcileResult, setReconcileResult] = useState<ReconcileResult | null>(null);
@@ -89,6 +145,7 @@ export default function OtherSalesImportPage() {
 
   const handleCsvUpload = async (file: File) => {
     setCsvError(null);
+    setCsvErrorDetails(null);
     setCsvImportResult(null);
     setCsvRunning(true);
     setSelectedFileName(file.name);
@@ -100,12 +157,21 @@ export default function OtherSalesImportPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ csvText }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error ?? "CSV取込に失敗しました");
-      setCsvImportResult(data);
+      const { data, raw } = await readApiJson(res);
+
+      if (!data || !res.ok || data.ok === false) {
+        const details = buildCsvImportErrorDetails(data, raw, res, "CSV取込に失敗しました");
+        setCsvErrorDetails(details);
+        setCsvError(details.error);
+        return;
+      }
+
+      setCsvImportResult(data as unknown as CsvImportResult);
       await fetchManualQueue();
     } catch (e) {
-      setCsvError(e instanceof Error ? e.message : "CSV取込に失敗しました");
+      const message = e instanceof Error ? e.message : "CSV取込に失敗しました";
+      setCsvError(message);
+      setCsvErrorDetails({ error: message });
     } finally {
       setCsvRunning(false);
     }
@@ -274,15 +340,17 @@ export default function OtherSalesImportPage() {
           {csvRunning && <p className="text-sm text-slate-600">取込中...</p>}
 
           {csvError && (
-            <div className="mt-3 rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-800">{csvError}</div>
+            <ImportErrorPanel title="CSV取込エラー" summary={csvError} details={csvErrorDetails} />
           )}
           {csvImportResult && (
             <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50/60 p-4 text-sm text-emerald-900">
               <p className="font-medium">{csvImportResult.message}</p>
               <p className="mt-1 text-xs">
                 注文 {csvImportResult.ordersUpserted}件 / 売上行 {csvImportResult.salesUpserted}件
-                {csvImportResult.rowErrors?.length > 0 && ` / 警告 ${csvImportResult.rowErrors.length}件`}
               </p>
+              {csvImportResult.rowErrors?.length > 0 && (
+                <ImportRowWarnings rowErrors={csvImportResult.rowErrors} />
+              )}
             </div>
           )}
         </section>
@@ -388,6 +456,79 @@ export default function OtherSalesImportPage() {
         </section>
       </div>
     </main>
+  );
+}
+
+function ImportErrorPanel({
+  title,
+  summary,
+  details,
+}: {
+  title: string;
+  summary: string;
+  details: CsvImportErrorDetails | null;
+}) {
+  return (
+    <div className="mt-3 rounded-lg bg-red-50 border border-red-200 p-4 text-sm text-red-900">
+      <p className="font-semibold">{title}</p>
+      <p className="mt-1">{summary}</p>
+      {details?.step && (
+        <p className="mt-2 text-xs">
+          <span className="font-medium">処理段階:</span> {details.step}
+        </p>
+      )}
+      {details?.code && (
+        <p className="mt-1 text-xs font-mono">
+          <span className="font-medium font-sans">DBコード:</span> {details.code}
+        </p>
+      )}
+      {details?.details && (
+        <p className="mt-1 text-xs break-all">
+          <span className="font-medium">詳細:</span> {details.details}
+        </p>
+      )}
+      {details?.hint && (
+        <p className="mt-1 text-xs text-red-800">
+          <span className="font-medium">ヒント:</span> {details.hint}
+        </p>
+      )}
+      {details?.httpStatus != null && details.httpStatus >= 400 && (
+        <p className="mt-1 text-xs text-red-700">HTTP {details.httpStatus}</p>
+      )}
+      {details?.rowErrors && details.rowErrors.length > 0 && (
+        <ImportRowWarnings rowErrors={details.rowErrors} variant="error" />
+      )}
+      {details?.rawBody && (
+        <pre className="mt-2 max-h-32 overflow-auto rounded bg-red-100/80 p-2 text-xs whitespace-pre-wrap break-all">
+          {details.rawBody}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+function ImportRowWarnings({
+  rowErrors,
+  variant = "warning",
+}: {
+  rowErrors: string[];
+  variant?: "warning" | "error";
+}) {
+  const boxClass =
+    variant === "error"
+      ? "mt-3 rounded border border-red-300 bg-red-100/50 p-2"
+      : "mt-3 rounded border border-amber-300 bg-amber-50 p-2";
+  const titleClass = variant === "error" ? "font-medium text-red-900" : "font-medium text-amber-900";
+
+  return (
+    <div className={boxClass}>
+      <p className={`text-xs ${titleClass}`}>行ごとのエラー（{rowErrors.length}件）</p>
+      <ul className="mt-1 list-disc pl-5 text-xs space-y-0.5">
+        {rowErrors.map((msg, i) => (
+          <li key={`${i}-${msg}`}>{msg}</li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

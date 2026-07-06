@@ -6,6 +6,11 @@ import {
   shouldPreserveOtherOrderReconciliationStatus,
 } from "@/lib/other-platform-reconciliation-status";
 import { dedupeUpsertChunkByIdempotencyKey } from "@/lib/sales-transaction-idempotency";
+import { formatUnknownError, supabaseStepError, type ApiErrorPayload } from "@/lib/format-api-error";
+
+function errorResponse(payload: ApiErrorPayload, status: number) {
+  return NextResponse.json({ ok: false, ...payload }, { status });
+}
 
 const UPSERT_CHUNK = 200;
 
@@ -21,15 +26,20 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "csvText を指定してください。" }, { status: 400 });
     }
 
-    const parsed = parseOtherPlatformCsv(csvText);
+    let parsed;
+    try {
+      parsed = parseOtherPlatformCsv(csvText);
+    } catch (e) {
+      return errorResponse(formatUnknownError(e, "CSVの解析に失敗しました。"), 400);
+    }
+
     if (!parsed.orders.length) {
-      return NextResponse.json({
-        ok: true,
-        ordersUpserted: 0,
-        salesUpserted: 0,
-        rowErrors: parsed.rowErrors,
-        message: "有効な注文行がありません。",
-      });
+      const rowErrors = parsed.rowErrors;
+      const error =
+        rowErrors.length > 0
+          ? `取り込める注文行がありません（${rowErrors.length}件の行エラー）。`
+          : "取り込める注文行がありません。ヘッダー行と必須列（注文番号・プラットフォーム・決済日または注文日・金額列）を確認してください。";
+      return errorResponse({ error, rowErrors }, 422);
     }
 
     const uniqueOrders = [...new Map(parsed.orders.map((o) => [orderUpsertKey(o), o])).values()];
@@ -43,7 +53,9 @@ export async function POST(request: NextRequest) {
         .eq("platform", o.platform)
         .eq("sku", o.sku)
         .maybeSingle();
-      if (error) throw error;
+      if (error) {
+        return errorResponse(supabaseStepError("既存注文の確認", error), 500);
+      }
       if (data) existingByKey.set(orderUpsertKey(o), data as { id: string; reconciliation_status: string | null });
     }
 
@@ -81,10 +93,20 @@ export async function POST(request: NextRequest) {
 
       if (existing?.id) {
         const { error } = await supabase.from("other_orders").update(payload).eq("id", existing.id);
-        if (error) throw error;
+        if (error) {
+          return errorResponse(
+            supabaseStepError(`注文の更新（${o.platform}/${o.order_id}）`, error),
+            500
+          );
+        }
       } else {
         const { error } = await supabase.from("other_orders").insert([payload]);
-        if (error) throw error;
+        if (error) {
+          return errorResponse(
+            supabaseStepError(`注文の登録（${o.platform}/${o.order_id}）`, error),
+            500
+          );
+        }
       }
       ordersUpserted++;
     }
@@ -97,7 +119,12 @@ export async function POST(request: NextRequest) {
         .from("sales_transactions")
         .upsert(chunk, { onConflict: "idempotency_key", ignoreDuplicates: false })
         .select("id");
-      if (error) throw error;
+      if (error) {
+        return errorResponse(
+          supabaseStepError(`売上明細の保存（チャンク ${Math.floor(i / UPSERT_CHUNK) + 1}）`, error),
+          500
+        );
+      }
       salesUpserted += data?.length ?? chunk.length;
     }
 
@@ -111,7 +138,6 @@ export async function POST(request: NextRequest) {
       message: `CSVを取り込みました（注文 ${ordersUpserted}件 / 売上行 ${salesUpserted}件）。在庫引当・本消込はボタンから実行してください。`,
     });
   } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : "CSV取込に失敗しました。";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return errorResponse(formatUnknownError(e, "CSV取込に失敗しました。"), 500);
   }
 }
