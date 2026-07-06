@@ -4,6 +4,7 @@
 import { createHash } from "crypto";
 import { parseFlexiblePostedDateToIso } from "@/lib/settlement-posted-date";
 import { attachSalesTransactionIdempotency } from "@/lib/sales-transaction-idempotency";
+import { normalizeOtherPlatformJan } from "@/lib/other-platform-jan";
 
 export type OtherPlatformSalesUpsertRow = {
   amazon_order_id: string;
@@ -194,7 +195,7 @@ export function parseOtherPlatformCsv(csvText: string): ParseOtherPlatformCsvRes
     const orderId = (cols[iOrder] ?? "").trim();
     const platform = (cols[iPlatform] ?? "").trim();
     const sku = iSku >= 0 ? (cols[iSku] ?? "").trim() : "";
-    const jan_code = iJan >= 0 ? (cols[iJan] ?? "").trim() || null : null;
+    const jan_code = iJan >= 0 ? normalizeOtherPlatformJan((cols[iJan] ?? "").trim()) : null;
 
     if (!orderId || !platform) continue;
     if (!sku && !jan_code) {

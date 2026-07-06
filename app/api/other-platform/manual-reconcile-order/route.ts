@@ -9,6 +9,7 @@ import {
   OTHER_ORDER_STATUS_RECONCILED,
 } from "@/lib/other-platform-reconciliation-status";
 import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
+import { normalizeOtherPlatformJan } from "@/lib/other-platform-jan";
 
 export async function POST(request: NextRequest) {
   try {
@@ -56,7 +57,8 @@ export async function POST(request: NextRequest) {
 
     if (linkErr) throw linkErr;
 
-    const jan = String(orderRow.jan_code ?? stockRow.jan_code ?? "").trim() || null;
+    const jan =
+      normalizeOtherPlatformJan(orderRow.jan_code) ?? normalizeOtherPlatformJan(stockRow.jan_code);
     const nowIso = new Date().toISOString();
     const { error: updErr } = await supabase
       .from("other_orders")

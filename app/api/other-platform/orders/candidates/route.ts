@@ -7,6 +7,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { normalizeOrderCondition, type NormalizedListingCondition } from "@/lib/amazon-condition-match";
 import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
+import {
+  normalizeOtherPlatformJan,
+  otherPlatformJanLookupVariants,
+} from "@/lib/other-platform-jan";
 
 const SEARCH_MAX_LEN = 120;
 
@@ -97,7 +101,7 @@ async function searchInboundRescue(search: string, orderId: string) {
 function uniqueJanFromMappings(mapList: Array<{ jan_code: unknown }>): string | null {
   const jans = new Set<string>();
   for (const m of mapList) {
-    const j = String(m.jan_code ?? "").trim();
+    const j = normalizeOtherPlatformJan(String(m.jan_code ?? "").trim());
     if (j) jans.add(j);
   }
   if (jans.size !== 1) return null;
@@ -168,7 +172,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json([]);
     }
 
-    let jan = janOverride || String(orderRow.jan_code ?? "").trim();
+    let jan = normalizeOtherPlatformJan(janOverride) || normalizeOtherPlatformJan(orderRow.jan_code);
     if (!jan && sku && plat) {
       const { data: mappings } = await supabase
         .from("sku_mappings")
@@ -183,7 +187,8 @@ export async function GET(request: NextRequest) {
       return NextResponse.json([]);
     }
 
-    let q = baseInboundSelect().eq("jan_code", jan).or(orderIdAvailabilityOr(oid));
+    const janVariants = otherPlatformJanLookupVariants(jan);
+    let q = baseInboundSelect().in("jan_code", janVariants).or(orderIdAvailabilityOr(oid));
     if (condNorm) {
       q = q.or(conditionTypeOrFilter(condNorm));
     }

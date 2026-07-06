@@ -11,6 +11,10 @@ import {
 } from "@/lib/other-platform-reconciliation-status";
 import { normalizeOrderCondition, normalizeStockCondition } from "@/lib/amazon-condition-match";
 import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
+import {
+  normalizeOtherPlatformJan,
+  otherPlatformJanLookupVariants,
+} from "@/lib/other-platform-jan";
 
 function compareInboundRowId(a: unknown, b: unknown): number {
   const na = typeof a === "number" ? a : Number(a);
@@ -56,12 +60,39 @@ async function unlinkInboundFromOrder(inboundIds: number[], orderId: string): Pr
 function uniqueJanFromSkuMappings(mapList: Array<{ jan_code: unknown }>): string | null {
   const jans = new Set<string>();
   for (const m of mapList) {
-    const j = String(m.jan_code ?? "").trim();
+    const j = normalizeOtherPlatformJan(String(m.jan_code ?? "").trim());
     if (j) jans.add(j);
   }
   if (jans.size !== 1) return null;
   const [only] = [...jans];
   return only ?? null;
+}
+
+async function fetchInboundByJanVariants(
+  jan: string,
+  select: string
+): Promise<Array<{ id: number; condition_type: string | null; created_at: string | null; order_id: string | null }>> {
+  const variants = otherPlatformJanLookupVariants(jan);
+  if (variants.length === 0) return [];
+  const { data, error } = await supabase
+    .from("inbound_items")
+    .select(select)
+    .in("jan_code", variants)
+    .is("settled_at", null)
+    .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION);
+  if (error) throw error;
+  return (data ?? []) as unknown as Array<{
+    id: number;
+    condition_type: string | null;
+    created_at: string | null;
+    order_id: string | null;
+  }>;
+}
+
+function resolveOrderJan(orderJan: string | null | undefined, mapList: Array<{ jan_code: unknown }>): string | null {
+  let jan = normalizeOtherPlatformJan(orderJan);
+  if (!jan) jan = uniqueJanFromSkuMappings(mapList);
+  return jan;
 }
 
 function filterAvailableByOrderId<T extends { order_id: string | null }>(rows: T[], orderId: string): T[] {
@@ -130,7 +161,7 @@ export async function POST() {
         const { error } = await updateOtherOrderReconciliation(
           order.id,
           OTHER_ORDER_STATUS_MANUAL_REQUIRED,
-          String(order.jan_code ?? "").trim() || null
+          normalizeOtherPlatformJan(order.jan_code)
         );
         if (error) throw error;
         manualRequired++;
@@ -150,9 +181,9 @@ export async function POST() {
       if (isSetProduct) {
         if (orderCond === "used" && orderQty >= 2) {
           const janForRow =
-            String(order.jan_code ?? "").trim() ||
+            normalizeOtherPlatformJan(order.jan_code) ||
             uniqueJanFromSkuMappings(mapList) ||
-            String(mapList[0]?.jan_code ?? "").trim() ||
+            normalizeOtherPlatformJan(mapList[0]?.jan_code) ||
             null;
           const { error } = await updateOtherOrderReconciliation(order.id, OTHER_ORDER_STATUS_MANUAL_REQUIRED, janForRow);
           if (error) throw error;
@@ -166,13 +197,15 @@ export async function POST() {
           let usedSafetyAbortSet = false;
           for (const m of mapList) {
             const need = (Number(m.quantity) || 1) * orderQty;
-            const { data: stockRows, error: stockErr } = await supabase
-              .from("inbound_items")
-              .select("id, condition_type, created_at, order_id")
-              .eq("jan_code", m.jan_code)
-              .is("settled_at", null)
-              .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION);
-            if (stockErr) throw stockErr;
+            const mappingJan = normalizeOtherPlatformJan(m.jan_code);
+            if (!mappingJan) {
+              setOk = false;
+              break;
+            }
+            const stockRows = await fetchInboundByJanVariants(
+              mappingJan,
+              "id, condition_type, created_at, order_id"
+            );
             const available = filterAvailableByOrderId(stockRows ?? [], orderId);
             const matching = available
               .filter((row) => normalizeStockCondition(row.condition_type) === orderCond)
@@ -190,9 +223,9 @@ export async function POST() {
           }
           if (usedSafetyAbortSet) {
             const janForRow =
-              String(order.jan_code ?? "").trim() ||
+              normalizeOtherPlatformJan(order.jan_code) ||
               uniqueJanFromSkuMappings(mapList) ||
-              String(mapList[0]?.jan_code ?? "").trim() ||
+              normalizeOtherPlatformJan(mapList[0]?.jan_code) ||
               null;
             const { error } = await updateOtherOrderReconciliation(order.id, OTHER_ORDER_STATUS_MANUAL_REQUIRED, janForRow);
             if (error) throw error;
@@ -202,9 +235,9 @@ export async function POST() {
           }
           if (setOk && collectedIds.length > 0) {
             const janForRow =
-              String(order.jan_code ?? "").trim() ||
+              normalizeOtherPlatformJan(order.jan_code) ||
               uniqueJanFromSkuMappings(mapList) ||
-              String(mapList[0]?.jan_code ?? "").trim() ||
+              normalizeOtherPlatformJan(mapList[0]?.jan_code) ||
               null;
             if (!janForRow) {
               const { error } = await updateOtherOrderReconciliation(order.id, OTHER_ORDER_STATUS_MANUAL_REQUIRED, null);
@@ -221,11 +254,7 @@ export async function POST() {
         }
       }
 
-      let jan = String(order.jan_code ?? "").trim();
-      if (!jan) {
-        const fromMaps = uniqueJanFromSkuMappings(mapList);
-        if (fromMaps) jan = fromMaps;
-      }
+      let jan = resolveOrderJan(order.jan_code, mapList);
       if (!jan) {
         const { error } = await updateOtherOrderReconciliation(order.id, OTHER_ORDER_STATUS_MANUAL_REQUIRED, null);
         if (error) throw error;
@@ -233,16 +262,9 @@ export async function POST() {
         continue;
       }
 
-      const { data: stockRows, error: stockErr } = await supabase
-        .from("inbound_items")
-        .select("id, condition_type, created_at, order_id")
-        .eq("jan_code", jan)
-        .is("settled_at", null)
-        .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION);
 
-      if (stockErr) throw stockErr;
-
-      const available = filterAvailableByOrderId(stockRows ?? [], orderId);
+      const stockRows = await fetchInboundByJanVariants(jan, "id, condition_type, created_at, order_id");
+      const available = filterAvailableByOrderId(stockRows, orderId);
       const matching = available
         .filter((row) => normalizeStockCondition(row.condition_type) === orderCond)
         .sort(sortFifo);
