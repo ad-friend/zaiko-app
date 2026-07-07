@@ -7,6 +7,8 @@ import {
 } from "@/lib/other-platform-reconciliation-status";
 import { dedupeUpsertChunkByIdempotencyKey } from "@/lib/sales-transaction-idempotency";
 import { formatUnknownError, supabaseStepError, type ApiErrorPayload } from "@/lib/format-api-error";
+import { otherOrderLineIdentity, otherOrderLineKey } from "@/lib/other-order-line-key";
+import type { OtherPlatformOrderRow } from "@/lib/other-platform-import-engine";
 
 function errorResponse(payload: ApiErrorPayload, status: number) {
   return NextResponse.json({ ok: false, ...payload }, { status });
@@ -14,8 +16,29 @@ function errorResponse(payload: ApiErrorPayload, status: number) {
 
 const UPSERT_CHUNK = 200;
 
-function orderUpsertKey(o: { order_id: string; platform: string; sku: string }) {
-  return `${o.order_id}\t${o.platform}\t${o.sku}`;
+async function findExistingOtherOrder(o: OtherPlatformOrderRow) {
+  const identity = otherOrderLineIdentity({ sku: o.sku, jan_code: o.jan_code });
+  let q = supabase
+    .from("other_orders")
+    .select("id, reconciliation_status")
+    .eq("order_id", o.order_id)
+    .eq("platform", o.platform)
+    .eq("sku", identity.sku);
+
+  if (!identity.sku) {
+    if (identity.jan_code) {
+      q = q.eq("jan_code", identity.jan_code);
+    } else {
+      q = q.or("jan_code.is.null,jan_code.eq.");
+    }
+  }
+
+  return q.maybeSingle();
+}
+
+function normalizeOrderRow(o: OtherPlatformOrderRow): OtherPlatformOrderRow {
+  const identity = otherOrderLineIdentity({ sku: o.sku, jan_code: o.jan_code });
+  return { ...o, sku: identity.sku, jan_code: identity.jan_code };
 }
 
 export async function POST(request: NextRequest) {
@@ -42,28 +65,24 @@ export async function POST(request: NextRequest) {
       return errorResponse({ error, rowErrors }, 422);
     }
 
-    const uniqueOrders = [...new Map(parsed.orders.map((o) => [orderUpsertKey(o), o])).values()];
+    const uniqueOrders = [
+      ...new Map(parsed.orders.map((o) => normalizeOrderRow(o)).map((o) => [otherOrderLineKey(o), o])).values(),
+    ];
 
     const existingByKey = new Map<string, { id: string; reconciliation_status: string | null }>();
     for (const o of uniqueOrders) {
-      const { data, error } = await supabase
-        .from("other_orders")
-        .select("id, reconciliation_status")
-        .eq("order_id", o.order_id)
-        .eq("platform", o.platform)
-        .eq("sku", o.sku)
-        .maybeSingle();
+      const { data, error } = await findExistingOtherOrder(o);
       if (error) {
         return errorResponse(supabaseStepError("既存注文の確認", error), 500);
       }
-      if (data) existingByKey.set(orderUpsertKey(o), data as { id: string; reconciliation_status: string | null });
+      if (data) existingByKey.set(otherOrderLineKey(o), data as { id: string; reconciliation_status: string | null });
     }
 
     const nowIso = new Date().toISOString();
     let ordersUpserted = 0;
 
     for (const o of uniqueOrders) {
-      const key = orderUpsertKey(o);
+      const key = otherOrderLineKey(o);
       const existing = existingByKey.get(key);
       const preserve = existing && shouldPreserveOtherOrderReconciliationStatus(existing.reconciliation_status);
       const reconciliation_status = preserve

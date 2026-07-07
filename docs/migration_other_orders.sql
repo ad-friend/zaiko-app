@@ -55,8 +55,8 @@ UPDATE other_orders SET sell_price = 0 WHERE sell_price IS NULL;
 -- -----------------------------------------------------------------------------
 DROP INDEX IF EXISTS idx_other_orders_order_platform;
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_other_orders_order_platform_sku
-  ON other_orders (order_id, platform, sku);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_other_orders_order_platform_sku_jan
+  ON other_orders (order_id, platform, sku, jan_code);
 
 CREATE INDEX IF NOT EXISTS idx_other_orders_reconciliation_status
   ON other_orders (reconciliation_status);
@@ -73,9 +73,20 @@ CREATE INDEX IF NOT EXISTS idx_other_orders_order_id
 COMMENT ON TABLE other_orders IS
   '他販路注文（在庫引当・売上消込）。reconciliation_status: pending / reconciled / manual_required';
 
-COMMENT ON COLUMN other_orders.sku IS '出品SKU（sku_mappings.platform と一致させる）';
+COMMENT ON COLUMN other_orders.sku IS '出品SKU（空の場合は jan_code で明細を区別）';
 COMMENT ON COLUMN other_orders.quantity IS '注文数量';
 COMMENT ON COLUMN other_orders.condition_id IS 'コンディション（New / Used 等）';
 COMMENT ON COLUMN other_orders.reconciliation_status IS '在庫引当ステータス（amazon_orders と同義）';
 COMMENT ON COLUMN other_orders.order_date IS '注文日時';
 COMMENT ON COLUMN other_orders.posted_date IS '決済日時（本消込 settled_at の元）';
+
+-- -----------------------------------------------------------------------------
+-- パートE: RLS（anon キーから API 経由で読み書きできるようにする）
+-- inbound_headers 等と同じポリシー。42501 エラーが出た場合は未適用。
+-- -----------------------------------------------------------------------------
+ALTER TABLE other_orders ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Allow anon all on other_orders" ON other_orders;
+CREATE POLICY "Allow anon all on other_orders"
+  ON other_orders FOR ALL
+  USING (true) WITH CHECK (true);
