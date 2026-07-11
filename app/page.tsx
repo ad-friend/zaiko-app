@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { normalizeToFullWidthKatakana } from "@/lib/kana";
 import { normalizeSupplierForMatch } from "@/lib/normalizeSupplier";
-import { Html5Qrcode } from "html5-qrcode";
+import BarcodeScannerModal from "@/components/BarcodeScannerModal";
 
 // ----- 型定義 -----
 type ProductCondition = "new" | "used";
@@ -147,9 +147,7 @@ export default function InboundPage() {
   const [rows, setRows] = useState<ProductRow[]>([]);
   const [inferringJan, setInferringJan] = useState<string | null>(null);
   const [cameraOpen, setCameraOpen] = useState(false);
-  const [scannerReady, setScannerReady] = useState(false);
   const janInputRef = useRef<HTMLInputElement>(null);
-  const scannerRef = useRef<Html5Qrcode | null>(null);
   const lastAddedIdRef = useRef<string | null>(null);
   
   type SupplierSuggest = { id: number; name: string; kana: string };
@@ -395,71 +393,18 @@ export default function InboundPage() {
 
   const openCamera = useCallback(() => {
     setCameraOpen(true);
-    setScannerReady(false);
   }, []);
 
   const closeCamera = useCallback(() => {
-    if (scannerRef.current) {
-      scannerRef.current.stop().then(() => {
-        scannerRef.current?.clear();
-        scannerRef.current = null;
-        setCameraOpen(false);
-        setScannerReady(false);
-      }).catch((err) => {
-        console.warn("カメラの停止中にエラー:", err);
-        scannerRef.current = null;
-        setCameraOpen(false);
-        setScannerReady(false);
-      });
-    } else {
-      setCameraOpen(false);
-      setScannerReady(false);
-    }
+    setCameraOpen(false);
   }, []);
 
-  const handleJanRef = useRef(handleJanBlurOrEnter);
-  useEffect(() => {
-    handleJanRef.current = handleJanBlurOrEnter;
-  }, [handleJanBlurOrEnter]);
-
-  useEffect(() => {
-    if (!cameraOpen) return;
-    const el = document.getElementById("barcode-reader");
-    if (!el) return;
-    
-    const html5Qr = new Html5Qrcode("barcode-reader");
-    scannerRef.current = html5Qr;
-    
-    html5Qr
-      .start(
-        { facingMode: "environment" },
-        { fps: 10, qrbox: { width: 250, height: 150 } },
-        (decodedText) => {
-          const trimmed = decodedText.trim();
-          if (trimmed.length >= 8) {
-            setTimeout(() => {
-              handleJanRef.current(trimmed);
-              closeCamera();
-            }, 100);
-          }
-        },
-        () => {}
-      )
-      .then(() => setScannerReady(true))
-      .catch((err: unknown) => {
-        console.error(err);
-        setScannerReady(false);
-      });
-      
-    return () => {
-      if (scannerRef.current) {
-        scannerRef.current.stop().then(() => {
-          scannerRef.current?.clear();
-          scannerRef.current = null;
-        }).catch(() => {});
-      }
-    };
-  }, [cameraOpen, closeCamera]);
+  const handleBarcodeScan = useCallback(
+    (code: string) => {
+      handleJanBlurOrEnter(code);
+    },
+    [handleJanBlurOrEnter]
+  );
 
   const totalCost = totalNum + shippingNum - discountNum;
   
@@ -1048,28 +993,12 @@ export default function InboundPage() {
         </div>
       </main>
 
-      {/* カメラモーダル */}
-      {cameraOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 animate-in fade-in duration-200">
-          <div className="relative w-full max-w-md rounded-2xl border border-white/10 bg-white p-6 shadow-2xl">
-            <div className="mb-4 flex items-center justify-between">
-              <h3 className="text-lg font-bold text-slate-900">バーコードスキャン</h3>
-              <button
-                onClick={closeCamera}
-                className="rounded-full p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-colors"
-              >
-                <CloseIcon className="h-5 w-5" />
-              </button>
-            </div>
-            <div className="overflow-hidden rounded-xl bg-black border border-slate-200 shadow-inner">
-              <div id="barcode-reader" style={{ width: "100%", minHeight: 250 }} />
-            </div>
-            <p className="mt-4 text-center text-sm font-medium text-slate-500">
-              カメラを商品コードに向けてください
-            </p>
-          </div>
-        </div>
-      )}
+      <BarcodeScannerModal
+        open={cameraOpen}
+        onClose={closeCamera}
+        onScan={handleBarcodeScan}
+        readerId="inbound-barcode-reader"
+      />
 
       {/* 登録情報確認モーダル */}
       {showConfirmModal && (

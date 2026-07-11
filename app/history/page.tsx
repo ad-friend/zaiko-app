@@ -16,10 +16,12 @@ import {
   Loader2,
   PackageMinus,
   Printer,
+  ScanBarcode,
 } from "lucide-react";
 import { normalizeToFullWidthKatakana } from "@/lib/kana";
 import { normalizeSupplierForMatch } from "@/lib/normalizeSupplier";
 import { getInventoryStatusDisplay } from "@/lib/inventory-status-display";
+import BarcodeScannerModal from "@/components/BarcodeScannerModal";
 
 /** 在庫一覧1行。主軸はJANのためテーブルにはASIN列を表示しない（保存時ペイロード用に asin は取得のみ） */
 type RecordRow = {
@@ -285,11 +287,18 @@ export default function HistoryPage() {
   const printCloseAfterPrintRef = useRef(false);
 
   const [searchTerm, setSearchTerm] = useState("");
+  const [cameraOpen, setCameraOpen] = useState(false);
   const [sortConfig, setSortConfig] = useState<{ key: string | null; direction: "asc" | "desc" }>({ key: null, direction: "asc" });
 
   const runSearch = useCallback(() => {
     setAppliedSearchQ(searchTerm.trim());
   }, [searchTerm]);
+
+  const handleBarcodeScan = useCallback((code: string) => {
+    const trimmed = code.trim();
+    setSearchTerm(trimmed);
+    setAppliedSearchQ(trimmed);
+  }, []);
 
   useEffect(() => {
     setCurrentPage(1);
@@ -1375,6 +1384,15 @@ export default function HistoryPage() {
                   </div>
                   <button
                     type="button"
+                    onClick={() => setCameraOpen(true)}
+                    className={`${buttonClass} shrink-0 rounded-none border-l border-slate-200 bg-white px-3 text-slate-700 hover:bg-slate-50 hover:text-primary`}
+                    aria-label="バーコードをカメラで読み取る"
+                    title="バーコードスキャン"
+                  >
+                    <ScanBarcode className="h-5 w-5" />
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => runSearch()}
                     className={`${buttonClass} shrink-0 rounded-none border-l border-slate-200 bg-slate-50 px-4 text-slate-800 hover:bg-slate-100`}
                   >
@@ -1382,6 +1400,13 @@ export default function HistoryPage() {
                   </button>
                 </div>
               </div>
+
+              <BarcodeScannerModal
+                open={cameraOpen}
+                onClose={() => setCameraOpen(false)}
+                onScan={handleBarcodeScan}
+                readerId="history-barcode-reader"
+              />
 
               <div className="flex flex-wrap items-center gap-3 px-6 py-3 border-b border-slate-100 bg-white shrink-0">
                 {!isBulkEditing ? (
