@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
-import { applyPreservedReconciliationStatusForUpsert } from "@/lib/amazon-order-reconciliation-status";
+import {
+  applyExistingLineIndexForUpsert,
+  applyPreservedReconciliationStatusForUpsert,
+} from "@/lib/amazon-order-reconciliation-status";
 import { buildLocalJanLookupMaps, resolveJanFromLocalMaps } from "@/lib/amazon-order-local-jan";
 import { buildSkuToConditionMap } from "@/lib/amazon-order-import-condition";
 import { handleOrderCancellation } from "@/lib/amazon-cancellation";
@@ -276,10 +279,15 @@ export async function POST(request: NextRequest) {
       .from("amazon_orders")
       .select("amazon_order_id, sku, line_index, reconciliation_status")
       .in("amazon_order_id", chunkOrderIds);
-    applyPreservedReconciliationStatusForUpsert(
-      validRows as Array<{ amazon_order_id: string; sku: string; line_index?: number; reconciliation_status?: string }>,
-      existingStatuses ?? []
-    );
+    const upsertRows = validRows as Array<{
+      amazon_order_id: string;
+      sku: string;
+      line_index?: number;
+      reconciliation_status?: string;
+    }>;
+    // 既存行の line_index を先に合わせないと、ステータス維持も ON CONFLICT も外れる
+    applyExistingLineIndexForUpsert(upsertRows, existingStatuses ?? []);
+    applyPreservedReconciliationStatusForUpsert(upsertRows, existingStatuses ?? []);
 
     const { collapsed: rowsToUpsert, duplicate_lines_merged, amazon_order_ids_with_merge } =
       collapseDuplicateAmazonOrderRows(validRows);

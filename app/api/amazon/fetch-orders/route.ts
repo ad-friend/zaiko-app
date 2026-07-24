@@ -258,7 +258,7 @@ export async function GET(request: NextRequest) {
         return NextResponse.json(
           {
             error:
-              "amazon_orders テーブルが存在しません。docs/amazon_orders_table.sql および docs/migration_amazon_orders_line_index.sql を実行し、(amazon_order_id, sku, line_index) の UNIQUE を確認してください。",
+              "amazon_orders テーブルが存在しません。docs/amazon_orders_table.sql、docs/migration_amazon_orders_line_index.sql、docs/migration_amazon_orders_drop_order_sku_unique.sql を実行し、(amazon_order_id, sku, line_index) の UNIQUE のみになっているか確認してください。",
           },
           { status: 500 }
         );

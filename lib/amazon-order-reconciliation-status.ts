@@ -42,6 +42,37 @@ function lineIndexKey(r: UpsertOrderRow): number {
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
 }
 
+function orderSkuKey(amazonOrderId: string, sku: string): string {
+  return `${amazonOrderId}\t${sku}`;
+}
+
+/**
+ * CSV 等で line_index を常に 0 にする経路向け。
+ * 既存の (amazon_order_id, sku) があればその line_index を再利用し、
+ * ON CONFLICT (amazon_order_id, sku, line_index) が外れて二重 INSERT になるのを防ぐ。
+ * 同一キーが複数ある場合は最小の line_index を採用する。
+ */
+export function applyExistingLineIndexForUpsert<T extends UpsertOrderRow>(
+  rows: T[],
+  existing:
+    | Array<{ amazon_order_id: string; sku: string; line_index?: number | null }>
+    | null
+    | undefined
+): void {
+  const map = new Map<string, number>();
+  for (const e of existing ?? []) {
+    const key = orderSkuKey(e.amazon_order_id, e.sku);
+    const li =
+      e.line_index != null && Number.isFinite(Number(e.line_index)) ? Math.floor(Number(e.line_index)) : 0;
+    const prev = map.get(key);
+    if (prev == null || li < prev) map.set(key, li);
+  }
+  for (const r of rows) {
+    const existingLi = map.get(orderSkuKey(r.amazon_order_id, r.sku));
+    if (existingLi != null) r.line_index = existingLi;
+  }
+}
+
 /** 既存 amazon_orders 行のステータスを見て、upsert 直前の reconciliation_status を決める */
 export function applyPreservedReconciliationStatusForUpsert<
   T extends UpsertOrderRow,
