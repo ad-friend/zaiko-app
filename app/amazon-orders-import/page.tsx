@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import Papa from "papaparse";
-import { UploadCloud, ShieldCheck, RotateCcw, Banknote, ScanSearch } from "lucide-react";
+import { UploadCloud, ShieldCheck, Banknote, ScanSearch } from "lucide-react";
 import { sliceFromTransactionHeader } from "@/lib/amazon-transaction-csv-header";
 
 /** 売上インポート: 1リクエストあたりのデータ行数（自動消込と同様のチャンク＋リトライ方針） */
@@ -281,20 +281,6 @@ export default function AmazonOrdersImportPage() {
     mapping: ParseResult["headerMapping"];
   } | null>(null);
 
-  const [returnsFileName, setReturnsFileName] = useState<string | null>(null);
-  const [returnsRunning, setReturnsRunning] = useState(false);
-  const [returnsError, setReturnsError] = useState<string | null>(null);
-  const [returnsResult, setReturnsResult] = useState<{
-    ok: boolean;
-    total_rows_read?: number;
-    unique_orders_in_file?: number;
-    processed_returns?: number;
-    skipped_unregistered?: number;
-    skipped_already_processed?: number;
-    row_parse_warnings?: number;
-    errors?: string[];
-  } | null>(null);
-
   const [salesFileName, setSalesFileName] = useState<string | null>(null);
   const [salesRunning, setSalesRunning] = useState(false);
   const [salesImportProgress, setSalesImportProgress] = useState<{ completedRows: number; totalRows: number } | null>(
@@ -467,71 +453,6 @@ export default function AmazonOrdersImportPage() {
       setError(e2 instanceof Error ? e2.message : "インポートに失敗しました");
     } finally {
       setAutoRunning(false);
-      e.target.value = "";
-    }
-  };
-
-  const handleReturnsFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setReturnsError(null);
-    setReturnsResult(null);
-    setReturnsFileName(file.name);
-    setReturnsRunning(true);
-
-    try {
-      const form = new FormData();
-      form.set("file", file);
-
-      const res = await fetch("/api/amazon/returns-import", {
-        method: "POST",
-        body: form,
-      });
-
-      const parsedRes = await readJsonOrTextSafe<{
-        error?: string;
-        ok?: boolean;
-        total_rows_read?: number;
-        unique_orders_in_file?: number;
-        processed_returns?: number;
-        skipped_unregistered?: number;
-        skipped_already_processed?: number;
-        row_parse_warnings?: number;
-        errors?: string[];
-      }>(res);
-      const data = parsedRes.data;
-
-      if (!res.ok) {
-        const rawSnippet = parsedRes.raw.trim().slice(0, 400);
-        const msg = (data && typeof data.error === "string" ? data.error : null) ?? rawSnippet;
-        setReturnsError(msg || "返品インポートに失敗しました");
-        setReturnsResult({
-          ok: false,
-          errors: data?.errors,
-        });
-        return;
-      }
-
-      if (!parsedRes.okJson || !data) {
-        setReturnsError("サーバー応答が JSON ではありません。");
-        return;
-      }
-
-      setReturnsResult({
-        ok: true,
-        total_rows_read: data.total_rows_read,
-        unique_orders_in_file: data.unique_orders_in_file,
-        processed_returns: data.processed_returns,
-        skipped_unregistered: data.skipped_unregistered,
-        skipped_already_processed: data.skipped_already_processed,
-        row_parse_warnings: data.row_parse_warnings,
-        errors: data.errors,
-      });
-    } catch (err) {
-      setReturnsError(err instanceof Error ? err.message : "返品インポートに失敗しました");
-    } finally {
-      setReturnsRunning(false);
       e.target.value = "";
     }
   };
@@ -840,90 +761,10 @@ export default function AmazonOrdersImportPage() {
           <div>
             <h1 className="text-2xl font-bold text-slate-900">Amazon 注文レポート一括インポート</h1>
             <p className="text-sm text-slate-500">
-              注文レポート・返品レポート・トランザクション売上CSVをアップロードできます（返品は在庫巻き戻しと{" "}
-              <span className="font-mono">returned</span> 更新）
+              注文レポートとトランザクション売上CSVをアップロードできます
             </p>
           </div>
         </div>
-
-        <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="rounded-lg bg-violet-50 p-2 text-violet-700">
-              <RotateCcw className="h-5 w-5" />
-            </div>
-            <h2 className="text-lg font-bold text-slate-800">返品レポート（FBA 返品等）</h2>
-          </div>
-          <p className="text-sm text-slate-600 mb-4">
-            必須: 注文ID列（<span className="font-mono">order-id</span> / <span className="font-mono">amazon-order-id</span> 等）。
-            任意: <span className="font-mono">disposition</span>（現状はすべて販売可能扱いで巻き戻し。将来 Sellable / Defective で分岐予定）。
-            <br />
-            <span className="text-slate-500">
-              DB にない注文はスキップします。キャンセル・返品済みは再実行しても安全です。
-            </span>
-          </p>
-
-          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
-            <div className="flex-1">
-              <input
-                type="file"
-                accept=".csv,.tsv,.txt"
-                onChange={handleReturnsFileChange}
-                disabled={returnsRunning}
-                className="block w-full text-sm text-slate-700"
-              />
-              {returnsFileName && <p className="mt-2 text-xs text-slate-500">選択: {returnsFileName}</p>}
-            </div>
-          </div>
-
-          {returnsRunning && (
-            <p className="mt-3 text-sm font-medium text-violet-700" aria-live="polite">
-              返品インポートを実行中…
-            </p>
-          )}
-
-          {returnsError && (
-            <div className="mt-4 rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-800">{returnsError}</div>
-          )}
-
-          {returnsResult?.ok ? (
-            <div className="mt-4 rounded-lg border border-violet-200 bg-violet-50/60 p-4">
-              <p className="font-medium text-violet-900">返品インポート完了</p>
-              <dl className="mt-3 grid gap-2 text-sm text-violet-950 sm:grid-cols-2">
-                <div className="flex justify-between gap-2 rounded-md bg-white/70 px-3 py-2 border border-violet-100">
-                  <dt className="text-violet-800/90">処理した返品（注文単位）</dt>
-                  <dd className="font-semibold tabular-nums">{returnsResult.processed_returns ?? 0}</dd>
-                </div>
-                <div className="flex justify-between gap-2 rounded-md bg-white/70 px-3 py-2 border border-violet-100">
-                  <dt className="text-violet-800/90">未登録でスキップ</dt>
-                  <dd className="font-semibold tabular-nums">{returnsResult.skipped_unregistered ?? 0}</dd>
-                </div>
-                <div className="flex justify-between gap-2 rounded-md bg-white/70 px-3 py-2 border border-violet-100">
-                  <dt className="text-violet-800/90">処理済みでスキップ</dt>
-                  <dd className="font-semibold tabular-nums">{returnsResult.skipped_already_processed ?? 0}</dd>
-                </div>
-                <div className="flex justify-between gap-2 rounded-md bg-white/70 px-3 py-2 border border-violet-100">
-                  <dt className="text-violet-800/90">ファイル内の行 / ユニーク注文</dt>
-                  <dd className="font-semibold tabular-nums">
-                    {returnsResult.total_rows_read ?? 0} / {returnsResult.unique_orders_in_file ?? 0}
-                  </dd>
-                </div>
-              </dl>
-              {(returnsResult.row_parse_warnings ?? 0) > 0 && (
-                <p className="mt-2 text-xs text-violet-800/80">パース警告: {returnsResult.row_parse_warnings} 件</p>
-              )}
-              {returnsResult.errors && returnsResult.errors.length > 0 && (
-                <div className="mt-3 text-xs text-violet-900/90">
-                  <p className="font-medium">メッセージ（先頭）</p>
-                  <ul className="list-disc pl-5 mt-1 space-y-1 max-h-32 overflow-auto">
-                    {returnsResult.errors.slice(0, 10).map((x, idx) => (
-                      <li key={idx}>{x}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          ) : null}
-        </section>
 
         <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
           <h2 className="text-lg font-bold text-slate-800 mb-3">1) 注文レポート — ファイル選択</h2>
