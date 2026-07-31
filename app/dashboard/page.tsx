@@ -14,6 +14,7 @@ import {
   PieChart,
   Table2,
   ClipboardList,
+  Download,
 } from "lucide-react";
 import type {
   DashboardPayload,
@@ -152,18 +153,47 @@ export default function DashboardPage() {
     void loadAsOf(asOfDate);
   };
 
-  function formatDateTimeTokyo(iso: string | null): string {
-    if (!iso) return "—";
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return iso;
-    return new Intl.DateTimeFormat("ja-JP", {
-      timeZone: "Asia/Tokyo",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-    }).format(d);
+  function escapeCsv(value: unknown): string {
+    const s = value == null ? "" : String(value);
+    if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+    return s;
+  }
+
+  function downloadAsOfCsv() {
+    if (!asOfData?.productRows.length) {
+      alert("ダウンロードする商品データがありません。先に集計してください。");
+      return;
+    }
+    const header = [
+      "JAN",
+      "ブランド",
+      "商品名",
+      "型番",
+      "現在在庫数（販売中＋未決済）",
+      "未決済在庫",
+      "実在庫",
+    ].join(",");
+    const lines = asOfData.productRows.map((r) =>
+      [
+        r.jan_code,
+        r.brand ?? "",
+        r.product_name ?? "",
+        r.model_number ?? "",
+        r.currentCount,
+        r.pendingCount,
+        r.physicalCount,
+      ]
+        .map(escapeCsv)
+        .join(",")
+    );
+    const csv = [header, ...lines].join("\r\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `inventory_as_of_${asOfData.asOfDate.replace(/-/g, "")}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   return (
@@ -464,8 +494,9 @@ export default function DashboardPage() {
                 棚卸レポート（時点在庫）
               </h2>
               <p className="mb-4 text-sm text-slate-600">
-                指定日の <span className="font-medium text-slate-800">0:00（東京）</span> 時点で、
-                未決済在庫（販売中＋決済待ち）と、注文日と決済日がその時刻をまたぐ引当済（決済待ち）を集計します。
+                指定日の <span className="font-medium text-slate-800">0:00（東京）</span> 時点で集計します。
+                対象は <span className="font-medium text-slate-800">仕入日が基準日より前</span> の在庫です。
+                商品（JAN）ごとに現在在庫数（販売中＋決済待ち）・未決済在庫（引当済）・実在庫を CSV 出力できます。
                 決済日が空欄のものは未決済として扱います。Amazon の注文日は CSV 取込時の注文日（
                 <span className="font-mono text-xs">amazon_orders.created_at</span>
                 ）を使用します。
@@ -493,6 +524,15 @@ export default function DashboardPage() {
                   {asOfLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
                   集計する
                 </button>
+                <button
+                  type="button"
+                  onClick={downloadAsOfCsv}
+                  disabled={!asOfData?.productRows.length || asOfLoading}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:opacity-50"
+                >
+                  <Download className="h-4 w-4" />
+                  CSVダウンロード
+                </button>
               </form>
 
               {asOfError && (
@@ -516,6 +556,8 @@ export default function DashboardPage() {
                 <>
                   <p className="mb-3 text-sm font-medium text-slate-600">
                     集計基準: <span className="text-slate-900">{asOfData.label}</span>
+                    {" · "}
+                    商品 {formatCountCompact(asOfData.productRows.length)} 件
                   </p>
                   <div className="mb-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                     <div className={cardBase}>
@@ -544,61 +586,13 @@ export default function DashboardPage() {
                       <span className="font-semibold">
                         {formatCountCompact(asOfData.allocatedOrderDateUnknown)}
                       </span>{" "}
-                      件あります（未決済合計には含み、引当済には含めていません）。
+                      件あります（未決済合計には含み、引当済・CSVの未決済在庫には含めていません）。
                     </p>
                   )}
 
-                  {asOfData.allocatedRows.length > 0 && (
-                    <div className="overflow-x-auto rounded-xl border border-slate-200/80 bg-white shadow-sm">
-                      <div className="border-b border-slate-100 px-4 py-3 text-sm font-medium text-slate-700">
-                        引当済（決済待ち）明細 · {formatCountCompact(asOfData.allocatedRows.length)} 件
-                      </div>
-                      <table className="min-w-full text-sm">
-                        <thead>
-                          <tr className="border-b border-slate-200 bg-slate-50/80 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
-                            <th className="whitespace-nowrap px-4 py-3">在庫ID</th>
-                            <th className="whitespace-nowrap px-4 py-3">注文番号</th>
-                            <th className="whitespace-nowrap px-4 py-3">注文日</th>
-                            <th className="whitespace-nowrap px-4 py-3">決済日</th>
-                            <th className="whitespace-nowrap px-4 py-3">JAN</th>
-                            <th className="whitespace-nowrap px-4 py-3">ブランド / 型番</th>
-                            <th className="whitespace-nowrap px-4 py-3 text-right">原価</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {asOfData.allocatedRows.map((row) => (
-                            <tr key={row.id} className="border-b border-slate-100 hover:bg-slate-50/50">
-                              <td className="whitespace-nowrap px-4 py-3 tabular-nums text-slate-800">
-                                {row.id}
-                              </td>
-                              <td className="whitespace-nowrap px-4 py-3 font-mono text-xs text-slate-800">
-                                {row.order_id}
-                              </td>
-                              <td className="whitespace-nowrap px-4 py-3 tabular-nums text-slate-800">
-                                {formatDateTimeTokyo(row.order_date)}
-                              </td>
-                              <td className="whitespace-nowrap px-4 py-3 tabular-nums text-slate-800">
-                                {row.settled_at ? formatDateTimeTokyo(row.settled_at) : "（未決済）"}
-                              </td>
-                              <td className="whitespace-nowrap px-4 py-3 font-mono text-xs text-slate-700">
-                                {row.jan_code || "—"}
-                              </td>
-                              <td className="max-w-[14rem] truncate px-4 py-3 text-slate-700" title={[row.brand, row.model_number].filter(Boolean).join(" / ")}>
-                                {[row.brand, row.model_number].filter(Boolean).join(" / ") || "—"}
-                              </td>
-                              <td className="whitespace-nowrap px-4 py-3 text-right tabular-nums text-slate-800">
-                                {formatYenCompact(row.effective_unit_price)}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-
-                  {asOfData.allocatedRows.length === 0 && !asOfLoading && (
+                  {asOfData.productRows.length === 0 && !asOfLoading && (
                     <p className="rounded-xl border border-slate-200/80 bg-white px-4 py-6 text-center text-sm text-slate-500">
-                      引当済（決済待ち）に該当する明細はありません。
+                      該当する商品はありません。
                     </p>
                   )}
                 </>

@@ -48,17 +48,18 @@ export type MonthlyDashboardPayload = {
   rows: MonthlyDashboardRow[];
 };
 
-/** 棚卸時点レポートの明細1行 */
-export type InventoryAsOfRow = {
-  id: number;
-  order_id: string;
-  order_date: string | null;
-  settled_at: string | null;
-  jan_code: string | null;
+/** 棚卸時点レポートの商品（JAN）集計1行 */
+export type InventoryAsOfProductRow = {
+  jan_code: string;
   brand: string | null;
+  product_name: string | null;
   model_number: string | null;
-  asin: string | null;
-  effective_unit_price: number;
+  /** 現在在庫数（販売中＋未決済）＝販売中＋引当済 */
+  currentCount: number;
+  /** 未決済在庫＝引当済（決済待ち） */
+  pendingCount: number;
+  /** 実在庫＝ currentCount − pendingCount */
+  physicalCount: number;
 };
 
 /** GET /api/dashboard/inventory-as-of */
@@ -74,6 +75,5 @@ export type InventoryAsOfPayload = {
   onSale: { count: number };
   /** order_id はあるが注文日が取れない件数 */
   allocatedOrderDateUnknown: number;
-  allocatedRows: InventoryAsOfRow[];
-  unknownOrderDateRows: InventoryAsOfRow[];
+  productRows: InventoryAsOfProductRow[];
 };
