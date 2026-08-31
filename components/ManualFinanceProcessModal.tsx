@@ -74,11 +74,11 @@ type Props = {
   onToast?: (t: { message: string; variant: "success" | "error" }) => void;
 };
 
-type CardCategory = "Refund" | "Adjustment" | "Mixed" | "Other";
+type CardCategory = "Refund" | "Adjustment" | "Mixed" | "Order" | "Other";
 
 function toCardCategory(raw: unknown): CardCategory {
   const s = String(raw ?? "").trim();
-  if (s === "Refund" || s === "Adjustment" || s === "Mixed") return s;
+  if (s === "Refund" || s === "Adjustment" || s === "Mixed" || s === "Order") return s;
   return "Other";
 }
 
@@ -431,7 +431,11 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
   }, [isOpen, data?.groupId, data?.amazon_order_id, data?.suggestedCategory, data?.hasRefund, rawDetailsNoteSig]);
 
   useEffect(() => {
-    if (!isOpen || !data || processMode !== "order_reconcile" || !data.amazon_order_id || isQuad) {
+    const wantOrderCandidates =
+      processMode === "order_reconcile" &&
+      Boolean(data?.amazon_order_id) &&
+      (cardCategory === "Order" || (cardCategory === "Other" && !isQuad));
+    if (!isOpen || !data || !wantOrderCandidates) {
       setCandidateStocks([]);
       setSelectedStockId(null);
       setOrderRescueExtra([]);
@@ -454,7 +458,7 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
       })
       .catch(() => setCandidateStocks([]))
       .finally(() => setLoadingCandidates(false));
-  }, [isOpen, data?.groupId, data?.amazon_order_id, data?.sku, processMode, isQuad]);
+  }, [isOpen, data?.groupId, data?.amazon_order_id, data?.sku, processMode, isQuad, cardCategory]);
 
   useEffect(() => {
     if (!isOpen || !data || processMode !== "adjustment_with_stock") {
@@ -728,6 +732,10 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                     // Refundは専用APIで処理する（在庫戻し含む）
                     return;
                   }
+                  if (next === "Order") {
+                    setProcessMode("order_reconcile");
+                    return;
+                  }
                   if (next === "Adjustment") {
                     setProcessMode("adjustment_finance_only");
                   }
@@ -737,10 +745,12 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                 <option value="Refund">Refund（返金）</option>
                 <option value="Adjustment">Adjustment（補填）</option>
                 <option value="Mixed">Mixed（返品＆補填）</option>
+                <option value="Order">Order（売上）</option>
                 <option value="Other">Other</option>
               </select>
               <p className="mt-2 text-[11px] text-slate-500 leading-relaxed">
-                初期値は自動判別（pending-finances）です。モーダルを閉じるとリセットされます（DB保存しません）。
+                初期値は自動判別（pending-finances）です。Amazon が送料調整などを Refund として載せただけの通常売上は、ここで
+                Order（売上）に切り替えて本消込できます。モーダルを閉じるとリセットされます（DB保存しません）。
               </p>
             </div>
           ) : null}
@@ -766,6 +776,15 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                   </label>
                 ))}
               </div>
+            </div>
+          )}
+
+          {cardCategory === "Order" && (
+            <div className="mb-5 rounded-lg border border-blue-200 bg-blue-50/60 p-3">
+              <p className="text-xs font-semibold text-blue-950 mb-1">売上として処理</p>
+              <p className="text-xs text-blue-950/90 leading-relaxed">
+                自動判別が返金でも、通常売上として在庫に本消込します。返品の在庫戻しは行いません。
+              </p>
             </div>
           )}
 
@@ -1067,7 +1086,16 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
                 </>
               )}
 
-              {cardCategory === "Other" && processMode === "order_reconcile" && Boolean(data?.amazon_order_id?.trim()) && (
+              {cardCategory === "Order" && !data?.amazon_order_id?.trim() ? (
+                <div className="px-4 pt-4">
+                  <p className="text-sm text-amber-900 bg-amber-50 border border-amber-100 rounded px-3 py-2 leading-relaxed">
+                    注文番号が無いため、売上の本消込はできません。
+                  </p>
+                </div>
+              ) : null}
+
+              {(cardCategory === "Order" || (cardCategory === "Other" && processMode === "order_reconcile")) &&
+                Boolean(data?.amazon_order_id?.trim()) && (
                 <>
                   <h3 className="bg-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-700 border-b border-slate-200">
                     紐付ける在庫の選択
