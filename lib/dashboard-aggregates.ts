@@ -3,6 +3,7 @@
  */
 import { supabase } from "@/lib/supabase";
 import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
+import { applyUnattachedInboundFilter } from "@/lib/inventory-assembly";
 import { isSalesPrincipalRow, isSalesTaxRow, type PrincipalTaxQuadRowLike } from "@/lib/amazon-principal-tax-quad";
 import type { DashboardPeriod, MonthlyDashboardRow } from "@/lib/dashboard-types";
 
@@ -102,7 +103,7 @@ export async function aggregateCurrentInventory(): Promise<{ count: number; tota
   for (;;) {
     const { data, error } = await supabase
       .from("inbound_items")
-      .select("effective_unit_price")
+      .select("effective_unit_price, parent_item_id")
       .is("settled_at", null)
       .is("exit_type", null)
       .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
@@ -111,8 +112,9 @@ export async function aggregateCurrentInventory(): Promise<{ count: number; tota
     if (error) throw error;
     if (!data?.length) break;
     for (const row of data) {
-      count += 1;
+      // 金額は組み付け子も含める（原価は在庫に残っている）。件数は単体販売可能なルートのみ。
       totalAmount += num(row.effective_unit_price);
+      if (row.parent_item_id == null) count += 1;
     }
     if (data.length < PAGE) break;
     from += PAGE;
@@ -129,7 +131,7 @@ export async function aggregateInventoryAtMonthEnd(period: DashboardPeriod): Pro
   for (;;) {
     const { data, error } = await supabase
       .from("inbound_items")
-      .select("effective_unit_price, settled_at, exit_type, registered_at, stock_status")
+      .select("effective_unit_price, settled_at, exit_type, registered_at, stock_status, parent_item_id")
       .lt("created_at", endExclusiveIso)
       .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
       .order("id", { ascending: true })
@@ -142,8 +144,8 @@ export async function aggregateInventoryAtMonthEnd(period: DashboardPeriod): Pro
       const exitType = row.exit_type as string | null;
       const registeredAt = row.registered_at as string | null;
       if (exitType != null && registeredAt != null && registeredAt < endExclusiveIso) continue;
-      count += 1;
       totalAmount += num(row.effective_unit_price);
+      if (row.parent_item_id == null) count += 1;
     }
     if (data.length < PAGE) break;
     from += PAGE;

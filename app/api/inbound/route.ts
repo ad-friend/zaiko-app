@@ -62,6 +62,9 @@ type Item = {
   basePrice: number;
   fixedUnitPrice: boolean;
   effectiveUnitPrice: number;
+  itemKind?: string;
+  partCode?: string;
+  asin?: string | null;
 };
 
 type Body = {
@@ -103,14 +106,42 @@ export async function POST(req: Request) {
 
     const headerId = headerRow.id as number;
 
-    // 2. 明細（商品リスト）の保存（JAN→ASIN を Catalog API で取得して asin も保存）
+    // 2. 明細の保存（商品: JAN→ASIN / パーツ: part_code・商品マスタ非登録）
     if (items.length > 0) {
       const nowIso = new Date().toISOString();
       const rows: Array<Record<string, unknown>> = [];
       const uniqueJans = new Map<string, string | null>();
       for (const item of items) {
-        const jan = item.jan?.trim() || '';
-        const payloadAsin = (item as { asin?: string | null }).asin;
+        const itemKind = String(item.itemKind ?? "product").trim().toLowerCase() === "part" ? "part" : "product";
+        const partCode = item.partCode != null ? String(item.partCode).trim().toUpperCase() || null : null;
+        const jan = item.jan?.trim() || "";
+
+        if (itemKind === "part") {
+          if (!partCode) {
+            return NextResponse.json({ success: false, error: "パーツ行には partCode が必要です" }, { status: 400 });
+          }
+          if (!item.productName?.trim()) {
+            return NextResponse.json({ success: false, error: "パーツ行には productName が必要です" }, { status: 400 });
+          }
+          rows.push({
+            header_id: headerId,
+            jan_code: jan || null,
+            asin: null,
+            brand: item.brand || null,
+            product_name: item.productName.trim(),
+            model_number: item.modelNumber || partCode,
+            condition_type: item.condition || "used",
+            base_price: item.basePrice,
+            is_fixed_price: item.fixedUnitPrice,
+            effective_unit_price: item.effectiveUnitPrice,
+            registered_at: nowIso,
+            item_kind: "part",
+            part_code: partCode,
+          });
+          continue;
+        }
+
+        const payloadAsin = item.asin;
         const hasValidPayloadAsin = typeof payloadAsin === "string" && payloadAsin.trim().length >= 10;
         let asin: string | null;
         if (hasValidPayloadAsin) {
@@ -136,13 +167,13 @@ export async function POST(req: Request) {
           is_fixed_price: item.fixedUnitPrice,
           effective_unit_price: item.effectiveUnitPrice,
           registered_at: nowIso,
+          item_kind: "product",
+          part_code: null,
         });
       }
 
       // データベースに保存（1回だけ実行）
       const { error: itemsError } = await supabase.from('inbound_items').insert(rows);
-
-      // ▼ 余計なリトライ用の if文 (itemsError?.message?.includes...) はここにありましたが、削除しました ▼
 
       // 保存に失敗した場合のエラーハンドリング
       if (itemsError) {
@@ -151,9 +182,11 @@ export async function POST(req: Request) {
       }
       const masterProductsMap = new Map<string, { jan_code: string; brand: string | null; product_name: string; model_number: string | null; asin: string | null }>();
       items.forEach((item) => {
+        const itemKind = String(item.itemKind ?? "product").trim().toLowerCase() === "part" ? "part" : "product";
+        if (itemKind === "part") return;
         if (item.jan && item.productName) {
           const jan = item.jan.trim();
-          const itemAsin = (item as { asin?: string }).asin;
+          const itemAsin = item.asin;
           const asin = uniqueJans.get(jan) ?? (typeof itemAsin === "string" ? itemAsin.trim() || null : null);
           masterProductsMap.set(jan, {
             jan_code: jan,

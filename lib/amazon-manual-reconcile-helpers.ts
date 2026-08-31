@@ -61,6 +61,7 @@ export async function validateSingleJanMultiQtyPicks(
     .select("id, jan_code, condition_type, order_id")
     .in("id", inboundIds)
     .is("settled_at", null)
+    .is("parent_item_id", null)
     .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION);
   if (strictErr) return { ok: false, error: strictErr.message };
   if ((rows?.length ?? 0) !== inboundIds.length) {
@@ -140,6 +141,7 @@ export async function validateSetManualPicks(
     .select("id, jan_code, condition_type, order_id")
     .in("id", inboundIds)
     .is("settled_at", null)
+    .is("parent_item_id", null)
     .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION);
   if (strictErr) return { ok: false, error: strictErr.message };
   if ((strictRows?.length ?? 0) !== inboundIds.length) {

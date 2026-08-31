@@ -14,6 +14,7 @@ export type InventoryRowForStatus = {
   settled_at?: string | null;
   exit_type?: string | null;
   stock_status?: string | null;
+  parent_item_id?: number | null;
 };
 
 function nonempty(s: string | null | undefined): boolean {
@@ -72,6 +73,13 @@ export function getInventoryStatusDisplay(row: InventoryRowForStatus): Inventory
     };
   }
 
+  if (row.parent_item_id != null) {
+    return {
+      label: `組み付け済(#${row.parent_item_id})`,
+      badgeClassName: "bg-violet-50 text-violet-900 ring-1 ring-violet-200/70",
+    };
+  }
+
   const hasOrder = nonempty(row.order_id);
   const hasSettled = nonempty(row.settled_at);
 
@@ -111,6 +119,7 @@ export function getInventoryStatusSortRank(row: InventoryRowForStatus): number {
   const stock = String(row.stock_status ?? "").trim().toLowerCase();
   if (hasExit || stock === STOCK_STATUS_DISPOSED) return 50;
   if (stock === STOCK_STATUS_RETURN_INSPECTION) return 40;
+  if (row.parent_item_id != null) return 15;
 
   const hasOrder = nonempty(row.order_id);
   const hasSettled = nonempty(row.settled_at);

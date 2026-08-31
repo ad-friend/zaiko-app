@@ -10,6 +10,7 @@
  */
 import { supabase } from "@/lib/supabase";
 import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
+import { applyUnattachedInboundFilter } from "@/lib/inventory-assembly";
 import { num } from "@/lib/dashboard-aggregates";
 import type { InventoryAsOfPayload, InventoryAsOfProductRow } from "@/lib/dashboard-types";
 

@@ -6,6 +6,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { earliestPostedDateIso } from "@/lib/settlement-posted-date";
+import { fetchDescendantIds, sumSubtreeCostForRoot } from "@/lib/inventory-assembly";
 
 function escapePostgrestQuotedValue(raw: string): string {
   return raw.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
@@ -97,6 +98,7 @@ export async function POST(request: NextRequest) {
       .eq("id", stockId)
       .is("settled_at", null)
       .is("exit_type", null)
+      .is("parent_item_id", null)
       // 返品検品待ち等の除外 + order_id 可用性（NULL/空/同一注文）を同時に満たす
       .or(eligibilityOr)
       .single();
@@ -108,7 +110,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const unitCost = Number(stock.effective_unit_price ?? 0);
+    const unitCost = await sumSubtreeCostForRoot(stockId, Number(stock.effective_unit_price ?? 0));
 
     const { error: updateTxErr } = await supabase
       .from("sales_transactions")
@@ -125,6 +127,17 @@ export async function POST(request: NextRequest) {
       .is("settled_at", null)
       .is("exit_type", null)
       .or(eligibilityOr);
+
+    if (updateStockErr) throw updateStockErr;
+
+    const descendantIds = await fetchDescendantIds([stockId]);
+    if (descendantIds.length > 0) {
+      const { error: descErr } = await supabase
+        .from("inbound_items")
+        .update({ settled_at: settledAt, order_id: groupId })
+        .in("id", descendantIds);
+      if (descErr) throw descErr;
+    }
 
     if (updateStockErr) throw updateStockErr;
 

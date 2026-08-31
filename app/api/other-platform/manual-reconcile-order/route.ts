@@ -9,6 +9,7 @@ import {
   OTHER_ORDER_STATUS_RECONCILED,
 } from "@/lib/other-platform-reconciliation-status";
 import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
+import { assignOrderIdToRootsAndDescendants, applyUnattachedInboundFilter } from "@/lib/inventory-assembly";
 import { normalizeOtherPlatformJan } from "@/lib/other-platform-jan";
 
 export async function POST(request: NextRequest) {
@@ -42,6 +43,7 @@ export async function POST(request: NextRequest) {
       .select("id, jan_code")
       .eq("id", stockId)
       .is("settled_at", null)
+      .is("parent_item_id", null)
       .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
       .single();
 
@@ -49,13 +51,11 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "指定した在庫が見つからないか、引当対象外です。" }, { status: 404 });
     }
 
-    const { error: linkErr } = await supabase
-      .from("inbound_items")
-      .update({ order_id: orderId })
-      .eq("id", stockId)
-      .is("settled_at", null);
-
-    if (linkErr) throw linkErr;
+    try {
+      await assignOrderIdToRootsAndDescendants([stockId], orderId);
+    } catch (linkErr) {
+      throw linkErr;
+    }
 
     const jan =
       normalizeOtherPlatformJan(orderRow.jan_code) ?? normalizeOtherPlatformJan(stockRow.jan_code);

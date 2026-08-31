@@ -7,6 +7,7 @@ import BarcodeScannerModal from "@/components/BarcodeScannerModal";
 
 // ----- 型定義 -----
 type ProductCondition = "new" | "used";
+type InboundMode = "product" | "part";
 
 type ProductRow = {
   id: string;
@@ -22,6 +23,8 @@ type ProductRow = {
   isMaster?: boolean;
   /** 商品情報取得API（infer-jan）の同一レスポンスから取得したASIN。保存時に inbound_items.asin へ送る */
   asin?: string | null;
+  itemKind: InboundMode;
+  partCode: string;
 };
 
 type HeaderInfo = {
@@ -90,7 +93,8 @@ function validate(
   headerInfo: HeaderInfo,
   rows: ProductRow[],
   totalPurchaseRaw: string,
-  suppliers: { id: number; name: string; kana: string }[]
+  suppliers: { id: number; name: string; kana: string }[],
+  inboundMode: InboundMode
 ): ValidationError {
   const err: ValidationError = {};
   const hasAnyDistribute = rows.some((r) => r.fixedUnitPrice);
@@ -124,7 +128,12 @@ function validate(
   }
 
   rows.forEach((r, i) => {
-    if (!r.jan.trim()) missing.push(`商品リスト 行${i + 1} の「JAN」`);
+    if (inboundMode === "part" || r.itemKind === "part") {
+      if (!r.partCode.trim()) missing.push(`商品リスト 行${i + 1} の「パーツコード」`);
+      if (!r.productName.trim()) missing.push(`商品リスト 行${i + 1} の「正式名称」`);
+    } else {
+      if (!r.jan.trim()) missing.push(`商品リスト 行${i + 1} の「JAN」`);
+    }
     if (r.basePrice <= 0 && !r.fixedUnitPrice) missing.push(`商品リスト 行${i + 1} の「基準価格」`);
   });
   
@@ -145,7 +154,9 @@ export default function InboundPage() {
   const [discount, setDiscount] = useState<string>("");
 
   const [rows, setRows] = useState<ProductRow[]>([]);
+  const [inboundMode, setInboundMode] = useState<InboundMode>("product");
   const [inferringJan, setInferringJan] = useState<string | null>(null);
+  const [partLookupBusy, setPartLookupBusy] = useState<string | null>(null);
   const [cameraOpen, setCameraOpen] = useState(false);
   const janInputRef = useRef<HTMLInputElement>(null);
   const lastAddedIdRef = useRef<string | null>(null);
@@ -181,7 +192,7 @@ export default function InboundPage() {
   };
 
   // 🌟 変更: validate関数にマスターリストを渡す
-  const validation = validate(totalNum, headerInfo, rows, totalPurchase, masterSuppliers);
+  const validation = validate(totalNum, headerInfo, rows, totalPurchase, masterSuppliers, inboundMode);
 
   // 🌟 追加: エラーが1つでもあれば true になるフラグ
   const hasErrors = 
@@ -288,6 +299,8 @@ export default function InboundPage() {
               inferredByAi: !!productName,
               condition: "new",
               isMaster,
+              itemKind: "product",
+              partCode: "",
               ...(asin != null && { asin }),
             };
             lastAddedIdRef.current = newRow.id;
@@ -311,12 +324,14 @@ export default function InboundPage() {
       quantity: 1,
       fixedUnitPrice: false,
       inferredByAi: false,
-      condition: "new",
+      condition: inboundMode === "part" ? "used" : "new",
+      itemKind: inboundMode,
+      partCode: "",
     };
     lastAddedIdRef.current = newRow.id;
     setRows((prev) => [...prev, newRow]);
     setTimeout(() => janInputRef.current?.focus(), 50);
-  }, []);
+  }, [inboundMode]);
 
   const updateRow = useCallback((id: string, patch: Partial<ProductRow>) => {
     if (patch.productName !== undefined) {
@@ -331,6 +346,48 @@ export default function InboundPage() {
     setRows((prev) => prev.filter((r) => r.id !== id));
   }, []);
 
+  const handlePartCodeEnter = useCallback(async (rawCode: string) => {
+    const code = rawCode.trim().toUpperCase().replace(/\s+/g, "-");
+    if (!code) return;
+    setPartLookupBusy(code);
+    try {
+      const res = await fetch(`/api/parts-catalog?code=${encodeURIComponent(code)}`);
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.error || "パーツマスタの参照に失敗しました");
+        return;
+      }
+      if (!data || !data.code) {
+        alert(
+          `パーツコード「${code}」はマスタ未登録です。\n先に「パーツマスタ」で正式名称を登録してください。`
+        );
+        return;
+      }
+      const newRow: ProductRow = {
+        id: generateId(),
+        jan: "",
+        brand: data.brand != null ? String(data.brand) : "",
+        productName: String(data.name ?? ""),
+        modelNumber: String(data.code),
+        basePrice: 0,
+        quantity: 1,
+        fixedUnitPrice: false,
+        inferredByAi: false,
+        condition: "used",
+        itemKind: "part",
+        partCode: String(data.code),
+        isMaster: true,
+      };
+      lastAddedIdRef.current = newRow.id;
+      setRows((prev) => [...prev, newRow]);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "パーツマスタの参照に失敗しました");
+    } finally {
+      setPartLookupBusy(null);
+      setTimeout(() => janInputRef.current?.focus(), 50);
+    }
+  }, []);
+
   const handleRegister = useCallback(async () => {
     // 🌟 変更: エラーチェックはボタンの disabled で防ぐため、ここにあった alert() を削除
     if (!confirm("入力内容をデータベースに保存しますか？")) return;
@@ -342,8 +399,17 @@ export default function InboundPage() {
             const effectivePrice = calcEffectiveUnitPrice(row, totalNum, headerInfo, rows);
             for (let i = 0; i < row.quantity; i++) {
                 items.push({
-                    ...row,
-                    effectiveUnitPrice: effectivePrice
+                    jan: row.jan,
+                    brand: row.brand,
+                    productName: row.productName,
+                    modelNumber: row.modelNumber,
+                    condition: row.condition,
+                    basePrice: row.basePrice,
+                    fixedUnitPrice: row.fixedUnitPrice,
+                    effectiveUnitPrice: effectivePrice,
+                    asin: row.asin ?? null,
+                    itemKind: inboundMode === "part" ? "part" : row.itemKind || "product",
+                    partCode: row.partCode || "",
                 });
             }
             return items;
@@ -389,7 +455,7 @@ export default function InboundPage() {
     } finally {
         setIsSubmitting(false);
     }
-  }, [headerInfo, rows, totalNum, shippingNum, discountNum, purchaseDate, supplier, genre, totalPurchase]);
+  }, [headerInfo, rows, totalNum, shippingNum, discountNum, purchaseDate, supplier, genre, totalPurchase, inboundMode]);
 
   const openCamera = useCallback(() => {
     setCameraOpen(true);
@@ -636,13 +702,40 @@ export default function InboundPage() {
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-2">
                 <div>
                   <h2 className="text-xl font-bold text-slate-900">
-                    商品リスト 
+                    {inboundMode === "part" ? "パーツリスト" : "商品リスト"}
                     <span className="ml-2 text-sm font-normal text-slate-500 bg-white px-2 py-0.5 rounded-full border border-slate-200">
                       {rows.reduce((acc, r) => acc + r.quantity, 0)}点
                     </span>
                   </h2>
+                  <div className="mt-2 inline-flex rounded-lg border border-slate-200 bg-white p-0.5 text-sm shadow-sm">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (inboundMode === "product") return;
+                        if (rows.length > 0 && !confirm("モードを切替えるとリストをクリアします。よろしいですか？")) return;
+                        setInboundMode("product");
+                        setRows([]);
+                      }}
+                      className={`rounded-md px-3 py-1.5 font-medium ${inboundMode === "product" ? "bg-primary text-white" : "text-slate-600 hover:bg-slate-50"}`}
+                    >
+                      商品入庫
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (inboundMode === "part") return;
+                        if (rows.length > 0 && !confirm("モードを切替えるとリストをクリアします。よろしいですか？")) return;
+                        setInboundMode("part");
+                        setRows([]);
+                      }}
+                      className={`rounded-md px-3 py-1.5 font-medium ${inboundMode === "part" ? "bg-violet-600 text-white" : "text-slate-600 hover:bg-slate-50"}`}
+                    >
+                      パーツ入庫
+                    </button>
+                  </div>
                 </div>
                 <div className="flex items-center gap-2">
+                  {inboundMode === "product" ? (
                   <button
                     type="button"
                     onClick={openCamera}
@@ -651,6 +744,14 @@ export default function InboundPage() {
                     <BarcodeIcon className="mr-2 h-4 w-4" />
                     カメラ起動
                   </button>
+                  ) : (
+                    <a
+                      href="/parts-catalog"
+                      className={`${buttonClass} bg-white text-violet-700 border border-violet-200 hover:bg-violet-50`}
+                    >
+                      パーツマスタ
+                    </a>
+                  )}
                   <button
                     type="button"
                     onClick={addRow}
@@ -663,29 +764,40 @@ export default function InboundPage() {
               </div>
 
               <div className="sticky top-[64px] z-20 -mx-4 sm:mx-0 px-4 sm:px-0 mb-4 bg-slate-50/95 backdrop-blur sm:bg-transparent pb-2 sm:pb-0">
-                <div className="relative rounded-xl border border-primary/30 bg-white p-1 shadow-md shadow-primary/5 ring-4 ring-primary/5 transition-all focus-within:ring-primary/20 focus-within:border-primary/50">
+                <div className={`relative rounded-xl border p-1 shadow-md ring-4 transition-all focus-within:border-primary/50 ${inboundMode === "part" ? "border-violet-300 bg-white shadow-violet-500/5 ring-violet-500/5" : "border-primary/30 bg-white shadow-primary/5 ring-primary/5 focus-within:ring-primary/20"}`}>
                    <div className="relative flex items-center">
-                     <div className="flex h-10 w-10 items-center justify-center text-primary">
+                     <div className={`flex h-10 w-10 items-center justify-center ${inboundMode === "part" ? "text-violet-600" : "text-primary"}`}>
                        <BarcodeIcon className="h-5 w-5" />
                      </div>
                      <input
                         ref={janInputRef}
                         type="text"
-                        inputMode="numeric"
+                        inputMode={inboundMode === "part" ? "text" : "numeric"}
                         autoComplete="off"
-                        placeholder="JANコードをスキャン または 入力してEnter"
+                        placeholder={
+                          inboundMode === "part"
+                            ? "パーツコードを入力してEnter（例: PS4-RIBBON-12P）"
+                            : "JANコードをスキャン または 入力してEnter"
+                        }
                         className="flex-1 h-12 bg-transparent text-lg text-slate-900 placeholder:text-slate-400 focus:outline-none"
-                        disabled={!!inferringJan}
+                        disabled={!!inferringJan || !!partLookupBusy}
                         onKeyDown={(e) => {
-                          if (e.key === "Enter") {
-                            const v = (e.target as HTMLInputElement).value.trim().replace(/\D/g, "");
-                            if (v.length === 13) {
-                              handleJanBlurOrEnter(v);
-                              (e.target as HTMLInputElement).value = "";
-                            }
+                          if (e.key !== "Enter") return;
+                          const raw = (e.target as HTMLInputElement).value.trim();
+                          if (inboundMode === "part") {
+                            if (!raw) return;
+                            void handlePartCodeEnter(raw);
+                            (e.target as HTMLInputElement).value = "";
+                            return;
+                          }
+                          const v = raw.replace(/\D/g, "");
+                          if (v.length === 13) {
+                            handleJanBlurOrEnter(v);
+                            (e.target as HTMLInputElement).value = "";
                           }
                         }}
                         onChange={(e) => {
+                          if (inboundMode === "part") return;
                           const digits = (e.target.value || "").replace(/\D/g, "");
                           if (digits.length === 13) {
                             handleJanBlurOrEnter(digits);
@@ -693,10 +805,12 @@ export default function InboundPage() {
                           }
                         }}
                       />
-                      {inferringJan && (
+                      {(inferringJan || partLookupBusy) && (
                         <div className="flex items-center gap-2 pr-4 animate-pulse">
                           <span className="h-2 w-2 rounded-full bg-primary"></span>
-                          <span className="text-xs font-bold text-primary">AI推論中...</span>
+                          <span className="text-xs font-bold text-primary">
+                            {partLookupBusy ? "マスタ参照中..." : "AI推論中..."}
+                          </span>
                         </div>
                       )}
                    </div>
@@ -708,7 +822,7 @@ export default function InboundPage() {
                   <table className="w-full table-fixed text-sm text-left">
                     <thead className="bg-slate-50/80 border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold tracking-wider">
                       <tr>
-                        <th className="px-3 py-3 w-[25%]">JAN / 状態</th>
+                        <th className="px-3 py-3 w-[25%]">{inboundMode === "part" ? "コード / 状態" : "JAN / 状態"}</th>
                         <th className="px-3 py-3 min-w-0 w-[30%]">商品情報</th>
                         <th className="px-3 py-3 w-[20%] text-right">数量 / 基準価格</th>
                         <th className="px-3 py-3 w-[20%] text-right">実質単価 / 按分</th>
@@ -735,7 +849,10 @@ export default function InboundPage() {
                         else if (row.inferredByAi) rowBg = "bg-indigo-50/30";
 
                         // 🌟 追加: その行のエラーチェック（枠線を赤くするため）
-                        const isJanMissing = !row.jan.trim();
+                        const isJanMissing =
+                          inboundMode === "part" || row.itemKind === "part"
+                            ? !row.partCode.trim() || !row.productName.trim()
+                            : !row.jan.trim();
                         const isPriceMissing = row.basePrice <= 0 && !row.fixedUnitPrice;
 
                         return (
@@ -743,6 +860,15 @@ export default function InboundPage() {
                             <td className="px-3 py-3 align-top">
                               <div className="space-y-2">
                                 <div className="relative">
+                                    {inboundMode === "part" || row.itemKind === "part" ? (
+                                    <input
+                                    value={row.partCode}
+                                    onChange={(e) => updateRow(row.id, { partCode: e.target.value.toUpperCase() })}
+                                    className={`${inputClass} w-full font-mono text-sm h-9 shadow-sm ${isJanMissing ? "border-red-400 focus-visible:ring-red-200" : ""}`}
+                                    placeholder="パーツコード"
+                                    disabled={row.isMaster}
+                                    />
+                                    ) : (
                                     <input
                                     value={row.jan}
                                     onChange={(e) => updateRow(row.id, { jan: e.target.value })}
@@ -753,6 +879,7 @@ export default function InboundPage() {
                                     className={`${inputClass} w-full font-mono text-sm h-9 shadow-sm ${isJanMissing ? "border-red-400 focus-visible:ring-red-200" : ""}`}
                                     placeholder="JAN"
                                     />
+                                    )}
                                     {row.inferredByAi && (
                                     <div className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-primary ring-2 ring-white shadow-sm" title="AI自動入力済み" />
                                     )}

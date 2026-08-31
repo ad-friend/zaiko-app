@@ -10,6 +10,7 @@ import {
   STOCK_STATUS_DISPOSED,
   type QuickAdjustExitType,
 } from "@/lib/inbound-stock-status";
+import { applyUnattachedInboundFilter } from "@/lib/inventory-assembly";
 
 const FETCH_CAP = 3000;
 const NOT_FOUND = "対象の販売可能在庫が見つかりません";
@@ -58,6 +59,7 @@ export async function POST(request: NextRequest) {
       .select("id, condition_type, effective_unit_price, base_price")
       .eq("jan_code", janRaw)
       .is("settled_at", null)
+      .is("parent_item_id", null)
       .is("exit_type", null)
       .or("order_id.is.null,order_id.eq.\"\"")
       .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
@@ -90,6 +92,7 @@ export async function POST(request: NextRequest) {
       })
       .eq("id", picked.id)
       .is("settled_at", null)
+      .is("parent_item_id", null)
       .is("exit_type", null)
       .or("order_id.is.null,order_id.eq.\"\"")
       .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)

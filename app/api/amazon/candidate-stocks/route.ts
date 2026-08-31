@@ -7,6 +7,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
+import { applyUnattachedInboundFilter } from "@/lib/inventory-assembly";
 
 const SEARCH_MAX_LEN = 120;
 
@@ -40,6 +41,7 @@ function buildRescueBase(amazonOrderId: string) {
     .from("inbound_items")
     .select("id, jan_code, brand, model_number, condition_type, effective_unit_price, order_id, created_at")
     .is("settled_at", null)
+      .is("parent_item_id", null)
     .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
     .is("exit_type", null);
   if (amazonOrderId) {
@@ -127,6 +129,7 @@ export async function GET(request: NextRequest) {
         .select("id, jan_code, brand, model_number, condition_type, effective_unit_price, order_id, created_at")
         .eq("order_id", amazonOrderId)
         .is("settled_at", null)
+      .is("parent_item_id", null)
         .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
         .order("created_at", { ascending: true });
 
@@ -177,6 +180,7 @@ export async function GET(request: NextRequest) {
           .from("inbound_items")
           .select("id, jan_code, brand, model_number, condition_type, effective_unit_price, order_id, created_at")
           .is("settled_at", null)
+      .is("parent_item_id", null)
           .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
           .or('order_id.is.null,order_id.eq.""')
           .eq("jan_code", janFromMaster)
@@ -197,6 +201,7 @@ export async function GET(request: NextRequest) {
           .from("inbound_items")
           .select("id, jan_code, brand, model_number, condition_type, effective_unit_price, order_id, created_at")
           .is("settled_at", null)
+      .is("parent_item_id", null)
           .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
           .or('order_id.is.null,order_id.eq.""')
           .eq("asin", orderAsin)

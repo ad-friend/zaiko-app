@@ -7,6 +7,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { normalizeOrderCondition, type NormalizedListingCondition } from "@/lib/amazon-condition-match";
 import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
+import { applyUnattachedInboundFilter } from "@/lib/inventory-assembly";
 
 /** PostgREST: 未割当または同一 Amazon 注文への仮引当のみ */
 function orderIdAvailabilityOr(amazonOrderId: string): string {
@@ -38,6 +39,7 @@ function baseInboundSelect() {
     .from("inbound_items")
     .select("id, jan_code, brand, model_number, effective_unit_price, condition_type, created_at, order_id")
     .is("settled_at", null)
+      .is("parent_item_id", null)
     .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION);
 }
 

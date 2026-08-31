@@ -2,6 +2,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
+import { applyUnattachedInboundFilter } from "@/lib/inventory-assembly";
 
 const CONDITIONS = new Set(["new", "used"]);
 const REASONS = new Set(["damaged", "lost", "internal_use", "entertainment"]);
@@ -36,6 +37,7 @@ export async function POST(request: NextRequest) {
       .eq("jan_code", jan_code)
       .eq("condition_type", condition)
       .is("settled_at", null)
+      .is("parent_item_id", null)
       .is("exit_type", null)
       .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
       .order("created_at", { ascending: true })

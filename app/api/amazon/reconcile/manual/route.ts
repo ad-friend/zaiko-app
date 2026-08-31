@@ -21,6 +21,7 @@ import {
   validateSetManualPicks,
   validateSingleJanMultiQtyPicks,
 } from "@/lib/amazon-manual-reconcile-helpers";
+import { assignOrderIdToRootsAndDescendants, expandWithDescendantIds } from "@/lib/inventory-assembly";
 
 type AmazonOrderRowForManual = {
   id: string;
@@ -63,7 +64,8 @@ function parseInboundIds(body: Record<string, unknown>): number[] {
 
 async function unlinkInboundsFromOrder(inboundIds: number[], amazonOrderId: string): Promise<void> {
   if (inboundIds.length === 0) return;
-  await supabase.from("inbound_items").update({ order_id: null }).in("id", inboundIds).eq("order_id", amazonOrderId);
+  const allIds = await expandWithDescendantIds(inboundIds);
+  await supabase.from("inbound_items").update({ order_id: null }).in("id", allIds).eq("order_id", amazonOrderId);
 }
 
 async function appendManualReconcileMemoOrLog(inboundIds: number[], message: string): Promise<void> {
@@ -219,16 +221,12 @@ export async function POST(request: NextRequest) {
     }
 
     const linked: number[] = [];
-    for (const id of inboundIds) {
-      const { error: updateItemErr } = await supabase
-        .from("inbound_items")
-        .update({ order_id: amazonOrderId })
-        .eq("id", id);
-      if (updateItemErr) {
-        await unlinkInboundsFromOrder(linked, amazonOrderId);
-        throw updateItemErr;
-      }
-      linked.push(id);
+    try {
+      const allLinked = await assignOrderIdToRootsAndDescendants(inboundIds, amazonOrderId);
+      linked.push(...allLinked);
+    } catch (updateItemErr) {
+      await unlinkInboundsFromOrder(linked.length ? linked : inboundIds, amazonOrderId);
+      throw updateItemErr;
     }
 
     const { data: updatedRows, error: updateOrderErr } = await supabase

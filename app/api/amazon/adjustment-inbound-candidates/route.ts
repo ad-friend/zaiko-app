@@ -5,6 +5,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
+import { applyUnattachedInboundFilter } from "@/lib/inventory-assembly";
 
 function uniqueJanFromSkuMappings(mapList: Array<{ jan_code: unknown; quantity?: unknown }>): string | null {
   const jans = new Set<string>();
@@ -41,6 +42,7 @@ export async function GET(request: NextRequest) {
       .select("id, jan_code, brand, model_number, condition_type, effective_unit_price, order_id, created_at, product_name")
       .eq("jan_code", jan)
       .is("settled_at", null)
+      .is("parent_item_id", null)
       .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
       .is("exit_type", null)
       .order("created_at", { ascending: true })

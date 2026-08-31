@@ -1,7 +1,9 @@
 /** 在庫一覧 */
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
+import { buildAssemblySummariesForIds } from "@/lib/inventory-assembly";
 
+/** 在庫一覧1行。主軸はJANのためテーブルにはASIN列を表示しない（保存時ペイロード用に asin は取得のみ） */
 export type RecordRow = {
   id: number;
   jan_code: string | null;
@@ -22,6 +24,19 @@ export type RecordRow = {
   stock_status?: string | null;
   /** DB 生成列。進捗ソート用（getInventoryStatusSortRank と同一ロジック） */
   inventory_progress_rank?: number;
+  parent_item_id?: number | null;
+  item_kind?: string | null;
+  part_code?: string | null;
+  /** 組み付けサマリ（一覧エンリッチ） */
+  assembled_cost?: number;
+  child_count?: number;
+  assembly_children?: Array<{
+    id: number;
+    product_name: string | null;
+    jan_code: string | null;
+    effective_unit_price: number;
+    item_kind: string;
+  }>;
   header: {
     id: number;
     purchase_date: string;
@@ -48,6 +63,9 @@ const SELECT_WITH_REGISTERED = `
   exit_type,
   stock_status,
   inventory_progress_rank,
+  parent_item_id,
+  item_kind,
+  part_code,
   inbound_headers (
     id,
     purchase_date,
@@ -95,6 +113,9 @@ function mapDbRow(row: Record<string, unknown>): RecordRow {
     stock_status: r.stock_status != null ? String(r.stock_status) : null,
     inventory_progress_rank:
       r.inventory_progress_rank != null ? Number(r.inventory_progress_rank) : undefined,
+    parent_item_id: r.parent_item_id != null ? Number(r.parent_item_id) : null,
+    item_kind: r.item_kind != null ? String(r.item_kind) : "product",
+    part_code: r.part_code != null ? String(r.part_code) : null,
     header: Array.isArray(r.inbound_headers)
       ? (r.inbound_headers[0] as RecordRow["header"])
       : ((r.inbound_headers as RecordRow["header"]) ?? null),
@@ -180,6 +201,7 @@ function buildSearchOrClause(q: string, headerIds: number[]): string | null {
     `order_id.ilike.${p}`,
     `asin.ilike.${p}`,
     `condition_type.ilike.${p}`,
+    `part_code.ilike.${p}`,
   ];
   if (headerIds.length > 0) {
     parts.push(`header_id.in.(${headerIds.join(",")})`);
@@ -262,12 +284,20 @@ async function runListQuery(
   pageSize: number,
   searchOr: string | null,
   sortKey: SortKey | null,
-  sortDirRaw: "asc" | "desc"
+  sortDirRaw: "asc" | "desc",
+  itemKind: "product" | "part" | "all"
 ): Promise<{ rows: RecordRow[]; total: number; error: Error | null }> {
   let listQuery = supabase
     .from("inbound_items")
     .select(SELECT_WITH_REGISTERED, { count: "exact" })
     .gte("created_at", cutoffIso);
+
+  if (itemKind === "product") {
+    // パーツ以外（NULL・product）。.or は検索用に残すため not.eq を使う
+    listQuery = listQuery.not("item_kind", "eq", "part");
+  } else if (itemKind === "part") {
+    listQuery = listQuery.eq("item_kind", "part");
+  }
 
   if (searchOr) {
     listQuery = listQuery.or(searchOr);
@@ -286,6 +316,26 @@ async function runListQuery(
   }
 
   const rows = (data || []).map((row) => mapDbRow(row as Record<string, unknown>));
+  try {
+    const summaries = await buildAssemblySummariesForIds(
+      rows.map((r) => ({
+        id: r.id,
+        parent_item_id: r.parent_item_id ?? null,
+        item_kind: r.item_kind ?? "product",
+        effective_unit_price: r.effective_unit_price,
+      }))
+    );
+    for (const row of rows) {
+      const s = summaries.get(row.id);
+      if (!s) continue;
+      row.assembled_cost = s.assembled_cost;
+      row.child_count = s.child_count;
+      row.assembly_children = s.children;
+    }
+  } catch (e) {
+    // マイグレーション未適用時は一覧自体は返す
+    console.warn("[records] assembly enrich skipped:", e instanceof Error ? e.message : e);
+  }
   const total = count ?? rows.length;
   return { rows, total, error: null };
 }
@@ -337,7 +387,10 @@ export async function GET(request: NextRequest) {
 
     const supplierHeaderIds = qRaw.trim() ? await resolveHeaderIdsForSupplierSearch(qRaw) : [];
     const searchOr = buildSearchOrClause(qRaw, supplierHeaderIds);
-    const result = await runListQuery(cutoffIso, page, pageSize, searchOr, sortKey, sortDirRaw);
+    const kindRaw = (sp.get("itemKind") ?? sp.get("item_kind") ?? "product").trim().toLowerCase();
+    const itemKind: "product" | "part" | "all" =
+      kindRaw === "part" ? "part" : kindRaw === "all" ? "all" : "product";
+    const result = await runListQuery(cutoffIso, page, pageSize, searchOr, sortKey, sortDirRaw, itemKind);
 
     if (result.error) throw result.error;
 
@@ -347,6 +400,7 @@ export async function GET(request: NextRequest) {
       page,
       pageSize,
       listMaxRows: LIST_MAX_ROWS,
+      itemKind,
     });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);

@@ -30,3 +30,9 @@ export type QuickAdjustExitType = (typeof QUICK_ADJUST_EXIT_TYPES)[number];
  * PostgREST `.or()` 用: 引当対象の在庫のみ（検品待ち・廃棄を除外）
  */
 export const INBOUND_FILTER_SALABLE_FOR_ALLOCATION = "stock_status.is.null,stock_status.eq.available";
+
+/**
+ * 組み付け済み（parent_item_id あり）は単体引当・有効在庫カウントから除外する。
+ * 引当クエリでは `.is("parent_item_id", null)` または
+ * `applyUnattachedInboundFilter`（lib/inventory-assembly）を併用すること。
+ */

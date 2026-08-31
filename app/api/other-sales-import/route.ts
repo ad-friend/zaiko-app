@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { createHash } from "crypto";
 import { supabase } from "@/lib/supabase";
 import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
+import {
+  applyUnattachedInboundFilter,
+  expandWithDescendantIds,
+  sumSubtreeCostForRoot,
+} from "@/lib/inventory-assembly";
 import { parseFlexiblePostedDateToIso } from "@/lib/settlement-posted-date";
 import { attachSalesTransactionIdempotency } from "@/lib/sales-transaction-idempotency";
 import { OTHER_ORDER_STATUS_MANUAL_REQUIRED } from "@/lib/other-platform-reconciliation-status";
@@ -210,6 +215,7 @@ export async function POST(request: NextRequest) {
             .select("id,effective_unit_price")
             .eq("jan_code", mappedJanCode)
             .is("settled_at", null)
+      .is("parent_item_id", null)
             .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
             .order("created_at", { ascending: true })
             .limit(1);
@@ -229,6 +235,7 @@ export async function POST(request: NextRequest) {
             .select("id,effective_unit_price")
             .eq("jan_code", janCode)
             .is("settled_at", null)
+      .is("parent_item_id", null)
             .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
             .order("created_at", { ascending: true })
             .limit(1);
@@ -260,13 +267,17 @@ export async function POST(request: NextRequest) {
           continue;
         }
 
-        const unitCost = matchedEffectiveUnitPrice != null ? matchedEffectiveUnitPrice : 0;
+        const unitCost =
+          matchedStockId != null
+            ? await sumSubtreeCostForRoot(matchedStockId, matchedEffectiveUnitPrice != null ? matchedEffectiveUnitPrice : 0)
+            : 0;
 
-        // 在庫更新（settled_at = 実売上日、order_id）
+        // 在庫更新（settled_at = 実売上日、order_id）— 組み付け子孫も含める
+        const stockIds = await expandWithDescendantIds([matchedStockId]);
         const { error: updateStockErr } = await supabase
           .from("inbound_items")
           .update({ settled_at: salePostedIso, order_id: orderId })
-          .eq("id", matchedStockId)
+          .in("id", stockIds)
           .is("settled_at", null);
 
         if (updateStockErr) throw updateStockErr;

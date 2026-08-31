@@ -3,15 +3,17 @@
 import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Package, History, Users, Database, Layers, Menu, X, PackageCheck, LayoutDashboard } from "lucide-react";
+import { Package, History, Users, Database, Layers, Menu, X, PackageCheck, LayoutDashboard, Wrench, BookMarked } from "lucide-react";
 
 const navItems = [
   { href: "/dashboard", label: "ダッシュボード", icon: LayoutDashboard },
   { href: "/", label: "入庫管理", icon: Package },
   { href: "/history", label: "在庫一覧", icon: History },
+  { href: "/parts", label: "パーツ在庫", icon: Wrench },
   { href: "/amazon-reconcile", label: "Amazon消込", icon: PackageCheck },
   { href: "/suppliers", label: "仕入先管理", icon: Users },
   { href: "/products", label: "商品マスタ", icon: Database },
+  { href: "/parts-catalog", label: "パーツマスタ", icon: BookMarked },
   { href: "/sku", label: "SKUマスタ", icon: Layers },
 ] as const;
 
@@ -47,7 +49,10 @@ export default function Header() {
         {/* PC: 横並びボタンメニュー */}
         <nav className="hidden md:flex items-center gap-2">
           {navItems.map((item) => {
-            const isActive = pathname === item.href;
+            const isActive =
+              item.href === "/"
+                ? pathname === "/"
+                : pathname === item.href || pathname.startsWith(`${item.href}/`);
             const Icon = item.icon;
             return (
               <Link

@@ -12,6 +12,11 @@ import {
 import { normalizeOrderCondition, normalizeStockCondition } from "@/lib/amazon-condition-match";
 import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
 import {
+  applyUnattachedInboundFilter,
+  assignOrderIdToRootsAndDescendants,
+  expandWithDescendantIds,
+} from "@/lib/inventory-assembly";
+import {
   normalizeOtherPlatformJan,
   otherPlatformJanLookupVariants,
 } from "@/lib/other-platform-jan";
@@ -50,10 +55,11 @@ async function updateOtherOrderReconciliation(
 
 async function unlinkInboundFromOrder(inboundIds: number[], orderId: string): Promise<void> {
   if (inboundIds.length === 0) return;
+  const allIds = await expandWithDescendantIds(inboundIds);
   await supabase
     .from("inbound_items")
     .update({ order_id: null, settled_at: null })
-    .in("id", inboundIds)
+    .in("id", allIds)
     .eq("order_id", orderId);
 }
 
@@ -79,6 +85,7 @@ async function fetchInboundByJanVariants(
     .select(select)
     .in("jan_code", variants)
     .is("settled_at", null)
+      .is("parent_item_id", null)
     .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION);
   if (error) throw error;
   return (data ?? []) as unknown as Array<{
@@ -110,13 +117,12 @@ async function finalizeReconciledInboundIds(
   janForRow: string
 ): Promise<void> {
   const linked: number[] = [];
-  for (const id of inboundIds) {
-    const { error: uErr } = await supabase.from("inbound_items").update({ order_id: orderId }).eq("id", id);
-    if (uErr) {
-      await unlinkInboundFromOrder(linked, orderId);
-      throw new Error(uErr.message);
-    }
-    linked.push(id);
+  try {
+    const allLinked = await assignOrderIdToRootsAndDescendants(inboundIds, orderId);
+    linked.push(...allLinked);
+  } catch (e) {
+    await unlinkInboundFromOrder(linked.length ? linked : inboundIds, orderId);
+    throw e;
   }
   const { error: oErr } = await updateOtherOrderReconciliation(orderRowId, OTHER_ORDER_STATUS_RECONCILED, janForRow);
   if (oErr) {

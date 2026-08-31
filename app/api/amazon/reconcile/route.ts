@@ -13,6 +13,7 @@ import {
 import { normalizeOrderCondition, normalizeStockCondition } from "@/lib/amazon-condition-match";
 import { healReconcileOrdersFromSpApi } from "@/lib/amazon-reconcile-sp-heal";
 import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
+import { assignOrderIdToRootsAndDescendants, expandWithDescendantIds } from "@/lib/inventory-assembly";
 
 /** inbound_items.id は PostgREST 経由で number になることが多く、string 前提の localeCompare は落ちる */
 function compareInboundRowId(a: unknown, b: unknown): number {
@@ -47,10 +48,11 @@ async function updateAmazonOrderReconciliation(
 
 async function unlinkInboundFromOrder(inboundIds: number[], amazonOrderId: string): Promise<void> {
   if (inboundIds.length === 0) return;
+  const allIds = await expandWithDescendantIds(inboundIds);
   await supabase
     .from("inbound_items")
     .update({ order_id: null, settled_at: null })
-    .in("id", inboundIds)
+    .in("id", allIds)
     .eq("order_id", amazonOrderId);
 }
 
@@ -84,16 +86,12 @@ async function finalizeReconciledInboundIds(
   janForRow: string
 ): Promise<void> {
   const linked: number[] = [];
-  for (const id of inboundIds) {
-    const { error: uErr } = await supabase
-      .from("inbound_items")
-      .update({ order_id: amazonOrderId })
-      .eq("id", id);
-    if (uErr) {
-      await unlinkInboundFromOrder(linked, amazonOrderId);
-      throw new Error(uErr.message);
-    }
-    linked.push(id);
+  try {
+    const allLinked = await assignOrderIdToRootsAndDescendants(inboundIds, amazonOrderId);
+    linked.push(...allLinked);
+  } catch (e) {
+    await unlinkInboundFromOrder(linked.length ? linked : inboundIds, amazonOrderId);
+    throw e;
   }
   const { error: oErr } = await updateAmazonOrderReconciliation(orderRowId, AMAZON_ORDER_STATUS_RECONCILED, janForRow);
   if (oErr) {
@@ -194,6 +192,7 @@ export async function POST() {
               .select("id, condition_type, created_at, order_id")
               .eq("jan_code", m.jan_code)
               .is("settled_at", null)
+              .is("parent_item_id", null)
               .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION);
             if (stockErr) throw stockErr;
             const available = filterAvailableByOrderId(stockRows ?? [], orderId);
@@ -263,6 +262,7 @@ export async function POST() {
         .select("id, condition_type, created_at, order_id")
         .eq("jan_code", jan)
         .is("settled_at", null)
+        .is("parent_item_id", null)
         .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION);
 
       if (stockErr) throw stockErr;

@@ -22,6 +22,7 @@ import { normalizeToFullWidthKatakana } from "@/lib/kana";
 import { normalizeSupplierForMatch } from "@/lib/normalizeSupplier";
 import { getInventoryStatusDisplay } from "@/lib/inventory-status-display";
 import BarcodeScannerModal from "@/components/BarcodeScannerModal";
+import InventoryAssembleControls from "@/components/InventoryAssembleControls";
 
 /** 在庫一覧1行。主軸はJANのためテーブルにはASIN列を表示しない（保存時ペイロード用に asin は取得のみ） */
 type RecordRow = {
@@ -41,6 +42,17 @@ type RecordRow = {
   exit_type: string | null;
   stock_status: string | null;
   inventory_progress_rank?: number;
+  parent_item_id?: number | null;
+  item_kind?: string | null;
+  assembled_cost?: number;
+  child_count?: number;
+  assembly_children?: Array<{
+    id: number;
+    product_name: string | null;
+    jan_code: string | null;
+    effective_unit_price: number;
+    item_kind: string;
+  }>;
   header: {
     id: number;
     purchase_date: string;
@@ -168,6 +180,11 @@ function normalizeRecordRow(r: RecordRow & { exit_type?: string | null; stock_st
     ...r,
     exit_type: r.exit_type ?? null,
     stock_status: r.stock_status ?? null,
+    parent_item_id: r.parent_item_id ?? null,
+    item_kind: r.item_kind ?? "product",
+    assembled_cost: r.assembled_cost,
+    child_count: r.child_count,
+    assembly_children: r.assembly_children,
   };
 }
 
@@ -178,6 +195,7 @@ function buildRecordsQuery(params: {
   q: string;
   sortKey: string | null;
   sortDir: "asc" | "desc";
+  itemKind?: "product" | "part" | "all";
 }): string {
   const u = new URLSearchParams();
   u.set("page", String(params.page));
@@ -189,6 +207,7 @@ function buildRecordsQuery(params: {
     u.set("sort", params.sortKey);
     u.set("dir", params.sortDir);
   }
+  u.set("itemKind", params.itemKind ?? "product");
   return `/api/records?${u.toString()}`;
 }
 
@@ -531,6 +550,7 @@ export default function HistoryPage() {
           settled_at: row.settled_at,
           exit_type: row.exit_type,
           stock_status: row.stock_status,
+          parent_item_id: row.parent_item_id,
         }).label;
       case "order_id":
         return row.order_id?.trim() || "—";
@@ -1337,6 +1357,7 @@ export default function HistoryPage() {
             <h2 className="text-base font-bold text-slate-800 flex items-center gap-2">
               <DocumentIcon className="h-5 w-5 text-primary" />
               在庫一覧
+              <span className="text-xs font-normal text-slate-500">（商品のみ・パーツは別画面）</span>
             </h2>
             {!loading && !error && (
               <div className="flex flex-wrap items-center gap-2">
@@ -1711,7 +1732,15 @@ export default function HistoryPage() {
                         settled_at: row.settled_at,
                         exit_type: row.exit_type,
                         stock_status: row.stock_status,
+                        parent_item_id: row.parent_item_id,
                       });
+                      const canAssemble =
+                        !row.order_id &&
+                        !row.settled_at &&
+                        !row.exit_type &&
+                        (row.stock_status == null ||
+                          String(row.stock_status).trim() === "" ||
+                          String(row.stock_status).trim().toLowerCase() === "available");
 
                       return (
                         <tr key={row.id} className="hover:bg-slate-50/50 transition-colors">
@@ -1989,7 +2018,24 @@ export default function HistoryPage() {
                             {row.base_price > 0 ? `${row.base_price.toLocaleString()}円` : "—"}
                           </td>
                           <td className="min-w-0 px-0.5 py-2 text-right align-middle font-mono text-[10px] font-medium tabular-nums sm:text-[11px]">
-                            {row.effective_unit_price > 0 ? `${Math.round(row.effective_unit_price).toLocaleString()}円` : "—"}
+                            <div className="flex flex-col items-end gap-0.5">
+                              <span>
+                                {row.effective_unit_price > 0
+                                  ? `${Math.round(row.effective_unit_price).toLocaleString()}円`
+                                  : "—"}
+                              </span>
+                              {!isEditMode ? (
+                                <InventoryAssembleControls
+                                  parentId={row.id}
+                                  parentItemId={row.parent_item_id}
+                                  childCount={row.child_count}
+                                  assembledCost={row.assembled_cost}
+                                  ownCost={row.effective_unit_price}
+                                  canMutate={canAssemble}
+                                  onChanged={reloadCurrentPage}
+                                />
+                              ) : null}
+                            </div>
                           </td>
                           <td className="min-w-0 px-0.5 py-2 align-middle">
                             <span

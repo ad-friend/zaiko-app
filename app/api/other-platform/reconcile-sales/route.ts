@@ -10,6 +10,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { earliestPostedDateIso } from "@/lib/settlement-posted-date";
 import { isAdjustmentTransactionTypeNormalized } from "@/lib/pending-finance-group-kind";
+import { sumSubtreeCostsByRootId } from "@/lib/inventory-assembly";
 
 /** 1リクエストあたり処理する注文（amazon_order_id）数（サーバー固定。クライアントの指定は無視） */
 const RECONCILE_SALES_BATCH_ORDERS = 25;
@@ -34,6 +35,7 @@ type StockRow = {
   jan_code: string | null;
   created_at: string | null;
   order_id?: string | null;
+  parent_item_id?: number | null;
 };
 
 /** sku_mappings から JAN が一意に定まるときだけ返す（セット品は null） */
@@ -674,11 +676,12 @@ export async function POST(request: NextRequest) {
       if (wantOrderIds.length > 0) {
         const { data, error } = await supabase
           .from("inbound_items")
-          .select("id, effective_unit_price, settled_at, jan_code, created_at, order_id")
+          .select("id, effective_unit_price, settled_at, jan_code, created_at, order_id, parent_item_id")
           .in("order_id", wantOrderIds)
           .order("created_at", { ascending: true });
         if (error) throw error;
         for (const row of (data ?? []) as StockRow[]) {
+          if (row.parent_item_id != null) continue;
           const oid = String((row as any).order_id ?? "").trim();
           if (!oid) continue;
           if (!inboundByOrderId.has(oid)) inboundByOrderId.set(oid, []);
@@ -731,13 +734,18 @@ export async function POST(request: NextRequest) {
         continue;
       }
 
+      const costByRoot = await sumSubtreeCostsByRootId(
+        stocks.map((s) => ({ id: s.id, effective_unit_price: toNumber(s.effective_unit_price) }))
+      );
+      const unitCostOf = (stock: StockRow) => costByRoot.get(stock.id) ?? toNumber(stock.effective_unit_price);
+
       const txSorted = [...normalTx].sort((a, b) => a.id - b.id);
 
       /** 単一的在庫: 従来どおり全明細に同一 stock */
       if (stocks.length === 1) {
         const stock = stocks[0];
         const stockId = stock.id;
-        const unitCost = toNumber(stock.effective_unit_price);
+        const unitCost = unitCostOf(stock);
 
         const ids = txSorted.map((t) => t.id);
         const { error: updateTxError } = await supabase
@@ -815,7 +823,7 @@ export async function POST(request: NextRequest) {
         plannedUpdates.push({
           tx_id: tx.id,
           stock_id: stock.id,
-          unit_cost: toNumber(stock.effective_unit_price),
+          unit_cost: unitCostOf(stock),
         });
       }
 

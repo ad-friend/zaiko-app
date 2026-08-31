@@ -73,6 +73,14 @@ ALTER TABLE inbound_items
 ALTER TABLE inbound_items
   ADD COLUMN IF NOT EXISTS stock_status TEXT;
 
+-- パーツ組み付け（親子ツリー）。詳細は docs/migration_inbound_items_assembly.sql
+ALTER TABLE inbound_items
+  ADD COLUMN IF NOT EXISTS parent_item_id BIGINT REFERENCES inbound_items(id) ON DELETE SET NULL;
+ALTER TABLE inbound_items
+  ADD COLUMN IF NOT EXISTS item_kind TEXT NOT NULL DEFAULT 'product';
+ALTER TABLE inbound_items
+  ADD COLUMN IF NOT EXISTS part_code TEXT;
+
 -- ダッシュボードお知らせ。詳細は docs/migration_dashboard_notices.sql
 CREATE TABLE IF NOT EXISTS dashboard_notices (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -88,3 +96,13 @@ ALTER TABLE dashboard_notices ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Allow anon all on dashboard_notices"
   ON dashboard_notices FOR ALL
   USING (true) WITH CHECK (true);
+
+-- パーツマスタ。詳細は docs/migration_parts_catalog.sql
+CREATE TABLE IF NOT EXISTS parts_catalog (
+  code TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  brand TEXT,
+  note TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

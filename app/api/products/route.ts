@@ -2,6 +2,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
+import { applyUnattachedInboundFilter } from "@/lib/inventory-assembly";
 
 export type ProductRow = {
   jan_code: string;
@@ -19,17 +20,20 @@ async function countActiveStockByJan(): Promise<Map<string, number>> {
   const pageSize = 1000;
   let from = 0;
   for (;;) {
-    const { data, error } = await supabase
-      .from("inbound_items")
-      .select("jan_code")
-      .is("settled_at", null)
-      .is("exit_type", null)
-      .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
+    const { data, error } = await applyUnattachedInboundFilter(
+      supabase
+        .from("inbound_items")
+        .select("jan_code, item_kind")
+        .is("settled_at", null)
+        .is("exit_type", null)
+        .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
+    )
       .order("id", { ascending: true })
       .range(from, from + pageSize - 1);
     if (error) throw error;
     if (!data?.length) break;
     for (const row of data) {
+      if (String(row.item_kind ?? "product").toLowerCase() === "part") continue;
       const key = row.jan_code == null ? "" : String(row.jan_code).trim();
       if (!key) continue;
       counts.set(key, (counts.get(key) ?? 0) + 1);
@@ -41,13 +45,16 @@ async function countActiveStockByJan(): Promise<Map<string, number>> {
 }
 
 async function countActiveStockForJan(jan: string): Promise<number> {
-  const { count, error } = await supabase
-    .from("inbound_items")
-    .select("*", { count: "exact", head: true })
-    .eq("jan_code", jan)
-    .is("settled_at", null)
-    .is("exit_type", null)
-    .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION);
+  const { count, error } = await applyUnattachedInboundFilter(
+    supabase
+      .from("inbound_items")
+      .select("*", { count: "exact", head: true })
+      .eq("jan_code", jan)
+      .is("settled_at", null)
+      .is("exit_type", null)
+      .neq("item_kind", "part")
+      .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
+  );
   if (error) throw error;
   return count ?? 0;
 }
