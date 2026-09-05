@@ -1,22 +1,40 @@
 /**
- * 指定日時（JST 0:00）時点の棚卸用在庫集計（商品＝JAN単位）
- * - 対象: 仕入日（inbound_headers.purchase_date）が基準日より前
- * - 現在在庫数: 販売中＋引当済（決済待ち）＝ settled_at 未設定 or 基準以降
- * - 未決済在庫: 引当済（決済待ち）＝ 注文日＜基準 かつ 決済日なし／基準以降
- * - 実在庫: 現在在庫数 − 未決済在庫
- *
- * Amazon の注文日は CSV 取込時に amazon_orders.created_at へ保存された値を使用する。
- * 他販路は other_orders.order_date。
+ * 指定日 23:59:59（東京）＝翌 0:00 exclusive 時点の棚卸用在庫集計。
+ * - 存在: inbound_items.created_at < 翌0:00（月末在庫金額と同じ）
+ * - 未決済: settled_at 未設定 or 翌0:00 以降（決済日＝売上確定日のみ）
+ * - 廃棄系（exit_type / disposed）は常に除外
+ * - パーツ在庫（item_kind=part）も含める。パーツマスタは対象外
  */
 import { supabase } from "@/lib/supabase";
-import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
-import { applyUnattachedInboundFilter } from "@/lib/inventory-assembly";
+import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION, isInventoryExitExcluded } from "@/lib/inbound-stock-status";
 import { num } from "@/lib/dashboard-aggregates";
 import type { InventoryAsOfPayload, InventoryAsOfProductRow } from "@/lib/dashboard-types";
 
 const PAGE = 1000;
-const ORDER_ID_BATCH = 80;
 const JAN_NONE = "(JANなし)";
+
+const ITEM_SELECT = `
+  id,
+  order_id,
+  settled_at,
+  exit_type,
+  stock_status,
+  registered_at,
+  created_at,
+  effective_unit_price,
+  base_price,
+  jan_code,
+  brand,
+  product_name,
+  model_number,
+  condition_type,
+  item_kind,
+  parent_item_id,
+  inbound_headers (
+    supplier,
+    genre
+  )
+`;
 
 function nonempty(s: string | null | undefined): boolean {
   return s != null && String(s).trim().length > 0;
@@ -28,17 +46,38 @@ function trimOrNull(s: string | null | undefined): string | null {
   return t.length ? t : null;
 }
 
-/** YYYY-MM-DD → その日 00:00 JST の ISO（決済・注文日の比較用） */
-export function asOfStartIsoFromDate(dateYmd: string): string | null {
+function parseYmd(dateYmd: string): { y: number; mo: number; d: number; ymd: string } | null {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateYmd.trim());
   if (!m) return null;
   const y = Number(m[1]);
   const mo = Number(m[2]);
   const d = Number(m[3]);
   if (!Number.isFinite(y) || mo < 1 || mo > 12 || d < 1 || d > 31) return null;
-  const iso = new Date(`${m[1]}-${m[2]}-${m[3]}T00:00:00+09:00`).toISOString();
+  return { y, mo, d, ymd: `${m[1]}-${m[2]}-${m[3]}` };
+}
+
+/** YYYY-MM-DD → その日 00:00 JST の ISO */
+export function asOfStartIsoFromDate(dateYmd: string): string | null {
+  const parsed = parseYmd(dateYmd);
+  if (!parsed) return null;
+  const iso = new Date(`${parsed.ymd}T00:00:00+09:00`).toISOString();
   if (Number.isNaN(Date.parse(iso))) return null;
   return iso;
+}
+
+/** YYYY-MM-DD → 翌日 00:00 JST の ISO（指定日 23:59:59 時点の exclusive 境界） */
+export function asOfEndExclusiveIsoFromDate(dateYmd: string): string | null {
+  const startIso = asOfStartIsoFromDate(dateYmd);
+  if (!startIso) return null;
+  const start = new Date(startIso);
+  const ymdCheck = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(start);
+  if (ymdCheck !== dateYmd.trim()) return null;
+  return new Date(start.getTime() + 24 * 60 * 60 * 1000).toISOString();
 }
 
 export function todayYmdTokyo(): string {
@@ -50,87 +89,97 @@ export function todayYmdTokyo(): string {
   }).format(new Date());
 }
 
-type InboundScanRow = {
+export type UnsettledAsOfItem = {
   id: number;
   order_id: string | null;
   settled_at: string | null;
-  exit_type: string | null;
   registered_at: string | null;
+  created_at: string | null;
   effective_unit_price: number | null;
+  base_price: number | null;
   jan_code: string | null;
   brand: string | null;
   product_name: string | null;
   model_number: string | null;
+  condition_type: string | null;
+  item_kind: string | null;
+  parent_item_id: number | null;
+  supplier: string | null;
+  genre: string | null;
 };
 
-function isUnsettledAsOf(row: InboundScanRow, asOfIso: string): boolean {
+function headerFromJoin(raw: unknown): { supplier: string | null; genre: string | null } {
+  const h = Array.isArray(raw) ? raw[0] : raw;
+  if (!h || typeof h !== "object") return { supplier: null, genre: null };
+  const rec = h as { supplier?: unknown; genre?: unknown };
+  return {
+    supplier: rec.supplier != null ? String(rec.supplier) : null,
+    genre: rec.genre != null ? String(rec.genre) : null,
+  };
+}
+
+function mapScanRow(row: Record<string, unknown>): UnsettledAsOfItem {
+  const header = headerFromJoin(row.inbound_headers);
+  return {
+    id: Number(row.id),
+    order_id: nonempty(row.order_id as string | null) ? String(row.order_id).trim() : null,
+    settled_at: row.settled_at != null ? String(row.settled_at) : null,
+    registered_at: row.registered_at != null ? String(row.registered_at) : null,
+    created_at: row.created_at != null ? String(row.created_at) : null,
+    effective_unit_price: row.effective_unit_price != null ? Number(row.effective_unit_price) : null,
+    base_price: row.base_price != null ? Number(row.base_price) : null,
+    jan_code: trimOrNull(row.jan_code as string | null),
+    brand: trimOrNull(row.brand as string | null),
+    product_name: trimOrNull(row.product_name as string | null),
+    model_number: trimOrNull(row.model_number as string | null),
+    condition_type: trimOrNull(row.condition_type as string | null),
+    item_kind: trimOrNull(row.item_kind as string | null) ?? "product",
+    parent_item_id: row.parent_item_id != null ? Number(row.parent_item_id) : null,
+    supplier: header.supplier,
+    genre: header.genre,
+  };
+}
+
+function isUnsettledAsOf(row: { settled_at: string | null }, endExclusiveIso: string): boolean {
   const settledAt = row.settled_at;
-  if (settledAt != null && settledAt < asOfIso) return false;
-  const exitType = row.exit_type;
-  const registeredAt = row.registered_at;
-  if (exitType != null && registeredAt != null && registeredAt < asOfIso) return false;
-  if (exitType != null && registeredAt == null) return false;
+  if (settledAt != null && settledAt < endExclusiveIso) return false;
   return true;
 }
 
-/** 仕入日が基準日より前のヘッダ ID を全件取得 */
-async function loadHeaderIdsBeforePurchaseDate(asOfDateYmd: string): Promise<number[]> {
-  const headerIds: number[] = [];
-  let hFrom = 0;
+/** 月末在庫金額と同じ行集合（未決済・廃棄除外・パーツ含む） */
+export async function scanUnsettledItemsAsOf(asOfDateYmd: string): Promise<{
+  asOfDate: string;
+  endExclusiveIso: string;
+  rows: UnsettledAsOfItem[];
+}> {
+  const endExclusiveIso = asOfEndExclusiveIsoFromDate(asOfDateYmd);
+  if (!endExclusiveIso) {
+    throw new Error("asOf は YYYY-MM-DD 形式で指定してください。");
+  }
+
+  const rows: UnsettledAsOfItem[] = [];
+  let from = 0;
   for (;;) {
     const { data, error } = await supabase
-      .from("inbound_headers")
-      .select("id")
-      .lt("purchase_date", asOfDateYmd)
+      .from("inbound_items")
+      .select(ITEM_SELECT)
+      .lt("created_at", endExclusiveIso)
+      .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
       .order("id", { ascending: true })
-      .range(hFrom, hFrom + PAGE - 1);
+      .range(from, from + PAGE - 1);
     if (error) throw error;
     if (!data?.length) break;
-    for (const h of data) {
-      const hid = Number(h.id);
-      if (Number.isFinite(hid)) headerIds.push(hid);
+    for (const raw of data as Record<string, unknown>[]) {
+      if (isInventoryExitExcluded(raw)) continue;
+      const row = mapScanRow(raw);
+      if (!isUnsettledAsOf(row, endExclusiveIso)) continue;
+      rows.push(row);
     }
     if (data.length < PAGE) break;
-    hFrom += PAGE;
-  }
-  return headerIds;
-}
-
-async function loadOrderDateMap(orderIds: string[]): Promise<Map<string, string>> {
-  const map = new Map<string, string>();
-  if (!orderIds.length) return map;
-
-  for (let i = 0; i < orderIds.length; i += ORDER_ID_BATCH) {
-    const batch = orderIds.slice(i, i + ORDER_ID_BATCH);
-
-    const { data: amazonRows, error: amazonErr } = await supabase
-      .from("amazon_orders")
-      .select("amazon_order_id, created_at")
-      .in("amazon_order_id", batch);
-    if (amazonErr) throw amazonErr;
-    for (const r of amazonRows ?? []) {
-      const oid = String(r.amazon_order_id ?? "").trim();
-      const ca = r.created_at != null ? String(r.created_at) : "";
-      if (!oid || !ca) continue;
-      const prev = map.get(oid);
-      if (!prev || ca < prev) map.set(oid, ca);
-    }
-
-    const { data: otherRows, error: otherErr } = await supabase
-      .from("other_orders")
-      .select("order_id, order_date")
-      .in("order_id", batch);
-    if (otherErr) throw otherErr;
-    for (const r of otherRows ?? []) {
-      const oid = String(r.order_id ?? "").trim();
-      const od = r.order_date != null ? String(r.order_date) : "";
-      if (!oid || !od) continue;
-      const prev = map.get(oid);
-      if (!prev || od < prev) map.set(oid, od);
-    }
+    from += PAGE;
   }
 
-  return map;
+  return { asOfDate: asOfDateYmd.trim(), endExclusiveIso, rows };
 }
 
 type ProductAgg = {
@@ -148,54 +197,15 @@ function preferNonempty(current: string | null, next: string | null | undefined)
 }
 
 export async function aggregateInventoryAsOf(asOfDateYmd: string): Promise<InventoryAsOfPayload> {
-  const asOfIso = asOfStartIsoFromDate(asOfDateYmd);
-  if (!asOfIso) {
-    throw new Error("asOf は YYYY-MM-DD 形式で指定してください。");
-  }
-
-  const headerIds = await loadHeaderIdsBeforePurchaseDate(asOfDateYmd);
-  const unsettledRows: InboundScanRow[] = [];
-
-  for (let i = 0; i < headerIds.length; i += ORDER_ID_BATCH) {
-    const chunk = headerIds.slice(i, i + ORDER_ID_BATCH);
-    let from = 0;
-    for (;;) {
-      const { data, error } = await supabase
-        .from("inbound_items")
-        .select(
-          "id, order_id, settled_at, exit_type, registered_at, effective_unit_price, jan_code, brand, product_name, model_number"
-        )
-        .in("header_id", chunk)
-        .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
-        .order("id", { ascending: true })
-        .range(from, from + PAGE - 1);
-      if (error) throw error;
-      if (!data?.length) break;
-      for (const row of data as InboundScanRow[]) {
-        if (isUnsettledAsOf(row, asOfIso)) unsettledRows.push(row);
-      }
-      if (data.length < PAGE) break;
-      from += PAGE;
-    }
-  }
-
-  const orderIds = [
-    ...new Set(
-      unsettledRows
-        .map((r) => (nonempty(r.order_id) ? String(r.order_id).trim() : ""))
-        .filter(Boolean)
-    ),
-  ];
-  const orderDateById = await loadOrderDateMap(orderIds);
+  const { asOfDate, endExclusiveIso, rows } = await scanUnsettledItemsAsOf(asOfDateYmd);
 
   let unsettledCount = 0;
   let unsettledAmount = 0;
   let allocatedCount = 0;
   let allocatedAmount = 0;
-  let allocatedOrderDateUnknown = 0;
   const byJan = new Map<string, ProductAgg>();
 
-  for (const row of unsettledRows) {
+  for (const row of rows) {
     unsettledCount += 1;
     unsettledAmount += num(row.effective_unit_price);
 
@@ -218,16 +228,7 @@ export async function aggregateInventoryAsOf(asOfDateYmd: string): Promise<Inven
     }
     agg.currentCount += 1;
 
-    const oid = nonempty(row.order_id) ? String(row.order_id).trim() : "";
-    if (!oid) continue;
-
-    const orderDate = orderDateById.get(oid) ?? null;
-    if (!orderDate) {
-      allocatedOrderDateUnknown += 1;
-      continue;
-    }
-
-    if (orderDate < asOfIso) {
+    if (nonempty(row.order_id)) {
       allocatedCount += 1;
       allocatedAmount += num(row.effective_unit_price);
       agg.pendingCount += 1;
@@ -250,16 +251,112 @@ export async function aggregateInventoryAsOf(asOfDateYmd: string): Promise<Inven
       return a.jan_code.localeCompare(b.jan_code, "ja");
     });
 
-  const onSaleCount = unsettledCount - allocatedCount - allocatedOrderDateUnknown;
-
+  const displayDate = asOfDate.replace(/-/g, "/");
   return {
-    asOfDate: asOfDateYmd,
-    asOfIso,
-    label: `${asOfDateYmd.replace(/-/g, "/")} 0:00（東京）時点（仕入日基準）`,
+    asOfDate,
+    asOfIso: endExclusiveIso,
+    label: `${displayDate} 23:59:59（東京）時点（決済日基準）`,
     unsettled: { count: unsettledCount, totalAmount: unsettledAmount },
     allocatedPending: { count: allocatedCount, totalAmount: allocatedAmount },
-    onSale: { count: Math.max(0, onSaleCount) },
-    allocatedOrderDateUnknown,
+    onSale: { count: Math.max(0, unsettledCount - allocatedCount) },
     productRows,
+  };
+}
+
+function conditionLabel(c: string | null | undefined): string {
+  if (c === "new") return "新品";
+  if (c === "used") return "中古";
+  return c ?? "";
+}
+
+function progressLabel(orderId: string | null): string {
+  return nonempty(orderId) ? "引当済（決済待ち）" : "販売中";
+}
+
+function formatRegisteredDate(iso: string | null, fallbackIso: string | null): string {
+  const src = iso || fallbackIso;
+  if (!src) return "";
+  return new Date(src)
+    .toLocaleDateString("ja-JP", {
+      timeZone: "Asia/Tokyo",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    })
+    .replace(/\//g, "-");
+}
+
+function escapeCsv(value: unknown): string {
+  const s = value == null ? "" : String(value);
+  if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+async function loadSupplierNameByKana(): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  const { data, error } = await supabase.from("suppliers").select("name, kana");
+  if (error) {
+    if (error.code === "42P01" || error.message?.includes("does not exist")) return map;
+    throw error;
+  }
+  for (const row of data ?? []) {
+    const kana = String(row.kana ?? "").trim();
+    const name = String(row.name ?? "").trim();
+    if (kana && name) map.set(kana, name);
+  }
+  return map;
+}
+
+function resolveSupplierName(stored: string | null, byKana: Map<string, string>): string {
+  if (!stored || !stored.trim()) return "—";
+  return byKana.get(stored) ?? stored;
+}
+
+export async function buildUnsettledItemsCsv(asOfDateYmd: string): Promise<{
+  filename: string;
+  csv: string;
+}> {
+  const { asOfDate, rows } = await scanUnsettledItemsAsOf(asOfDateYmd);
+  const supplierByKana = await loadSupplierNameByKana();
+  const header = [
+    "id",
+    "jan_code",
+    "brand",
+    "product_name",
+    "model_number",
+    "supplier",
+    "genre",
+    "base_price",
+    "effective_unit_price",
+    "created_at",
+    "registered_at",
+    "status",
+    "progress",
+    "item_kind",
+  ].join(",");
+  const lines = rows.map((r) =>
+    [
+      r.id,
+      r.jan_code ?? "",
+      r.brand ?? "",
+      r.product_name ?? "",
+      r.model_number ?? "",
+      resolveSupplierName(r.supplier, supplierByKana),
+      r.genre ?? "",
+      r.base_price ?? "",
+      r.effective_unit_price ?? "",
+      r.created_at ?? "",
+      formatRegisteredDate(r.registered_at, r.created_at),
+      conditionLabel(r.condition_type),
+      progressLabel(r.order_id),
+      r.item_kind ?? "product",
+    ]
+      .map(escapeCsv)
+      .join(",")
+  );
+  const csv = "\uFEFF" + [header, ...lines].join("\r\n");
+  return {
+    filename: `inventory_as_of_items_${asOfDate.replace(/-/g, "")}.csv`,
+    csv,
   };
 }

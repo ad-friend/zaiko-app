@@ -69,6 +69,7 @@ export default function DashboardPage() {
   const [asOfData, setAsOfData] = useState<InventoryAsOfPayload | null>(null);
   const [asOfLoading, setAsOfLoading] = useState(false);
   const [asOfError, setAsOfError] = useState<string | null>(null);
+  const [itemCsvLoading, setItemCsvLoading] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -194,6 +195,33 @@ export default function DashboardPage() {
     a.download = `inventory_as_of_${asOfData.asOfDate.replace(/-/g, "")}.csv`;
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  async function downloadAsOfItemsCsv() {
+    if (!asOfDate) {
+      alert("基準日を指定してください。");
+      return;
+    }
+    setItemCsvLoading(true);
+    try {
+      const params = new URLSearchParams({ asOf: asOfDate });
+      const res = await fetch(`/api/dashboard/inventory-as-of/items.csv?${params}`);
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(j.error || `明細CSVの取得に失敗しました (${res.status})`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `inventory_as_of_items_${asOfDate.replace(/-/g, "")}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "明細CSVの取得に失敗しました");
+    } finally {
+      setItemCsvLoading(false);
+    }
   }
 
   return (
@@ -494,12 +522,10 @@ export default function DashboardPage() {
                 棚卸レポート（時点在庫）
               </h2>
               <p className="mb-4 text-sm text-slate-600">
-                指定日の <span className="font-medium text-slate-800">0:00（東京）</span> 時点で集計します。
-                対象は <span className="font-medium text-slate-800">仕入日が基準日より前</span> の在庫です。
-                商品（JAN）ごとに現在在庫数（販売中＋決済待ち）・未決済在庫（引当済）・実在庫を CSV 出力できます。
-                決済日が空欄のものは未決済として扱います。Amazon の注文日は CSV 取込時の注文日（
-                <span className="font-mono text-xs">amazon_orders.created_at</span>
-                ）を使用します。
+                指定日の <span className="font-medium text-slate-800">23:59:59（東京）</span> 時点で集計します。
+                未決済かどうかは <span className="font-medium text-slate-800">決済日（売上確定日）</span> だけで判定します。
+                破損・社内使用などの廃棄系は含めません。商品と入荷済みパーツ在庫が対象です。
+                末日を指定すると、明細CSVの原価合計は月次の月末在庫金額と一致します。
               </p>
 
               <form
@@ -531,7 +557,16 @@ export default function DashboardPage() {
                   className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:opacity-50"
                 >
                   <Download className="h-4 w-4" />
-                  CSVダウンロード
+                  JAN集計CSV
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void downloadAsOfItemsCsv()}
+                  disabled={asOfLoading || itemCsvLoading || !asOfDate}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:opacity-50"
+                >
+                  {itemCsvLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                  明細CSV（在庫一覧形式）
                 </button>
               </form>
 
@@ -569,26 +604,15 @@ export default function DashboardPage() {
                       <p className={cardTitle}>引当済（決済待ち）</p>
                       <p className={cardValue}>{formatCount(asOfData.allocatedPending.count)}</p>
                       <p className={cardSub}>
-                        注文日＜基準 かつ 決済日なし／基準以降 · 金額{" "}
-                        {formatYen(asOfData.allocatedPending.totalAmount)}
+                        未決済かつ注文番号あり · 金額 {formatYen(asOfData.allocatedPending.totalAmount)}
                       </p>
                     </div>
                     <div className={cardBase}>
                       <p className={cardTitle}>販売中（内訳）</p>
                       <p className={cardValue}>{formatCount(asOfData.onSale.count)}</p>
-                      <p className={cardSub}>未決済 − 引当済 − 注文日不明</p>
+                      <p className={cardSub}>未決済 − 引当済</p>
                     </div>
                   </div>
-
-                  {asOfData.allocatedOrderDateUnknown > 0 && (
-                    <p className="mb-4 text-sm text-amber-800">
-                      注文番号はあるが注文日が取得できない在庫が{" "}
-                      <span className="font-semibold">
-                        {formatCountCompact(asOfData.allocatedOrderDateUnknown)}
-                      </span>{" "}
-                      件あります（未決済合計には含み、引当済・CSVの未決済在庫には含めていません）。
-                    </p>
-                  )}
 
                   {asOfData.productRows.length === 0 && !asOfLoading && (
                     <p className="rounded-xl border border-slate-200/80 bg-white px-4 py-6 text-center text-sm text-slate-500">

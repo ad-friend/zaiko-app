@@ -65,15 +65,14 @@ export type InventoryAsOfProductRow = {
 /** GET /api/dashboard/inventory-as-of */
 export type InventoryAsOfPayload = {
   asOfDate: string;
+  /** 翌 0:00 JST の exclusive 境界（指定日 23:59:59 時点の比較用） */
   asOfIso: string;
   label: string;
-  /** 販売中 + 引当済（決済待ち）※注文日不明の引当も含む */
+  /** 販売中 + 引当済（決済待ち） */
   unsettled: { count: number; totalAmount: number };
-  /** 注文日 < 基準 かつ 決済日なし or 決済日 >= 基準 */
+  /** order_id あり（決済日が基準以降または未設定） */
   allocatedPending: { count: number; totalAmount: number };
-  /** 未決済から引当済・注文日不明を除いた販売中相当 */
+  /** 未決済から引当済を除いた販売中 */
   onSale: { count: number };
-  /** order_id はあるが注文日が取れない件数 */
-  allocatedOrderDateUnknown: number;
   productRows: InventoryAsOfProductRow[];
 };

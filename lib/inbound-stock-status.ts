@@ -36,3 +36,12 @@ export const INBOUND_FILTER_SALABLE_FOR_ALLOCATION = "stock_status.is.null,stock
  * 引当クエリでは `.is("parent_item_id", null)` または
  * `applyUnattachedInboundFilter`（lib/inventory-assembly）を併用すること。
  */
+
+/** 在庫一覧でグレーアウトする廃棄・イレギュラー行（集計時に読み飛ばす） */
+export function isInventoryExitExcluded(row: {
+  exit_type?: string | null;
+  stock_status?: string | null;
+}): boolean {
+  if (String(row.exit_type ?? "").trim().length > 0) return true;
+  return String(row.stock_status ?? "").trim().toLowerCase() === STOCK_STATUS_DISPOSED;
+}

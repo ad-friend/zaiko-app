@@ -2,7 +2,7 @@
  * 経営ダッシュボード用集計（Asia/Tokyo 暦月）
  */
 import { supabase } from "@/lib/supabase";
-import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION } from "@/lib/inbound-stock-status";
+import { INBOUND_FILTER_SALABLE_FOR_ALLOCATION, isInventoryExitExcluded } from "@/lib/inbound-stock-status";
 import { applyUnattachedInboundFilter } from "@/lib/inventory-assembly";
 import { isSalesPrincipalRow, isSalesTaxRow, type PrincipalTaxQuadRowLike } from "@/lib/amazon-principal-tax-quad";
 import type { DashboardPeriod, MonthlyDashboardRow } from "@/lib/dashboard-types";
@@ -131,7 +131,7 @@ export async function aggregateInventoryAtMonthEnd(period: DashboardPeriod): Pro
   for (;;) {
     const { data, error } = await supabase
       .from("inbound_items")
-      .select("effective_unit_price, settled_at, exit_type, registered_at, stock_status, parent_item_id")
+      .select("effective_unit_price, settled_at, exit_type, stock_status, parent_item_id")
       .lt("created_at", endExclusiveIso)
       .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
       .order("id", { ascending: true })
@@ -141,9 +141,7 @@ export async function aggregateInventoryAtMonthEnd(period: DashboardPeriod): Pro
     for (const row of data) {
       const settledAt = row.settled_at as string | null;
       if (settledAt != null && settledAt < endExclusiveIso) continue;
-      const exitType = row.exit_type as string | null;
-      const registeredAt = row.registered_at as string | null;
-      if (exitType != null && registeredAt != null && registeredAt < endExclusiveIso) continue;
+      if (isInventoryExitExcluded(row)) continue;
       totalAmount += num(row.effective_unit_price);
       if (row.parent_item_id == null) count += 1;
     }

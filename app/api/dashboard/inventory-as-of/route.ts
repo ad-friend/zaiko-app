@@ -1,11 +1,11 @@
 /**
- * 指定日 0:00（東京）時点の棚卸用在庫レポート
+ * 指定日 23:59:59（東京）時点の棚卸用在庫レポート
  * GET /api/dashboard/inventory-as-of?asOf=YYYY-MM-DD
  */
 import { NextRequest, NextResponse } from "next/server";
 import {
   aggregateInventoryAsOf,
-  asOfStartIsoFromDate,
+  asOfEndExclusiveIsoFromDate,
   todayYmdTokyo,
 } from "@/lib/inventory-as-of-report";
 
@@ -14,7 +14,7 @@ export async function GET(request: NextRequest) {
     const { searchParams } = request.nextUrl;
     const asOf = searchParams.get("asOf")?.trim() || todayYmdTokyo();
 
-    if (!asOfStartIsoFromDate(asOf)) {
+    if (!asOfEndExclusiveIsoFromDate(asOf)) {
       return NextResponse.json({ error: "asOf は YYYY-MM-DD 形式で指定してください。" }, { status: 400 });
     }
 
