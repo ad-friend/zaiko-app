@@ -443,12 +443,14 @@ export default function ManualFinanceProcessModal({ isOpen, onClose, data, onSuc
       setOrderRescueError(null);
       return;
     }
+    const oid = data.amazon_order_id?.trim();
+    if (!oid) return;
     setOrderRescueExtra([]);
     setOrderRescueQuery("");
     setOrderRescueError(null);
     setLoadingCandidates(true);
     const params = new URLSearchParams();
-    params.set("amazon_order_id", data.amazon_order_id);
+    params.set("amazon_order_id", oid);
     if (data.sku) params.set("sku", data.sku);
     fetch(`/api/amazon/candidate-stocks?${params}`)
       .then((res) => (res.ok ? res.json() : []))
