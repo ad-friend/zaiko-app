@@ -145,6 +145,8 @@ function normalizeCondition(raw: string): string {
 export type ParseOtherPlatformCsvResult = {
   orders: OtherPlatformOrderRow[];
   salesRows: OtherPlatformSalesUpsertRow[];
+  /** amazon_event_hash → CSV 行番号（ヘッダー行を 1 とする） */
+  salesRowCsvLines: Map<string, number[]>;
   rowErrors: string[];
 };
 
@@ -188,6 +190,7 @@ export function parseOtherPlatformCsv(csvText: string): ParseOtherPlatformCsvRes
 
   const orders: OtherPlatformOrderRow[] = [];
   const salesRows: OtherPlatformSalesUpsertRow[] = [];
+  const salesRowCsvLines = new Map<string, number[]>();
   const rowErrors: string[] = [];
 
   for (let i = 1; i < lines.length; i++) {
@@ -255,6 +258,9 @@ export function parseOtherPlatformCsv(csvText: string): ParseOtherPlatformCsvRes
         dedupe_slot: 0,
       };
       salesRows.push(attachSalesTransactionIdempotency(base));
+      const lineList = salesRowCsvLines.get(base.amazon_event_hash) ?? [];
+      lineList.push(i + 1);
+      salesRowCsvLines.set(base.amazon_event_hash, lineList);
     }
 
     if (!hasAnyAmount) {
@@ -277,5 +283,5 @@ export function parseOtherPlatformCsv(csvText: string): ParseOtherPlatformCsvRes
     });
   }
 
-  return { orders, salesRows, rowErrors };
+  return { orders, salesRows, salesRowCsvLines, rowErrors };
 }

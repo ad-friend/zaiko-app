@@ -8,7 +8,7 @@ import {
 import { dedupeUpsertChunkByIdempotencyKey } from "@/lib/sales-transaction-idempotency";
 import { formatUnknownError, supabaseStepError, type ApiErrorPayload } from "@/lib/format-api-error";
 import { otherOrderLineIdentity, otherOrderLineKey } from "@/lib/other-order-line-key";
-import type { OtherPlatformOrderRow } from "@/lib/other-platform-import-engine";
+import type { OtherPlatformOrderRow, OtherPlatformSalesUpsertRow } from "@/lib/other-platform-import-engine";
 
 function errorResponse(payload: ApiErrorPayload, status: number) {
   return NextResponse.json({ ok: false, ...payload }, { status });
@@ -34,6 +34,62 @@ async function findExistingOtherOrder(o: OtherPlatformOrderRow) {
   }
 
   return q.maybeSingle();
+}
+
+const AMOUNT_DESCRIPTION_LABELS: Record<string, string> = {
+  Principal: "商品売上",
+  Tax: "消費税",
+  Shipping: "送料",
+  Commission: "手数料",
+  Other: "その他手数料",
+};
+
+function formatJstDate(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return String(iso);
+  return d.toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo" });
+}
+
+function describeSalesLine(r: {
+  amazon_order_id: string | null;
+  sku: string | null;
+  amount_description: string | null;
+  amount: number | string;
+  posted_date: string | null;
+}): string {
+  const kind = AMOUNT_DESCRIPTION_LABELS[r.amount_description ?? ""] ?? r.amount_description ?? "—";
+  return `注文番号 ${r.amazon_order_id ?? "—"} / ${kind} ${Number(r.amount)}円（SKU: ${r.sku || "—"}, 決済日: ${formatJstDate(r.posted_date)}）`;
+}
+
+/** amazon_event_hash の一意制約違反（23505）なら、CSV の該当行と DB の既存行を説明する */
+async function describeDuplicateEventHash(
+  error: { code?: string; details?: string },
+  chunk: OtherPlatformSalesUpsertRow[],
+  csvLines: Map<string, number[]>
+): Promise<string[]> {
+  if (error.code !== "23505") return [];
+  const hash = error.details?.match(/Key \(amazon_event_hash\)=\(([0-9a-f]+)\)/)?.[1];
+  if (!hash) return [];
+
+  const messages: string[] = [];
+  const lines = csvLines.get(hash) ?? [];
+  const csvRow = chunk.find((r) => r.amazon_event_hash === hash);
+  if (csvRow) {
+    const lineLabel = lines.length > 0 ? `行 ${lines.join(", ")}` : "CSV";
+    messages.push(`${lineLabel}: ${describeSalesLine(csvRow)}`);
+  }
+
+  const { data: existing } = await supabase
+    .from("sales_transactions")
+    .select("amazon_order_id, sku, amount_description, amount, posted_date")
+    .eq("amazon_event_hash", hash)
+    .limit(1)
+    .maybeSingle();
+  if (existing) {
+    messages.push(`既存データ: ${describeSalesLine(existing)}（同じ注文・販路・種別・金額の売上が登録済み）`);
+  }
+  return messages;
 }
 
 function normalizeOrderRow(o: OtherPlatformOrderRow): OtherPlatformOrderRow {
@@ -139,10 +195,10 @@ export async function POST(request: NextRequest) {
         .upsert(chunk, { onConflict: "idempotency_key", ignoreDuplicates: false })
         .select("id");
       if (error) {
-        return errorResponse(
-          supabaseStepError(`売上明細の保存（チャンク ${Math.floor(i / UPSERT_CHUNK) + 1}）`, error),
-          500
-        );
+        const payload = supabaseStepError(`売上明細の保存（チャンク ${Math.floor(i / UPSERT_CHUNK) + 1}）`, error);
+        const duplicateRowErrors = await describeDuplicateEventHash(error, chunk, parsed.salesRowCsvLines);
+        if (duplicateRowErrors.length > 0) payload.rowErrors = duplicateRowErrors;
+        return errorResponse(payload, 500);
       }
       salesUpserted += data?.length ?? chunk.length;
     }
