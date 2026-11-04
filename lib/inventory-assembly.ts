@@ -285,9 +285,47 @@ export async function disassembleItem(
   return { ok: true, child: { ...child, parent_item_id: null }, previousParentId };
 }
 
+/** 選んだ在庫が別の注文に先に引き当てられていた */
+export class InboundAlreadyClaimedError extends Error {
+  constructor(public readonly inboundIds: number[]) {
+    super(`在庫 id=${inboundIds.join(", ")} は他の注文に引き当てられました。候補を更新して選び直してください。`);
+    this.name = "InboundAlreadyClaimedError";
+  }
+}
+
+/** 同時に確定されても後勝ちで上書きしないよう、空きかこの注文の在庫だけを書き換える */
+async function claimRootsForOrder(rootIds: number[], oid: string, client: SupabaseClient): Promise<void> {
+  const roots = [...new Set(rootIds.filter((n) => Number.isInteger(n) && n > 0))];
+  if (!roots.length) return;
+  const { data: before, error: readErr } = await client.from("inbound_items").select("id, order_id").in("id", roots);
+  if (readErr) throw new Error(readErr.message);
+  const wasFree = new Set(
+    (before ?? []).filter((r) => !String(r.order_id ?? "").trim()).map((r) => Number(r.id))
+  );
+
+  const { data: claimed, error } = await client
+    .from("inbound_items")
+    .update({ order_id: oid })
+    .in("id", roots)
+    .or(`order_id.is.null,order_id.eq."${oid}"`)
+    .select("id");
+  if (error) throw new Error(error.message);
+
+  const claimedIds = new Set((claimed ?? []).map((r) => Number(r.id)));
+  const missing = roots.filter((id) => !claimedIds.has(id));
+  if (!missing.length) return;
+
+  const revert = [...claimedIds].filter((id) => wasFree.has(id));
+  if (revert.length) {
+    await client.from("inbound_items").update({ order_id: null }).in("id", revert).eq("order_id", oid);
+  }
+  throw new InboundAlreadyClaimedError(missing);
+}
+
 /**
  * ルート在庫に order_id を付け、子孫にも同じ order_id を伝播する。
  * （本消込の .eq('order_id') 更新・解放が子孫にも効くようにする）
+ * ルートが別の注文に付いていれば InboundAlreadyClaimedError を投げ、何も付けない。
  */
 export async function assignOrderIdToRootsAndDescendants(
   rootIds: number[],
@@ -296,6 +334,7 @@ export async function assignOrderIdToRootsAndDescendants(
 ): Promise<number[]> {
   const oid = String(orderId ?? "").trim();
   if (!oid) throw new Error("order_id が空です。");
+  await claimRootsForOrder(rootIds, oid, client);
   const allIds = await expandWithDescendantIds(rootIds, client);
   if (!allIds.length) return [];
   const chunkSize = 200;

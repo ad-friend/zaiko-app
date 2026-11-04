@@ -267,6 +267,14 @@ export default function AmazonReconcileManager() {
     await Promise.all([fetchManualOrders(), fetchInconsistentOrders()]);
   }, [fetchManualOrders, fetchInconsistentOrders]);
 
+  /** 確定で埋まった在庫IDを他カードの候補から消すため、全カードの候補を読み直す */
+  const [stockRefreshKey, setStockRefreshKey] = useState(0);
+  const bumpStockRefresh = useCallback(() => setStockRefreshKey((k) => k + 1), []);
+  const handleManualConfirmed = useCallback(async () => {
+    bumpStockRefresh();
+    await refreshStep3Orders();
+  }, [bumpStockRefresh, refreshStep3Orders]);
+
   useEffect(() => {
     void refreshStep3Orders();
   }, [refreshStep3Orders]);
@@ -872,7 +880,9 @@ export default function AmazonReconcileManager() {
                   <ManualOrderCard
                     key={order.id}
                     order={order}
-                    onConfirmed={refreshStep3Orders}
+                    onConfirmed={handleManualConfirmed}
+                    onStockConflict={bumpStockRefresh}
+                    stockRefreshKey={stockRefreshKey}
                     onCandidatesLoaded={handleCandidatesLoaded}
                     onConditionUpdated={handleOrderConditionUpdated}
                     onDeleted={handleOrderDeleted}
@@ -1193,9 +1203,13 @@ export default function AmazonReconcileManager() {
   );
 }
 
+const CANDIDATES_FETCH_ERROR = "候補の取得に失敗しました";
+
 function ManualOrderCard({
   order,
   onConfirmed,
+  onStockConflict,
+  stockRefreshKey = 0,
   onCandidatesLoaded,
   onConditionUpdated,
   onDeleted,
@@ -1203,6 +1217,8 @@ function ManualOrderCard({
 }: {
   order: AmazonOrder;
   onConfirmed: () => void;
+  onStockConflict?: () => void;
+  stockRefreshKey?: number;
   onCandidatesLoaded?: (orderKey: string, candidateCount: number) => void;
   onConditionUpdated?: (rowId: string, condition_id: string) => void;
   onDeleted?: (rowId: string) => void;
@@ -1353,7 +1369,7 @@ function ManualOrderCard({
   useEffect(() => {
     let cancelled = false;
     setLoadingCandidates(true);
-    setError(null);
+    setError((prev) => (prev === CANDIDATES_FETCH_ERROR ? null : prev));
     const params = new URLSearchParams({ amazon_order_id: order.amazon_order_id });
     if (order.sku) params.set("sku", order.sku);
     const rowIdForCandidates = resolveOrderRowIdString(order);
@@ -1374,7 +1390,7 @@ function ManualOrderCard({
       })
       .catch(() => {
         if (!cancelled) {
-          setError("候補の取得に失敗しました");
+          setError(CANDIDATES_FETCH_ERROR);
           onCandidatesLoaded?.(orderStableKey(order), 0);
         }
       })
@@ -1384,7 +1400,17 @@ function ManualOrderCard({
     return () => {
       cancelled = true;
     };
-  }, [order.amazon_order_id, order.sku, order.id, onCandidatesLoaded, candidatesRefreshKey]);
+  }, [order.amazon_order_id, order.sku, order.id, onCandidatesLoaded, candidatesRefreshKey, stockRefreshKey]);
+
+  useEffect(() => {
+    if (loadingCandidates) return;
+    const usable = new Set<number>(mergedCandidates.map((c) => c.id));
+    for (const list of Object.values(rescueExtraBySlot)) for (const c of list) usable.add(c.id);
+    if (selectedId != null && !usable.has(selectedId)) setSelectedId(null);
+    if (multiSelected.some((id) => id != null && !usable.has(id))) {
+      setMultiSelected((prev) => prev.map((id) => (id != null && !usable.has(id) ? null : id)));
+    }
+  }, [loadingCandidates, mergedCandidates, rescueExtraBySlot, selectedId, multiSelected]);
 
   const patchCondition = async (next: "New" | "Used") => {
     if (conditionSaving) return;
@@ -1566,6 +1592,13 @@ function ManualOrderCard({
       const data = json as any;
       if (!res.ok) {
         const msg = data && typeof data.error === "string" ? data.error : raw.slice(0, 300);
+        if (res.status === 409) {
+          setSelectedId(null);
+          setMultiSelected((prev) => prev.map(() => null));
+          setRescueExtra([]);
+          setRescueExtraBySlot({});
+          onStockConflict?.();
+        }
         throw new Error(msg || "確定に失敗しました");
       }
       onConfirmed();

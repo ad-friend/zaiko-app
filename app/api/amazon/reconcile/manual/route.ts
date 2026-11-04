@@ -21,7 +21,11 @@ import {
   validateSetManualPicks,
   validateSingleJanMultiQtyPicks,
 } from "@/lib/amazon-manual-reconcile-helpers";
-import { assignOrderIdToRootsAndDescendants, expandWithDescendantIds } from "@/lib/inventory-assembly";
+import {
+  assignOrderIdToRootsAndDescendants,
+  expandWithDescendantIds,
+  InboundAlreadyClaimedError,
+} from "@/lib/inventory-assembly";
 
 type AmazonOrderRowForManual = {
   id: string;
@@ -220,6 +224,18 @@ export async function POST(request: NextRequest) {
       janMismatch = v.janMismatch;
     }
 
+    const { data: alreadyLinked, error: alreadyErr } = await supabase
+      .from("inbound_items")
+      .select("id, settled_at")
+      .eq("order_id", amazonOrderId)
+      .is("parent_item_id", null);
+    if (alreadyErr) throw alreadyErr;
+    const keep = new Set(inboundIds);
+    const staleIds = (alreadyLinked ?? [])
+      .filter((row) => !row.settled_at && !keep.has(Number(row.id)))
+      .map((row) => Number(row.id));
+    if (staleIds.length > 0) await unlinkInboundsFromOrder(staleIds, amazonOrderId);
+
     const linked: number[] = [];
     try {
       const allLinked = await assignOrderIdToRootsAndDescendants(inboundIds, amazonOrderId);
@@ -244,7 +260,15 @@ export async function POST(request: NextRequest) {
       throw updateOrderErr;
     }
     if (!updatedRows?.length) {
-      await unlinkInboundsFromOrder(inboundIds, amazonOrderId);
+      const { data: nowRow } = await supabase
+        .from("amazon_orders")
+        .select("reconciliation_status")
+        .eq("id", orderRow.id)
+        .maybeSingle();
+      const nowStatus = String(nowRow?.reconciliation_status ?? "").trim();
+      if (nowStatus !== AMAZON_ORDER_STATUS_RECONCILED && nowStatus !== "completed") {
+        await unlinkInboundsFromOrder(inboundIds, amazonOrderId);
+      }
       return NextResponse.json(
         { error: "注文ステータスの更新に失敗しました（他処理で状態が変わった可能性があります）。" },
         { status: 409 }
@@ -258,6 +282,9 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ ok: true, message: "手動消込を確定しました。" });
   } catch (e: unknown) {
+    if (e instanceof InboundAlreadyClaimedError) {
+      return NextResponse.json({ error: e.message, conflict_inbound_ids: e.inboundIds }, { status: 409 });
+    }
     const message = e instanceof Error ? e.message : "手動消込に失敗しました。";
     return NextResponse.json({ error: message }, { status: 500 });
   }
