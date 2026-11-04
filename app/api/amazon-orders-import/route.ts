@@ -1,12 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import {
+  applyCollapsedSkuReconciliationStatus,
   applyExistingLineIndexForUpsert,
-  applyPreservedReconciliationStatusForUpsert,
 } from "@/lib/amazon-order-reconciliation-status";
+import { fetchExistingAmazonOrders, siblingIdsToDelete } from "@/lib/amazon-order-import-existing";
 import { buildLocalJanLookupMaps, resolveJanFromLocalMaps } from "@/lib/amazon-order-local-jan";
 import { buildSkuToConditionMap } from "@/lib/amazon-order-import-condition";
 import { handleOrderCancellation } from "@/lib/amazon-cancellation";
+import { classifyAmazonOrderImportCancel } from "@/lib/amazon-order-import-cancel";
 
 type AmazonOrdersImportRow = {
   amazonOrderId: string;
@@ -40,32 +42,6 @@ function parseToIsoDateMaybe(raw: string): string | null {
   const d = new Date(s);
   if (Number.isNaN(d.getTime())) return null;
   return d.toISOString();
-}
-
-/** 注文・明細ステータスがキャンセル系か（大文字小文字無視。日本語はそのまま部分一致） */
-function statusTextImpliesCancelled(raw: unknown): boolean {
-  if (raw == null) return false;
-  const s = String(raw).trim();
-  if (!s) return false;
-  const lower = s.toLowerCase();
-  if (lower.includes("cancel")) return true;
-  if (s.includes("キャンセル")) return true;
-  return false;
-}
-
-function importRowIndicatesCancelled(row: AmazonOrdersImportRow & Record<string, unknown>): boolean {
-  const extras: unknown[] = [
-    row.orderStatus,
-    row.itemStatus,
-    row["order-status"],
-    row["item-status"],
-    row["order_status"],
-    row["item_status"],
-  ];
-  for (const v of extras) {
-    if (statusTextImpliesCancelled(v)) return true;
-  }
-  return false;
 }
 
 /**
@@ -183,8 +159,13 @@ export async function POST(request: NextRequest) {
         continue;
       }
 
-      if (importRowIndicatesCancelled(row)) {
+      const cancelAction = classifyAmazonOrderImportCancel(row);
+      if (cancelAction !== "none") {
         skippedCancelledLines += 1;
+        // 明細だけキャンセル（注文は Shipped など）の行は数量0のまま捨てる。
+        // 注文番号単位のキャンセルにすると、同じ注文の出荷済み明細まで canceled になる。
+        if (cancelAction === "item") continue;
+
         const { data: existingRows, error: existErr } = await supabase
           .from("amazon_orders")
           .select("id")
@@ -275,10 +256,13 @@ export async function POST(request: NextRequest) {
     }
 
     const chunkOrderIds = [...new Set(validRows.map((r) => String(r.amazon_order_id)))];
-    const { data: existingStatuses } = await supabase
-      .from("amazon_orders")
-      .select("amazon_order_id, sku, line_index, reconciliation_status")
-      .in("amazon_order_id", chunkOrderIds);
+    let existingOrders;
+    try {
+      existingOrders = await fetchExistingAmazonOrders(supabase, chunkOrderIds);
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : "既存の注文明細を読み取れませんでした。";
+      return NextResponse.json({ error: message }, { status: 500 });
+    }
     const upsertRows = validRows as Array<{
       amazon_order_id: string;
       sku: string;
@@ -286,8 +270,8 @@ export async function POST(request: NextRequest) {
       reconciliation_status?: string;
     }>;
     // 既存行の line_index を先に合わせないと、ステータス維持も ON CONFLICT も外れる
-    applyExistingLineIndexForUpsert(upsertRows, existingStatuses ?? []);
-    applyPreservedReconciliationStatusForUpsert(upsertRows, existingStatuses ?? []);
+    applyExistingLineIndexForUpsert(upsertRows, existingOrders);
+    applyCollapsedSkuReconciliationStatus(upsertRows, existingOrders);
 
     const { collapsed: rowsToUpsert, duplicate_lines_merged, amazon_order_ids_with_merge } =
       collapseDuplicateAmazonOrderRows(validRows);
@@ -326,6 +310,21 @@ export async function POST(request: NextRequest) {
     }
 
     const upserted = Array.isArray(data) ? data.length : 0;
+    const staleIds = siblingIdsToDelete(
+      existingOrders,
+      rowsToUpsert as Array<{ amazon_order_id: string; sku: string; line_index?: number | null }>
+    );
+    for (let i = 0; i < staleIds.length; i += 100) {
+      const ids = staleIds.slice(i, i + 100);
+      const { error: delErr } = await supabase.from("amazon_orders").delete().in("id", ids);
+      if (delErr) {
+        console.error("[amazon-orders-import] sibling delete failed:", delErr.message);
+        return NextResponse.json(
+          { error: `重複明細の整理に失敗しました: ${delErr.message}`, upserted },
+          { status: 500 }
+        );
+      }
+    }
 
     if (duplicate_lines_merged > 0 && amazon_order_ids_with_merge.length > 0) {
       const idsForPayload = amazon_order_ids_with_merge.slice(0, MAX_NOTICE_ORDER_IDS);

@@ -73,6 +73,113 @@ export function applyExistingLineIndexForUpsert<T extends UpsertOrderRow>(
   }
 }
 
+const PRESERVED_STATUS_RANK: Record<string, number> = {
+  returned: 4,
+  canceled: 3,
+  cancelled: 3,
+  reconciled: 2,
+  completed: 2,
+  manual_required: 1,
+};
+
+/** キャンセル・返品以外の明細に対し、本消込済みの親在庫が何件必要か */
+export function requiredSettledRootCount(
+  lines: Array<{ sku?: string | null; quantity?: unknown; reconciliation_status?: string | null }>,
+  mappings: Array<{ sku?: string | null; quantity?: unknown }>
+): number {
+  const perSku = new Map<string, number>();
+  for (const mapping of mappings) {
+    const sku = String(mapping.sku ?? "").trim();
+    if (!sku) continue;
+    const quantity = Math.max(1, Number(mapping.quantity) || 1);
+    perSku.set(sku, (perSku.get(sku) ?? 0) + quantity);
+  }
+  let need = 0;
+  for (const line of lines) {
+    const status = String(line.reconciliation_status ?? "").trim().toLowerCase();
+    if (status === "canceled" || status === "cancelled" || status === "returned") continue;
+    const quantity = Math.max(0, Number(line.quantity) || 0);
+    const components = perSku.get(String(line.sku ?? "").trim());
+    need += (components != null && components > 0 ? components : 1) * quantity;
+  }
+  return need;
+}
+
+/** 売上明細が1件以上あり、すべて消込済みか */
+export function salesStatusesAreReconciled(statuses: Array<string | null | undefined>): boolean {
+  if (statuses.length === 0) return false;
+  return statuses.every((status) => {
+    const text = String(status ?? "").trim().toLowerCase();
+    return text === "reconciled" || text === "completed";
+  });
+}
+
+/** キャンセル・返品以外の注文明細が必要とする数量 */
+export function orderQuantityNeedingStock(
+  lines: Array<{ quantity?: unknown; reconciliation_status?: string | null }>
+): number {
+  return lines.reduce((sum, line) => {
+    const status = String(line.reconciliation_status ?? "").trim().toLowerCase();
+    if (status === "canceled" || status === "cancelled" || status === "returned") return sum;
+    return sum + Math.max(0, Number(line.quantity) || 0);
+  }, 0);
+}
+
+/** 親在庫の件数が注文数量に達していれば、追加の引当はしない */
+export function linkedRootsCoverOrder(linkedRootCount: number, neededQuantity: number): boolean {
+  return neededQuantity > 0 && linkedRootCount >= neededQuantity;
+}
+
+/** 必要数ぶんの在庫が本消込済みで、売上も消込済みなら再引当しない */
+export function isStockAndSalesAlreadyFinished(
+  settledRootCount: number,
+  requiredRootCount: number,
+  salesStatuses: Array<string | null | undefined>
+): boolean {
+  if (requiredRootCount < 1) return false;
+  if (settledRootCount < requiredRootCount) return false;
+  return salesStatusesAreReconciled(salesStatuses);
+}
+
+/** 同一注文+SKUの既存行のうち、pending へ戻してはいけない状態で最も強いもの */
+export function preferredPreservedStatus(statuses: Array<string | null | undefined>): string | null {
+  let best: string | null = null;
+  let rank = 0;
+  for (const status of statuses) {
+    const text = String(status ?? "").trim();
+    const next = PRESERVED_STATUS_RANK[text] ?? 0;
+    if (next > rank) {
+      rank = next;
+      best = text;
+    }
+  }
+  return best;
+}
+
+/**
+ * CSV は同一注文+SKUを1行にまとめる。
+ * 既存行のどれかが消込済みなら、最小 line_index の行が pending でもその状態を維持する。
+ */
+export function applyCollapsedSkuReconciliationStatus<T extends UpsertOrderRow>(
+  rows: T[],
+  existing:
+    | Array<{ amazon_order_id: string; sku: string; reconciliation_status?: string | null }>
+    | null
+    | undefined
+): void {
+  const bySku = new Map<string, string[]>();
+  for (const e of existing ?? []) {
+    const key = orderSkuKey(e.amazon_order_id, e.sku);
+    const list = bySku.get(key) ?? [];
+    list.push(String(e.reconciliation_status ?? "").trim());
+    bySku.set(key, list);
+  }
+  for (const r of rows) {
+    const kept = preferredPreservedStatus(bySku.get(orderSkuKey(r.amazon_order_id, r.sku)) ?? []);
+    r.reconciliation_status = kept ?? AMAZON_ORDER_STATUS_PENDING;
+  }
+}
+
 /** 既存 amazon_orders 行のステータスを見て、upsert 直前の reconciliation_status を決める */
 export function applyPreservedReconciliationStatusForUpsert<
   T extends UpsertOrderRow,

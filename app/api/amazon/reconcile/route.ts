@@ -9,6 +9,10 @@ import {
   AMAZON_ORDER_STATUS_MANUAL_REQUIRED,
   AMAZON_ORDER_STATUS_PENDING,
   AMAZON_ORDER_STATUS_RECONCILED,
+  isStockAndSalesAlreadyFinished,
+  linkedRootsCoverOrder,
+  orderQuantityNeedingStock,
+  requiredSettledRootCount,
 } from "@/lib/amazon-order-reconciliation-status";
 import { normalizeOrderCondition, normalizeStockCondition } from "@/lib/amazon-condition-match";
 import { healReconcileOrdersFromSpApi } from "@/lib/amazon-reconcile-sp-heal";
@@ -79,6 +83,84 @@ function filterAvailableByOrderId<T extends { order_id: string | null }>(
   });
 }
 
+/** 必要数ぶん注文番号が付いていれば、未決済でも別の在庫を探さない */
+async function restoreIfLinkedStockCoversOrder(order: {
+  id: string;
+  amazon_order_id: string;
+  jan_code: string | null;
+}): Promise<boolean> {
+  const orderId = String(order.amazon_order_id ?? "").trim();
+  if (!orderId) return false;
+
+  const { data: lines, error: lineErr } = await supabase
+    .from("amazon_orders")
+    .select("quantity, reconciliation_status")
+    .eq("amazon_order_id", orderId);
+  if (lineErr) throw lineErr;
+
+  const needed = orderQuantityNeedingStock(lines ?? []);
+  const { count, error: countErr } = await supabase
+    .from("inbound_items")
+    .select("id", { count: "exact", head: true })
+    .eq("order_id", orderId)
+    .is("parent_item_id", null);
+  if (countErr) throw countErr;
+  if (!linkedRootsCoverOrder(count ?? 0, needed)) return false;
+
+  const jan = String(order.jan_code ?? "").trim() || null;
+  const { error } = await updateAmazonOrderReconciliation(order.id, AMAZON_ORDER_STATUS_RECONCILED, jan);
+  if (error) throw error;
+  return true;
+}
+
+/** 在庫の本消込と売上消込が済んでいる注文は、未引当在庫を探さず消込済みのままにする */
+async function restoreIfStockAndSalesAlreadyFinished(order: {
+  id: string;
+  amazon_order_id: string;
+  sku: string | null;
+  quantity: number | null;
+  jan_code: string | null;
+}): Promise<boolean> {
+  const orderId = String(order.amazon_order_id ?? "").trim();
+  if (!orderId) return false;
+
+  const { data: lines, error: lineErr } = await supabase
+    .from("amazon_orders")
+    .select("sku, quantity, reconciliation_status")
+    .eq("amazon_order_id", orderId);
+  if (lineErr) throw lineErr;
+
+  const orderLines = (lines ?? []) as Array<{ sku: string | null; quantity: number | null; reconciliation_status: string | null }>;
+  const skus = [...new Set(orderLines.map((line) => String(line.sku ?? "").trim()).filter(Boolean))];
+  const { data: mappings, error: mapErr } = skus.length
+    ? await supabase.from("sku_mappings").select("sku, quantity").eq("platform", "Amazon").in("sku", skus)
+    : { data: [], error: null };
+  if (mapErr) throw mapErr;
+
+  const required = requiredSettledRootCount(orderLines, mappings ?? []);
+  const { count, error: countErr } = await supabase
+    .from("inbound_items")
+    .select("id", { count: "exact", head: true })
+    .eq("order_id", orderId)
+    .not("settled_at", "is", null)
+    .is("parent_item_id", null);
+  if (countErr) throw countErr;
+
+  const { data: sales, error: salesErr } = await supabase
+    .from("sales_transactions")
+    .select("status")
+    .eq("amazon_order_id", orderId);
+  if (salesErr) throw salesErr;
+
+  const statuses = (sales ?? []).map((row) => (row as { status?: string | null }).status);
+  if (!isStockAndSalesAlreadyFinished(count ?? 0, required, statuses)) return false;
+
+  const jan = String(order.jan_code ?? "").trim() || null;
+  const { error } = await updateAmazonOrderReconciliation(order.id, AMAZON_ORDER_STATUS_RECONCILED, jan);
+  if (error) throw error;
+  return true;
+}
+
 async function finalizeReconciledInboundIds(
   inboundIds: number[],
   amazonOrderId: string,
@@ -140,6 +222,12 @@ export async function POST() {
       const orderId = order.amazon_order_id;
       const orderQty = Math.max(1, Number(order.quantity) || 1);
       const sku = String(order.sku ?? "").trim();
+
+      if (await restoreIfLinkedStockCoversOrder(order) || (await restoreIfStockAndSalesAlreadyFinished(order))) {
+        console.log(`\n=== 注文 ${orderId} は必要数の在庫が付いているため再引当をスキップ ===`);
+        completed++;
+        continue;
+      }
 
       console.log(`\n=== 🔍 注文チェック: ${orderId} ===`);
       console.log(`SKU: ${sku}, コンディション: ${order.condition_id}, 注文JAN: ${order.jan_code}`);

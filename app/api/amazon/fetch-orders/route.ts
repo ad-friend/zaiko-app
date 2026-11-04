@@ -8,6 +8,7 @@ import { supabase } from "@/lib/supabase";
 import { applyPreservedReconciliationStatusForUpsert } from "@/lib/amazon-order-reconciliation-status";
 import { handleOrderCancellation } from "@/lib/amazon-cancellation";
 import { buildLocalJanLookupMaps, resolveJanFromLocalMaps } from "@/lib/amazon-order-local-jan";
+import { amazonOrderItemQuantity } from "@/lib/amazon-order-item-quantity";
 
 const MARKETPLACE_ID_JP = "A1VC38T7YXB528";
 
@@ -196,7 +197,8 @@ export async function GET(request: NextRequest) {
 
       orderItems.forEach((item, lineIndex) => {
         const sku = String(item.SellerSKU ?? "").trim();
-        const qty = Math.max(1, Number(item.QuantityOrdered) || 1);
+        const qty = amazonOrderItemQuantity(item.QuantityOrdered);
+        if (qty == null) return;
         const conditionId = normalizeConditionId(item.ConditionId);
         const asin = item.ASIN ? String(item.ASIN).trim() : null;
 
