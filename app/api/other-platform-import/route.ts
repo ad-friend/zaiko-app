@@ -48,7 +48,14 @@ function formatJstDate(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (!Number.isFinite(d.getTime())) return String(iso);
-  return d.toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo" });
+  return d.toLocaleString("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function describeSalesLine(r: {

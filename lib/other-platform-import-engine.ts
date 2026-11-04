@@ -135,6 +135,15 @@ function buildEventHash(payload: {
   return createHash("sha256").update(raw).digest("hex");
 }
 
+/**
+ * 売上行の posted_date は日本時間の日付を UTC 0:00 で持つ（既存行がこの形のため、
+ * CSV の日付表記の違いで idempotency_key がずれて amazon_event_hash の一意制約に当たらないようにする）
+ */
+function toSalesPostedDateIso(iso: string): string {
+  const jstDate = new Date(new Date(iso).getTime() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  return `${jstDate}T00:00:00.000Z`;
+}
+
 function normalizeCondition(raw: string): string {
   const t = raw.trim();
   if (!t) return "New";
@@ -250,7 +259,7 @@ export function parseOtherPlatformCsv(csvText: string): ParseOtherPlatformCsvRes
         amount_type,
         amount_description,
         amount: Math.round(signed * 100) / 100,
-        posted_date: postedIso,
+        posted_date: toSalesPostedDateIso(postedIso),
         amazon_event_hash: buildEventHash({ orderId, platform, kind, amount: signed }),
         item_quantity: 1,
         finance_line_group_id: null,
