@@ -23,7 +23,6 @@ import type {
 } from "@/lib/dashboard-types";
 import WeeklyHighlights from "@/components/WeeklyHighlights";
 import SalesAnalysisChart from "@/components/SalesAnalysisChart";
-import DashboardNotices from "@/components/DashboardNotices";
 import QuickInventoryAdjustment from "@/components/QuickInventoryAdjustment";
 
 function formatYen(n: number): string {
@@ -635,12 +634,7 @@ export default function DashboardPage() {
                   </ul>
                 </div>
             </details>
-
-            <DashboardNotices
-              className="mt-8"
-              notices={data.notices ?? []}
-              onAfterDismiss={() => void load()}
-            />
+            {/* お知らせは画面に出さない（2026-11-16 社長：自動実行の報告は Telegram に集約。毎朝8時に PC の「在庫アプリ_朝の報告」が送る） */}
           </>
         )}
       </main>

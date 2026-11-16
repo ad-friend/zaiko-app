@@ -17,13 +17,12 @@ test("既存全sectionのJSX・計算式カード・お知らせ・在庫調整�
   const formula = old.slice(start, end); assert.ok(current.includes(formula));
   const normalize = (s: string) => s.replace(/\n[ \t]*\n/g, "\n");
   assert.deepEqual(sections(old.replace(formula, "")).map(normalize), sections(current).map(normalize));
-  const notices = old.slice(old.indexOf("            <DashboardNotices\n"), old.indexOf("\n            />", old.indexOf("            <DashboardNotices\n")) + "\n            />".length); assert.ok(current.includes(notices));
+  // 2026-11-16 社長の指示でお知らせは画面に出さない（Telegram に集約）。表示していないことを確かめる。
+  assert.ok(!current.includes("<DashboardNotices"));
   assert.equal(current.split("<QuickInventoryAdjustment />").length, 2);
   const component = "export default function DashboardPage()";
   const bodyEnd = (s: string) => s.lastIndexOf("\n  return (");
   assert.equal(current.slice(current.indexOf(component), bodyEnd(current)), old.slice(old.indexOf(component), bodyEnd(old)));
-  // 2026-11-16 社長の指示でお知らせは一番下（998a212）。
-  assert.ok(current.indexOf("<WeeklyHighlights") < current.indexOf("<DashboardNotices"));
   assert.ok(current.indexOf("<SalesAnalysisChart") < current.indexOf("③ 当月の数字"));
 });
 test("cronはimport・maxDuration・新jobKey分岐の追加だけ・既存5本とquiet集合は完全一致", () => {
