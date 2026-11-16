@@ -22,7 +22,8 @@ test("既存全sectionのJSX・計算式カード・お知らせ・在庫調整�
   const component = "export default function DashboardPage()";
   const bodyEnd = (s: string) => s.lastIndexOf("\n  return (");
   assert.equal(current.slice(current.indexOf(component), bodyEnd(current)), old.slice(old.indexOf(component), bodyEnd(old)));
-  assert.ok(current.indexOf("<DashboardNotices") < current.indexOf("<WeeklyHighlights"));
+  // 2026-11-16 社長の指示でお知らせは一番下（998a212）。
+  assert.ok(current.indexOf("<WeeklyHighlights") < current.indexOf("<DashboardNotices"));
   assert.ok(current.indexOf("<SalesAnalysisChart") < current.indexOf("③ 当月の数字"));
 });
 test("cronはimport・maxDuration・新jobKey分岐の追加だけ・既存5本とquiet集合は完全一致", () => {

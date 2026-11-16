@@ -10,6 +10,7 @@ import { handleOrderCancellation } from "@/lib/amazon-cancellation";
 import { buildLocalJanLookupMaps, resolveJanFromLocalMaps } from "@/lib/amazon-order-local-jan";
 import { amazonOrderItemQuantity } from "@/lib/amazon-order-item-quantity";
 
+export const maxDuration = 300;
 const MARKETPLACE_ID_JP = "A1VC38T7YXB528";
 
 function normalizeConditionId(conditionId: string | null | undefined): "New" | "Used" {

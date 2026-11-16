@@ -35,6 +35,7 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 
 | jobKey | 用途 | 推奨頻度の目安 |
 |--------|------|----------------|
+| `orders_recent_poll` | 手動と同じ注文取得（UTC 2日前00:00から。長期保留は対象外） | 3時間毎（毎時15分・UTC の `15 */3 * * *`）。cron-job.org は30秒で切れるが Vercel 側は最後まで動く |
 | `orders_poll` | 直近10分の注文取得 | 高頻度（例: 毎分） |
 | `finances_poll` | 東京「昨日」分の財務イベントをチャンク取得（`cron_continuation_state` で続き管理） | 例: 5分毎 |
 | `listing_report_poll` | 出品詳細レポートの作成→ポーリング→DLを1ステップずつ | 例: 5〜10分毎 |

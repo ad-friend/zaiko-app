@@ -21,8 +21,8 @@ import {
 } from "@/lib/amazon-financial-events";
 import { deleteCronState, getCronState, setCronState } from "@/lib/cron-continuation-state";
 
-// 相談-10：sales_traffic_poll が1回の呼出しで最大約50秒使うため、上限を明示（既存の fetch-finances と同じ考え方）。
-export const maxDuration = 120;
+// 注文の再取得は子APIの完了を待つため、Vercel Hobby の上限 300 秒にする。
+export const maxDuration = 300;
 
 type JobStatus = "running" | "success" | "error";
 
@@ -451,6 +451,28 @@ async function runOrdersPoll(req: NextRequest): Promise<{ fetched: number; summa
   };
 }
 
+async function runOrdersRecentPoll(req: NextRequest): Promise<{ fetched: number; summary: string; metrics: Record<string, unknown> }> {
+  const origin = originFromRequest(req);
+  // 手動と同じYYYY-MM-DD（取得側でUTC 00:00）。48〜72時間を重ねて短期の保留解除を拾う。
+  // CreatedAfterなので、この窓より古い注文の保留解除は対象外。
+  const startDate = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const url = `${origin}/api/amazon/fetch-orders?startDate=${startDate}`;
+  const res = await fetch(url, { method: "GET" });
+  const { json, raw } = await fetchJsonAnySafe(res);
+  if (!res.ok) {
+    const msg = (json && typeof json.error === "string" ? json.error : null) ?? raw.slice(0, 300) ?? "注文取得に失敗しました";
+    throw new Error(msg);
+  }
+  const fetched = Number(json?.rowsUpserted ?? 0);
+  const summary = `注文取得: 成功 / 取得 ${fetched}件`;
+  const ordersFetched = Number(json?.ordersFetched ?? 0);
+  return {
+    fetched,
+    summary,
+    metrics: { startDate, rowsUpserted: fetched, ordersFetched, message: safeString(json?.message ?? "") },
+  };
+}
+
 async function runAutoReconcile(req: NextRequest, maxRounds = 120): Promise<{ reconciled: number; skipped: number }> {
   const origin = originFromRequest(req);
   let reconciled = 0;
@@ -499,6 +521,11 @@ export async function GET(req: NextRequest) {
 
     if (jobKey === "orders_poll") {
       const r = await runOrdersPoll(req);
+      fetched = r.fetched;
+      summary = r.summary;
+      metrics = { ...metrics, ...r.metrics };
+    } else if (jobKey === "orders_recent_poll") {
+      const r = await runOrdersRecentPoll(req);
       fetched = r.fetched;
       summary = r.summary;
       metrics = { ...metrics, ...r.metrics };

@@ -1,0 +1,110 @@
+﻿相談-11 実装報告（Codex、2026-11-16）
+
+結果
+コードの追加と通常Turbopackのbuildは完了。新規試験9件と既存売上分析の機能試験18件は全27件合格。
+ただし「既存試験も全部合格」は未達。指定のHEAD比較1件を除外したほかに、変更前からあるダッシュボード表示順の検査が1件失敗している（下記）。全受入条件を満たしたとは報告しない。
+本番、Amazon、cron-job.orgの操作・登録は未実施。gitのブランチ操作・commit・push・merge・.gitへの書き込み、npm installはしていない。
+
+今回の入力
+REQUEST v1.0とSTATUS（相談-11）を確認。REQUESTの旧設計範囲より、今回の依頼文とSTATUSに記録された社長の了承①（手動ボタンの自動化、統合案不採用）を優先した。
+指定された--outのパスは依頼本文にないため、この報告を tests/orders-recent/implementation-report.txt に保存した。進行管理のSTATUSは変更していない。
+
+変更ファイルと理由
+1. app/api/cron/run/route.ts
+   runOrdersRecentPollとjobKey=orders_recent_pollの分岐だけ追加。GET /api/amazon/fetch-orders?startDate=YYYY-MM-DD を呼び、手動と同じ取得APIへ委譲する。minutes、endDate、状態条件などは追加していない。
+   runOrdersPollを元に、URLの引数だけstartDateへ置き換え、同じ成功・エラー判定を使用。
+   cron_jobsの共通startJob/finishJobを利用。metricsはstartedAtに加えstartDate、rowsUpserted、ordersFetched、message。従来のminutesの代わりに実際に送ったstartDateを記録する。
+   maxDurationは120→360秒（子API300秒＋呼び出し元の記録等に60秒の余裕）。理由コメントを更新。
+   既存の全分岐、orders_poll、sales_traffic_poll、quietCronJobs、日次集計は変更していない。
+   quiet集合を変更していないため、新ジョブは成功時にもdashboard_noticesへ1件通知する。6時間毎なら成功通知は1日4件。エラー時は従来の共通エラー通知。
+2. app/api/amazon/fetch-orders/route.ts
+   export const maxDuration = 300; の1行だけ追加。その他の内容は変更前の控えと一致することを試験で確認。
+3. README.md
+   cronの表に新ジョブ1行を追加。
+4. tests/orders-recent/（新規）
+   before.json：上記3ファイルの変更前の控え。
+   orders-recent.test.ts：URL、GET引数、UTC日付・月末・うるう年・年境界、既存orders_poll/sales_traffic_poll、成功metrics、失敗記録、認証、既存コード保存の試験。
+   offline.cjs：既存offline-test.cjsを継承し.envのcallback読み取り/openSync、TLS、UDPも禁止する検証用preload。
+   font-mock.cjs：Turbopack用の列挙可能なGoogle Fonts応答辞書。src:local('Arial')でフォント本体の取得も起こさない。アプリ本体には適用しない。
+   preservation-compat.ts：既存preservation.test.tsを変更せず読み込み、今回の追加・時間上限・README1行だけを取り除いたメモリ上の入力で既存の検査を実行する補助。
+   test-result.txt、preservation-result.txt、build-result.txt、diff-stat.txt、unchanged-diff.txt、本報告：検証結果・変更記録。
+
+差分（git diff --stat。新規未追跡のtests/orders-recentはこの統計に含まれない）
+ README.md                            |  1 +
+ app/api/amazon/fetch-orders/route.ts |  1 +
+ app/api/cron/run/route.ts            | 31 +++++++++++++++++++++++++++++--
+ 3 files changed, 31 insertions(+), 2 deletions(-)
+
+変更禁止対象の確認
+次のgit diffは空（unchanged-diff.txtは0バイト）：
+ components/AmazonReconcileManager.tsx
+ lib/amazon-cancellation.ts
+ lib/amazon-order-inventory-release.ts
+ lib/amazon-order-reconciliation-status.ts（applyPreservedReconciliationStatusForUpsert）
+ app/api/amazon/reconcile-sales/route.ts
+ app/api/amazon-reconcile/route.ts
+ app/api/orders/route.ts
+ app/dashboard/page.tsx
+追跡ファイルの差分全体も上記3本だけ。その他の消込・キャンセル関連ファイル、既存tests/sales-analysisは変更していない。
+fetch-ordersはmaxDuration行を取り除くと変更前と一致。cron/runは新関数・新分岐・maxDurationとそのコメントを取り除くと変更前と一致することを新規試験で検証。
+元からある未追跡の.htaccess、functions.php、slide-bs4.phpおよびtests/sales-analysisの結果ログは触っていない。
+
+開始日と保留の幅
+手動はURLSearchParamsでstartDateを渡し、取得APIのparseDateRangeはその日付にT00:00:00Zを付ける。日時や日本時間の00:00ではない。
+新ジョブは new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10) を使う。UTCの2日前00:00から、既存APIが定める現在の5分前まで（およそ48〜72時間）。日本時間の日付を使うと日本の00:00〜08:59に開始時刻が9時間進んでしまうため、UTCの日付を採用した。
+例えば日本11月17日00:15はUTC11月16日15:15なのでstartDate=11月14日、取得開始は日本11月14日09:00。
+10分の窓を抜けたあと確定した注文も、作成時刻がこの重複窓内に残っていれば次回取り直せる。Pending自体を取得する変更ではない。作成日時が窓を外れた長期保留・長期間停止・古い注文の状態変更は拾えない。「保留を経た全注文の取りこぼしゼロ」の保証はしない。基本2日という今回の小変更の範囲で採用し、無制限に窓を広げない。
+
+時間の見積もり（実通信による実測ではない）
+前提：1日25〜70注文。キャンセルを除き全注文で明細取得する場合を想定。
+・厳密な48時間なら50〜140注文。成功時の固定待機は1注文0.5+0.3=0.8秒なので40〜112秒。
+・実装のUTC00:00起点は最大ほぼ72時間。概算50〜210注文で40〜168秒。
+・別途getOrdersのページ取得、各getOrderItemsの応答、Amazon SDK内部の再試行/制御、DBのJAN検索・状態取得・upsert、キャンセル処理、cron記録の時間が加わる。0.8秒/注文は下限寄りの固定待機で、全所要時間ではない。
+・失敗についてコードは最大3回「試行」、2秒の待機はattempt<3の2回のみ。3回目で成功なら1注文4+0.5+0.3=4.8秒。全注文がこの状態なら48時間で240〜672秒、72時間までなら最大約1008秒＋通信/DB。3回とも失敗なら4.3秒/注文で、空の明細のまま処理が続く。依頼文の「2秒×3回」を保守的に計上するなら1注文6.8秒、50〜210注文で340〜1428秒＋通信/DB。実コードと保守見積もりを混同しない。
+・cronの従来120秒は高件数の固定待機だけでも超え得る。fetch-ordersは指定なしでプラン既定時間が未確認なので300秒を指定、cron/runは360秒にした。ただしこれでも失敗集中時の完走は保証できない。
+・getOrderItems 0.5回/秒、burst 30は依頼に沿った仮定で未確認。全量の呼び出しには満タンのburstを使えても概算 max(0,(N-30)/0.5) 秒の予算が必要で、50〜140件なら40〜220秒、最大210件なら360秒。固定待機と重なるため単純に合計しない。SDK制御・別ジョブとの共有消費も未確認。現行の0.8秒待機だけでは0.5回/秒を継続的に守れない。
+300秒は許可された設定の範囲で通常時の余裕を広げるもの。高件数・レート待ち・再試行では不足し得る。本変更は取得APIのペーシング・分割・継続方式を追加する承認ではないので変更していない。
+Vercelで300/360秒が使える契約・実行方式かは未確認。ローカルbuildの成功は本番の時間枠を保証しない。
+
+cron-job.orgの登録提案（登録は未実施）
+URL： https://zaiko-app-mu.vercel.app/api/cron/run?jobKey=orders_recent_poll
+HTTP：GET。認証ヘッダーは既存同様 Authorization: Bearer <既存のCRON_SECRET> を設定。実値は取得・転記しない。
+頻度：まず6時間毎、日本時間00:15、06:15、12:15、18:15。Asia/Tokyoを選ぶ。UTC設定なら03:15、09:15、15:15、21:15（日本日付とはずれる）。
+1回の成功見込みが分単位であること、毎分の全量再取得を避けること、保留解除からの反映遅延を最大約6時間に抑えることの折衷。4回/日で50〜210件なら200〜840回/日の明細呼び出し（再試行・従来orders_pollを除く）。日平均でレートを守れても1実行中の瞬間レートは別問題である。
+既存orders_pollは継続し変更しない。そこからのAPI消費や手動との競合は残る。既存の他ジョブの設定時刻は未確認なので、登録時には重複を確認する。
+
+30秒切断の扱いと登録前の条件
+cron-job.orgは30秒でタイムアウトする前提。上の見積もりは既に30秒を超えるため、schedulerの失敗表示をそのまま取得失敗とも取得成功とも判定しない。
+クライアント切断後にVercelの親・子関数が最後まで動くかは未確認。本コードは単にawait fetchしており、waitUntil、after、永続キュー等は追加していない。maxDurationを延ばしても切断後の継続保証にはならない。
+本番登録前に、同じVercel環境の無害な長時間処理で30秒切断後の親・子の挙動と時間上限を別途確認し、cron_jobsがrunning→success/errorへ終わるか確認する。この実装では本番へ接続しないため未実施。
+完走を確認できるまでは定期登録を有効にしない提案。30秒失敗を契機とした即時再実行・短い間隔の自動再試行は避ける。重複実行の防止ロックは追加していない。切断後に停止するなら、別途の許可範囲で実行方式の見直しが必要。
+
+既存の日次集計・キャンセル等
+finances_dailyのAmazon注文の日次集計はorders_pollだけを数えている。orders_recent_pollの分は入らない。指定どおり変更していない。
+手動と同じfetch-ordersを呼ぶため、Canceledに対するhandleOrderCancellation、一意キーupsert、既存消込状態を保つ処理は従来のまま。キャンセル処理の再実行・手動やorders_pollとの同時実行に対する新しい排他は設けていない。ロジックは増やしていないが、定期的な再取得で同じ処理が走る機会は増えるので、新たに安全性を保証したとはしない。
+明細取得が3回失敗してもAPI自体が成功を返し得る点も従来のまま。cron_jobsのsuccessだけでは全注文の完全取得を証明できない。
+
+試験とbuildの再現方法（PowerShell、zaiko-app内）
+ $env:NODE_OPTIONS='--require=C:/Users/user/zaiko-app/tests/orders-recent/offline.cjs'
+ $env:npm_config_offline='true'
+ $env:npm_config_update_notifier='false'
+ npx --no-install tsx --test tests/orders-recent/orders-recent.test.ts tests/sales-analysis/sales-analysis.test.ts
+結果：27件合格、失敗0、除外0。ログtest-result.txt。
+
+ npx --no-install tsx --test tests/orders-recent/preservation-compat.ts
+結果：5件中3件合格、1件失敗、1件除外。ログpreservation-result.txt。
+元のpreservationは「前回実装だけの差分」を固定しているため、今回の許可済み差分だけをメモリ上で戻して実行する。元の試験ファイルは未変更。
+除外：追跡済み4本だけ・控えはHEADと一致、の1件。mainが進み、旧before.jsonが現在のHEADではない（依頼文の既知事象）。
+失敗：既存section検査の最後から2つ目、DashboardNoticesの表示位置がWeeklyHighlightsより前というassert。現在のHEADも作業ツリーもWeeklyHighlightsが先。app/dashboard/page.tsxのgit diffは空で、今回の変更起因ではない。他の既存assertを緩めたり、表示順を範囲外で直したり、追加で除外したりはしていない。
+したがって「許可されたHEAD比較の除外だけで既存試験全通過」は達成していない。窓口へこの既存不一致を引き継ぐ。
+
+ $env:NEXT_FONT_GOOGLE_MOCKED_RESPONSES='C:/Users/user/zaiko-app/tests/orders-recent/font-mock.cjs'
+ npm run build
+結果：exit 0。Next.js 16.4.5の通常Turbopack、コンパイル・TypeScript・75ページ生成まで成功。所要約9秒。ログbuild-result.txt。
+初回は既存のProxy方式font-mockがTurbopackの辞書として列挙されず停止。試験専用の静的辞書とlocalフォント応答に変更して成功した。ビルド設定・アプリのフォント設定は変更していない。以前のTurbopack内部エラーを受けたキャッシュ削除警告は出たが終了コード0。
+.env*はpreloadで読み取りを遮断。ダミーSupabase URL・キー、Google Fonts固定応答を使い、外部fetch/HTTP/HTTPS/TLS/UDPと外向きSocketを拒否。buildのローカルIPCだけ既存guardと同様に許可。このビルド出力は検証用で、本番配布しない。
+git diff --checkも合格。Gitは改行LF→CRLF予定とユーザー共通ignore参照の権限に関する警告を出したが、.gitやユーザー設定は変更していない。
+
+戻し方・引き継ぎ
+今回触った追跡3本をbefore.jsonの対応する内容に戻せばコードは復元できる（本作業では復元していない）。新規tests/orders-recentは必要なら後工程が承認範囲でtrashboxへ移す。DB変更・SQL追加はない。
+残る判断は、既存preservation不一致、30秒切断後の継続、Vercelの時間枠、件数・API待ちの実測、長期保留の手動補完、既存処理との重複。登録と本番反映は窓口の確認およびpush直前の社長了承②の後工程とする。
