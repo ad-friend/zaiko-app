@@ -278,13 +278,6 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {data && (
-            <DashboardNotices
-              className="mt-8"
-              notices={data.notices ?? []}
-              onAfterDismiss={() => void load()}
-            />
-        )}
         <WeeklyHighlights />
         <SalesAnalysisChart />
         {data && (
@@ -643,7 +636,11 @@ export default function DashboardPage() {
                 </div>
             </details>
 
-
+            <DashboardNotices
+              className="mt-8"
+              notices={data.notices ?? []}
+              onAfterDismiss={() => void load()}
+            />
           </>
         )}
       </main>
