@@ -56,7 +56,7 @@ export default function DashboardPage() {
   const [monthlyFrom, setMonthlyFrom] = useState("");
   const [monthlyTo, setMonthlyTo] = useState("");
   const [monthlyData, setMonthlyData] = useState<MonthlyDashboardPayload | null>(null);
-  const [monthlyLoading, setMonthlyLoading] = useState(true);
+  const [monthlyLoading, setMonthlyLoading] = useState(false);
   const [monthlyError, setMonthlyError] = useState<string | null>(null);
 
   const [asOfDate, setAsOfDate] = useState(() =>
@@ -115,10 +115,10 @@ export default function DashboardPage() {
     }
   }, []);
 
+  // 月次一覧は重く、あまり見ないため、開いたときには読まず「表示」を押したときだけ読む（2026-11-16 社長）。
   useEffect(() => {
     void load();
-    void loadMonthly();
-  }, [load, loadMonthly]);
+  }, [load]);
 
   const handleMonthlySubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -441,6 +441,12 @@ export default function DashboardPage() {
                 <div className="rounded-xl border border-slate-200/80 bg-white p-8 text-center text-sm text-slate-500">
                   <Loader2 className="mx-auto mb-2 h-6 w-6 animate-spin text-primary" />
                   月次データを集計しています…
+                </div>
+              )}
+
+              {!monthlyLoading && !monthlyData && !monthlyError && (
+                <div className="rounded-xl border border-slate-200/80 bg-white p-8 text-center text-sm text-slate-500">
+                  「表示」を押すと月次一覧を集計します（開始月・終了月が空のときは直近24か月。20〜30秒かかります）。
                 </div>
               )}
 

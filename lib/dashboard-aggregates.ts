@@ -97,27 +97,38 @@ export function defaultMonthlyRange(monthsBack = 23): { from: string; to: string
 }
 
 export async function aggregateCurrentInventory(): Promise<{ count: number; totalAmount: number }> {
-  let count = 0;
-  let totalAmount = 0;
-  let from = 0;
-  for (;;) {
-    const { data, error } = await supabase
+  // 対象・計算は従来どおり。1000件ずつ順番に読んでいたのを、4ページずつ同時に読む（2026-11-16 相談-12、速さだけの変更）。
+  // 終わりは従来と同じく「1000件に満たないページが来たとき」。
+  const base = () =>
+    supabase
       .from("inbound_items")
       .select("effective_unit_price, parent_item_id")
       .is("settled_at", null)
       .is("exit_type", null)
-      .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION)
-      .order("id", { ascending: true })
-      .range(from, from + PAGE - 1);
-    if (error) throw error;
-    if (!data?.length) break;
-    for (const row of data) {
-      // 金額は組み付け子も含める（原価は在庫に残っている）。件数は単体販売可能なルートのみ。
-      totalAmount += num(row.effective_unit_price);
-      if (row.parent_item_id == null) count += 1;
+      .or(INBOUND_FILTER_SALABLE_FOR_ALLOCATION);
+  const CONCURRENCY = 4;
+  let count = 0;
+  let totalAmount = 0;
+  for (let start = 0; ; start += CONCURRENCY) {
+    const batch = Array.from({ length: CONCURRENCY }, (_, i) => {
+      const from = (start + i) * PAGE;
+      return base().order("id", { ascending: true }).range(from, from + PAGE - 1);
+    });
+    const results = await Promise.all(batch);
+    let reachedEnd = false;
+    for (const { data, error } of results) {
+      if (error) throw error;
+      for (const row of data ?? []) {
+        // 金額は組み付け子も含める（原価は在庫に残っている）。件数は単体販売可能なルートのみ。
+        totalAmount += num(row.effective_unit_price);
+        if (row.parent_item_id == null) count += 1;
+      }
+      if ((data?.length ?? 0) < PAGE) {
+        reachedEnd = true;
+        break; // 従来どおり、短いページで止める（同じ組の後ろのページは数えない）
+      }
     }
-    if (data.length < PAGE) break;
-    from += PAGE;
+    if (reachedEnd) break;
   }
   return { count, totalAmount };
 }
