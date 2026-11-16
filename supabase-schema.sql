@@ -106,3 +106,93 @@ CREATE TABLE IF NOT EXISTS parts_catalog (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- 相談-10: dashboard sales analysis
+-- docs/migration_sales_traffic_daily.sql
+CREATE TABLE IF NOT EXISTS sales_traffic_daily (
+  date DATE PRIMARY KEY,
+  sessions INTEGER NOT NULL,
+  page_views INTEGER NOT NULL,
+  buy_box_percentage NUMERIC(6,3) NOT NULL,
+  unit_session_percentage NUMERIC(6,3) NOT NULL,
+  ordered_product_sales NUMERIC(14,2) NOT NULL,
+  total_order_items INTEGER NOT NULL,
+  units_ordered INTEGER NOT NULL,
+  source_report_id TEXT NULL,
+  fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE sales_traffic_daily IS
+  'SP-API GET_SALES_AND_TRAFFIC_REPORT（dateGranularity=DAY, asinGranularity=CHILD, JPのみ）の店全体集計。date はレポートのdate文字列をそのまま保存（JSTとの対応はU-date1として未確認）。既存の決済ベース売上（lib/dashboard-aggregates.ts）とは基準が異なる注文ベースの値であり、画面では区別して表示する';
+
+ALTER TABLE sales_traffic_daily ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow anon select on sales_traffic_daily"
+  ON sales_traffic_daily FOR SELECT TO anon USING (true);
+-- INSERT/UPDATE/DELETEのポリシーは置かない。書き込みはサーバー側のサービスロールキーのみ（指摘6対応・9章1件目）
+
+-- docs/migration_sales_traffic_asin_totals.sql
+CREATE TABLE IF NOT EXISTS sales_traffic_asin_totals (
+  asin TEXT NOT NULL,
+  window_start DATE NOT NULL,
+  window_end DATE NOT NULL,
+  units_ordered INTEGER NOT NULL,
+  ordered_sales NUMERIC(14,2) NOT NULL,
+  fetch_batch_id UUID NOT NULL,
+  fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (asin, window_start, window_end)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sales_traffic_asin_totals_window
+  ON sales_traffic_asin_totals (window_end DESC, units_ordered DESC);
+
+COMMENT ON TABLE sales_traffic_asin_totals IS
+  '週1回（月曜）、直近90日ウィンドウでSP-APIから再取得するASIN別合計。「主力の在庫切れ数」の対象30 ASINを window_end が最新の行から units_ordered 降順で選ぶ。同じ(window_start,window_end)への書込みは必ず1回のbatch upsert（1SQL文）＋直後のprune DELETEの対で行い、不完全な途中状態を公開しない（指摘4対応、2章参照）';
+
+ALTER TABLE sales_traffic_asin_totals ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow anon select on sales_traffic_asin_totals"
+  ON sales_traffic_asin_totals FOR SELECT TO anon USING (true);
+-- INSERT/UPDATE/DELETEのポリシーは置かない＝anonキーでは書き込めない。書き込みはサーバー側のサービスロールキー（RLSを経由しない）からのみ行う（指摘6対応・9章1件目）
+
+-- docs/migration_google_trends_daily.sql
+CREATE TABLE IF NOT EXISTS google_trends_daily (
+  date DATE NOT NULL,
+  keyword TEXT NOT NULL DEFAULT 'Amazon',
+  trend_value NUMERIC(6,2) NOT NULL,
+  fetch_batch_id UUID NOT NULL,
+  fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (date, keyword)
+);
+
+CREATE INDEX IF NOT EXISTS idx_google_trends_daily_batch
+  ON google_trends_daily (fetch_batch_id);
+
+COMMENT ON TABLE google_trends_daily IS
+  '週1回（月曜）、直近90日を1回のpytrends呼出しで取り直し、同じ fetch_batch_id で全日付を上書きする。90日以内は単一呼出しで日次粒度が返るため、2窓接合・倍率調整は行わない（根拠：fetch_trends.py 冒頭コメント、2026-11-12）。keyword は将来の複数キーワード対応用、現状はAmazon固定。書込みAPI（trends-import）は、受け取った配列が要求期間ぶん完全であることを検証したうえで1回のbatch upsert＋直後のprune DELETEを行う（指摘5対応）';
+
+ALTER TABLE google_trends_daily ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow anon select on google_trends_daily"
+  ON google_trends_daily FOR SELECT TO anon USING (true);
+-- INSERT/UPDATE/DELETEのポリシーは置かない。書き込みはtrends-import API（サーバー側のサービスロールキー）のみ（指摘6対応・9章1件目）
+
+-- docs/migration_sale_events.sql
+CREATE TABLE IF NOT EXISTS sale_events (
+  id BIGSERIAL PRIMARY KEY,
+  label TEXT NOT NULL,
+  start_date DATE NOT NULL,
+  end_date DATE NOT NULL,
+  note TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT sale_events_date_order CHECK (end_date >= start_date)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sale_events_label_start
+  ON sale_events (label, start_date);
+
+COMMENT ON TABLE sale_events IS
+  'ダッシュボード画面から入力するセール日程。グラフの帯表示・表の列に使う。新しいログイン画面は追加しない（論点5）。読み取りは無認証のままだが、書き込みはサーバー側のAPI（サービスロールキー）経由に絞る（論点6・9章1件目）';
+
+ALTER TABLE sale_events ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow anon select on sale_events"
+  ON sale_events FOR SELECT TO anon USING (true);
+-- INSERT/UPDATE/DELETEのポリシーは置かない。書き込みは sale-events API（サーバー側のサービスロールキー）のみ（指摘6対応・9章1件目）

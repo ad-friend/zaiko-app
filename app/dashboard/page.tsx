@@ -21,6 +21,8 @@ import type {
   InventoryAsOfPayload,
   MonthlyDashboardPayload,
 } from "@/lib/dashboard-types";
+import WeeklyHighlights from "@/components/WeeklyHighlights";
+import SalesAnalysisChart from "@/components/SalesAnalysisChart";
 import DashboardNotices from "@/components/DashboardNotices";
 import QuickInventoryAdjustment from "@/components/QuickInventoryAdjustment";
 
@@ -277,8 +279,17 @@ export default function DashboardPage() {
         )}
 
         {data && (
+            <DashboardNotices
+              className="mt-8"
+              notices={data.notices ?? []}
+              onAfterDismiss={() => void load()}
+            />
+        )}
+        <WeeklyHighlights />
+        <SalesAnalysisChart />
+        {data && (
           <>
-            <QuickInventoryAdjustment />
+            <h2 className="mb-3 text-lg font-semibold">③ 当月の数字</h2>
 
             <p className="mb-4 text-sm font-medium text-slate-600">
               集計期間（当月・東京）: <span className="text-slate-900">{data.period.label}</span>
@@ -377,23 +388,7 @@ export default function DashboardPage() {
                     </p>
                   </div>
                 </div>
-                <div className={`${cardBase} flex flex-col justify-center bg-slate-50/80`}>
-                  <div className="flex items-center gap-2 text-slate-700">
-                    <Wallet className="h-5 w-5 text-primary" />
-                    <span className="text-sm font-semibold">計算式</span>
-                  </div>
-                  <ul className="mt-4 space-y-2 text-sm text-slate-600 leading-relaxed">
-                    <li>
-                      <span className="font-medium text-slate-800">売上</span> … Charge / Sell の合計
-                    </li>
-                    <li>
-                      <span className="font-medium text-slate-800">手数料等</span> … 多くはマイナス（マーケットプレイス控除）
-                    </li>
-                    <li>
-                      <span className="font-medium text-slate-800">利益</span> … 売上 + 手数料等 − 販売原価 − 損失額
-                    </li>
-                  </ul>
-                </div>
+
               </div>
             </section>
 
@@ -516,6 +511,10 @@ export default function DashboardPage() {
               )}
             </section>
 
+            <h2 className="mb-3 text-lg font-semibold">⑤ 在庫の調整</h2>
+            <QuickInventoryAdjustment />
+            <details className="mb-8">
+              <summary className="cursor-pointer font-semibold">⑥ 棚卸レポート</summary>
             <section className="mb-8 mt-10">
               <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-700">
                 <ClipboardList className="h-4 w-4 text-primary" />
@@ -622,12 +621,29 @@ export default function DashboardPage() {
                 </>
               )}
             </section>
+            </details>
+            <details className="mb-8">
+              <summary className="cursor-pointer font-semibold">⑦ 計算のしかた</summary>
+                <div className={`${cardBase} flex flex-col justify-center bg-slate-50/80`}>
+                  <div className="flex items-center gap-2 text-slate-700">
+                    <Wallet className="h-5 w-5 text-primary" />
+                    <span className="text-sm font-semibold">計算式</span>
+                  </div>
+                  <ul className="mt-4 space-y-2 text-sm text-slate-600 leading-relaxed">
+                    <li>
+                      <span className="font-medium text-slate-800">売上</span> … Charge / Sell の合計
+                    </li>
+                    <li>
+                      <span className="font-medium text-slate-800">手数料等</span> … 多くはマイナス（マーケットプレイス控除）
+                    </li>
+                    <li>
+                      <span className="font-medium text-slate-800">利益</span> … 売上 + 手数料等 − 販売原価 − 損失額
+                    </li>
+                  </ul>
+                </div>
+            </details>
 
-            <DashboardNotices
-              className="mt-8"
-              notices={data.notices ?? []}
-              onAfterDismiss={() => void load()}
-            />
+
           </>
         )}
       </main>

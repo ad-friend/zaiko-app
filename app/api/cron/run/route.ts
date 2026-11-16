@@ -7,6 +7,7 @@
  * - GET /api/cron/run?jobKey=reconcile_poll（自動消込の短いバッチ）
  * - GET /api/cron/run?jobKey=finances_daily&reconcile=1（日次5通知・消込のみ。財務/出品は上記ポールに依存）
  */
+import { runSalesTrafficPoll } from "@/lib/sales-traffic-sync";
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { gunzipSync } from "zlib";
@@ -19,6 +20,9 @@ import {
   upsertSalesTransactionRows,
 } from "@/lib/amazon-financial-events";
 import { deleteCronState, getCronState, setCronState } from "@/lib/cron-continuation-state";
+
+// 相談-10：sales_traffic_poll が1回の呼出しで最大約50秒使うため、上限を明示（既存の fetch-finances と同じ考え方）。
+export const maxDuration = 120;
 
 type JobStatus = "running" | "success" | "error";
 
@@ -517,6 +521,11 @@ export async function GET(req: NextRequest) {
       summary = `日次ジョブ: 通知・消込（財務・出品は finances_poll / listing_report_poll で取得）`;
       metrics = { ...metrics, note: "finances_daily_orchestrator" };
       fetched = 0;
+    } else if (jobKey === "sales_traffic_poll") {
+      const r = await runSalesTrafficPoll();
+      fetched = r.fetched;
+      summary = r.summary;
+      metrics = { ...metrics, ...r.metrics };
     } else {
       summary = `${jobKey}: 未対応 / 取得 0件`;
       metrics = { ...metrics, notImplemented: true };

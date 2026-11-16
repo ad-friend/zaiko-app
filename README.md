@@ -40,6 +40,7 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 | `listing_report_poll` | 出品詳細レポートの作成→ポーリング→DLを1ステップずつ | 例: 5〜10分毎 |
 | `reconcile_poll` | 自動消込（1リクエストあたり最大12ラウンド） | 任意（例: 15分毎） |
 | `finances_daily` | 前日分のダッシュボード通知5件の集計。`&reconcile=1` で日次消込（最大28ラウンド） | 1日1回 |
+| `sales_traffic_poll` | 売上とトラフィック（直近7日／月曜は90日＋ASIN別合計） | 1日1回（朝） |
 
 例（本番ホストに合わせて置き換え）:
 

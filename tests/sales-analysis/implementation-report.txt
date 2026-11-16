@@ -1,0 +1,185 @@
+相談-10 実装報告（窓口・検証担当への引き継ぎ）
+2026-11-16 / Codex / FINAL_REPORT v1.1 と依頼文の了承事項に基づく
+
+結果
+実装と固定データ・モックによる23件の試験は完了。23件合格、失敗0。
+新規ファイルのlintはエラー0・警告0。全ソース153ファイルのTypeScript検査もエラー0。
+ただし「npm run buildを通す」は未達。コンパイル成功後、変更禁止の既存API2本のexportでNext生成型検査が停止した。
+実装全体を完了・本番反映可能とは報告しない。窓口側で下記の既存build不具合と実行時間上限を扱う必要がある。
+
+作業範囲・保護
+ブランチ feature/dashboard-sales-analysis の作業ツリーだけを変更した。
+commit、push、ブランチ切替、merge、npm install、dev/start、アプリAPI呼出し、SQL実行、新規scriptsの実行は行っていない。
+本番Supabase、Amazon SP-API、Googleへの取得・反映操作は行っていない。
+.env類・credentialsを開いていない。コードは環境変数名だけを参照する。
+検証時はNode preloadで.env読取と外向きHTTP/HTTPS/fetchを拒否し、Supabase設定は架空値、Google Fontsは固定応答にした。
+buildはこの仕組みを適用できるwebpackを指定した。このbuild成果物を本番配布する用途には使わない。
+元からあった未追跡 .htaccess / functions.php / slide-bs4.php は変更していない。
+変更前の4ファイルの控え: tests/sales-analysis/before.json。試験でHEADとの一致も確認済み。
+変更記録は本書と下記の差分・検証ログ。
+
+実装内容
+・新4表・anon SELECTだけのRLS、任意の索引、戻すSQL、独立した初期セール日程SQL。
+・supabase-schema.sqlは既存部分を完全に残して末尾へ追加。
+・新jobKey sales_traffic_poll。pendingのreportIdと要求期間を保持し、create→poll→downloadを同一呼出し内で進める。
+・週次90日＋ASIN合計、日次7日、一括upsert、同期間の消えたASINのprune。
+・SP-API・ダウンロード等の生例外を固定文言へ変換。既存cronの通知経路へ署名URL等を渡さない。
+・既存計算から独立した主力30・正午JSTの在庫切れ・週要点・日次分析。
+・新API5系統（週要点、日次、セール一覧/追加、セール更新/削除、トレンド取込）。
+・トレンド90日完全性検証、batch upsert＋期間外prune。Bearer専用認証。
+・週の要点4カード、SVGの棒・線・セール帯、開閉する日次表、セール追加/編集/削除フォーム。
+・お知らせ→①週→②日次→③当月→④既存月次→⑤調整→⑥棚卸→⑦計算式。
+・PC週次スクリプト、手動バックフィルスクリプト（作成のみ）、READMEのcron表に1行。
+
+試験
+実行コマンド（PowerShell、zaiko-app内）:
+  $env:NODE_OPTIONS='--require=C:/Users/user/zaiko-app/tests/sales-analysis/offline-test.cjs'
+  $env:npm_config_update_notifier='false'
+  npx --no-install tsx --test tests/sales-analysis/sales-analysis.test.ts tests/sales-analysis/preservation.test.ts
+結果: 23 tests / pass 23 / fail 0。ログ: tests/sales-analysis/test-result.txt
+この実行環境ではtsxのos.userInfo()がuv_os_get_passwd ENOMEMになるため、preloadで一時領域名だけを固定した。
+
+取得済みデータを元の場所から読み取り、コピーせず利用:
+  secretary/research/売上日次分析/data/sales_traffic*.json（3ファイル）
+  同 db_inbound_items.json（14,108行）/ db_amazon_orders.json（6,184行）/ trends_amazon.csv
+SP応答の解析、不正値、日付、JPY検証、主力選定の順位・window優先、返品のみASINの追跡不能、正午の境界、同注文の最小時刻、即売扱いを確認。
+週比較の同曜日集合・異曜日欠損・空データ・前週0・日率算術平均、nullと0、イベントを確認。
+トレンドの90日・欠損・重複・不正日付・混合キーワード・範囲外を確認。
+SP同入力2回で日次93行・ASIN888行のまま。消えたASINのpruneも確認。
+トレンド同入力2回と7日ずれた次回入力で90行・単一batchを維持。不正入力は書込み0回。
+1000行ページング、対象ASIN絞り込み、cronの同一呼出し完走・pending再開・予算切れ・CANCELLED/FATAL・DB失敗・日次継続を確認。
+セールCRUD（追加・重複拒否・更新・期間重なり・削除・不存在）とダミーBearer認証をモックで確認。
+
+analyze.py / Excelとの照合
+原本 売上日次分析_2026-08-12_11-11.xlsx を標準ライブラリzipfile/XMLで読み取り。原本は変更していない。
+「日ごとの表」: 主力の在庫切れ数92日すべて一致（整数で完全一致）。
+「週ごと」: 14週すべて一致。元シートの丸め小数2桁に対し誤差0.00501以内。
+「主力の在庫数（推定）」: 追跡ASIN集合が一致、追跡数22/30。
+週要点の画面では設計どおり平均を小数1桁で表示する。計算途中では丸めない。
+この照合は同じ固定入力・同じ研究計算の移植を検算したもので、独立した本番実測の証拠ではない。
+
+既存部分の保持確認
+preservation.test.tsで、既存全sectionのJSX・props・計算・文言の同一性を確認。
+計算式カード・DashboardNotices・QuickInventoryAdjustmentは元の文字列のまま移動。
+既存のデータ読取・計算・イベント関数本体は変更なし。
+cron追加importと新分岐を取り除くと、元のファイル全文と完全一致する。
+したがって既存5 jobKey、createSpClient、継続キー、quietCronJobsの既存要素は同一。
+消込・既存計算等のgit diffが空であることは末尾に記録。
+git diff --checkも合格。
+
+build・lint
+build実行:
+  $env:NODE_OPTIONS='--require=C:/Users/user/zaiko-app/tests/sales-analysis/offline-build.cjs'
+  $env:NEXT_FONT_GOOGLE_MOCKED_RESPONSES='C:/Users/user/zaiko-app/tests/sales-analysis/font-mock.cjs'
+  $env:npm_config_update_notifier='false'
+  npm run build -- --webpack
+結果: Compiled successfully、続く型検査でexit 1。ログ: tests/sales-analysis/build-result.txt
+既存エラー:
+  app/api/amazon-sales-import/route.ts の export { MAX_ROWS_PER_REQUEST }（50）
+  app/api/records/route.ts の export const LIST_MAX_ROWS = 50000
+Nextのrouteに許されるexportに該当しないため生成された .next/types/... がエラーになる。
+両exportがHEADにも存在することをgit showで確認。両ファイルの差分は空。
+許可されたファイル一覧にないため修正・型検査無効化は行っていない。
+
+補助検証:
+  node tests/sales-analysis/check-source-types.cjs
+全ソース153ファイル、エラー0。Next生成route export検査を除く補助検証であり、build成功の代用ではない。
+ログ: tests/sales-analysis/types-result.txt
+  npm run lint -- <新規のTS/TSXとtests/sales-analysis/>
+エラー0・警告0。ログ: tests/sales-analysis/lint-result.txt
+Python週次スクリプトはast.parseによる構文確認のみ合格。新しいscriptsのコードは実行していない。
+
+設計の補足・未確定事項
+1. 同一childAsinが親ASIN違いで複数行ある実データ901行を、子ASIN単位で合算して888行へ正規化した。
+   そのままupsertすると同一主キーが複数回現れて失敗するため。数量・売上を合算し、主力30の集合と22件の追跡集合・在庫切れ結果はExcelと一致。
+   B0C6LNJL6Cは39+12=51個になる（順位は変わるが主力集合は変わらない）。設計に重複親の扱いが明記されていないため検証担当にも確認を依頼。
+2. 月曜は昨日までの「今週」が空になるため、直近完了週とその前週を比較する。火曜以降は今週月曜〜昨日と前週同曜日。
+3. 90日は両端を含む90日としてstart=end-89日で実装。設計の説明中のend-90日という記述とは1日差があるため、90日分という要件とトレンド完全性に合わせた。
+4. 研究のJST開始指定に対するSP応答では、実際に前日の日付文字列が含まれていた。日付は変換せず保存し、解析時は要求開始の前日1日まで許容する。
+   SPの日付とJSTの厳密な対応は未確定。グラフとDBには応答日付のまま、在庫計算は設計どおりJST正午。
+5. PCのGoogle取得は未確定日を避けて昨日までの90日を対象とし、isPartialがあれば一切送らず失敗する。pytrendsが欠損なく返すかは未実測。
+6. 新ジョブの処理予算は暫定50秒、取得/保存のため35秒を予約。SDK/本文/新DB通信に待機上限を設け、既存state関数も外側で待機時間を制限する。
+   既存state関数のHTTP自体は外側のタイムアウトで中断されないため、保存応答が遅い場合に後から完了する可能性がある。既存ファイルは変えていない。
+   Vercel実設定の上限・既存cron共通処理の所要時間・Amazonの生成時間は接続禁止のため未確認。
+   少なくとも新処理50秒＋既存共通処理＋余裕を確保できる上限を窓口が確認し、不足するなら本番稼働前に方式を再検討する。
+7. ブラウザの実画面確認、RLSの本番適用結果、APIの実通信、タスク実行は未実施。JSX差分・型検査・モックの範囲で確認した。
+8. 初期日程は docs/seed_sale_events.sql に分離した。設計5章の列挙にこのファイル名はないが、依頼文の「ファイルとして用意するだけ」を具体化した追加物。
+
+本番反映前に窓口・社長が行うこと（この実装では未実行）
+・別担当のコード確認。既存buildエラー2件は別の変更範囲として扱い、buildを通す。push直前の社長了承②を得る。
+・Vercel関数の実行時間上限とcron-job.orgのタイムアウト/重複起動設定を確認。新ジョブに50秒の予算と既存共通処理の時間を確保できるか判断する。
+・SQL前に必要なDBバックアップの取得可否を確認。既存のcron_continuation_state表があることも確認する。
+・新規4表を下記順で実行（この4つにFK依存はない。既存schema全体の再実行はしない）:
+  1 docs/migration_sales_traffic_daily.sql
+  2 docs/migration_sales_traffic_asin_totals.sql
+  3 docs/migration_google_trends_daily.sql
+  4 docs/migration_sale_events.sql
+  5 docs/migration_sales_analysis_perf_indexes.sql（任意。不要なら実行しない）
+・docs/seed_sale_events.sql は、窓口が日程を確認した後、独立して1回だけ投入。自動適用へ混ぜない。
+・戻す場合はアプリの新機能を止めてから docs/rollback_dashboard_sales_analysis.sql。新4表のデータも失われるSQLなので窓口側で対象とバックアップを確認する。
+・サーバー側環境変数: SUPABASE_SERVICE_ROLE_KEY、TRENDS_IMPORT_SECRET。
+  前者は既存名の再利用。値の有無を本作業では調べていない。NEXT_PUBLIC_を付けない。
+  既存のNEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY / CRON_SECRET / SP_API_*をそのまま利用。
+・PC側環境変数: ZAIKO_TRENDS_IMPORT_SECRET（サーバーの専用Bearerと対応）、ZAIKO_APP_URL（本番アプリのHTTPS URL）。.env.localをスクリプトに読ませない。
+・PCにpytrendsの利用環境があるか確認（本作業では導入していない）。週次は月曜朝、pythonとscripts/sync-google-trends-weekly.pyをタスクスケジューラへ登録。失敗時は固定エラーで終了コード1。
+・cron-job.orgに朝1回 /api/cron/run?jobKey=sales_traffic_poll を新規登録。既存と同じCRON_SECRETのBearerを設定し、既存5ジョブは変えない。
+・環境変数を実行環境へ設定したうえで、初回のみ npx tsx scripts/backfill-sales-traffic.ts。
+  継続待ちは終了コード2でstateを残す。次の手動実行または朝cronで再開できる。完了までの履歴を確認する。
+・Google週次スクリプトの初回実行後、90日分と単一batch、セール表示、週比較、RLS、既存カードの数値を窓口が実環境で検収する。
+
+--- 以下、変更ファイル一覧とgit差分の取得結果を追記 ---
+
+変更済み4ファイル:
+README.md
+app/api/cron/run/route.ts
+app/dashboard/page.tsx
+supabase-schema.sql
+
+新規ファイル（未追跡、元からある3件を除く）:
+app/api/dashboard/sale-events/[id]/route.ts
+app/api/dashboard/sale-events/route.ts
+app/api/dashboard/sales-analysis/route.ts
+app/api/dashboard/trends-import/route.ts
+app/api/dashboard/weekly-summary/route.ts
+components/SalesAnalysisChart.tsx
+components/WeeklyHighlights.tsx
+docs/migration_google_trends_daily.sql
+docs/migration_sale_events.sql
+docs/migration_sales_analysis_perf_indexes.sql
+docs/migration_sales_traffic_asin_totals.sql
+docs/migration_sales_traffic_daily.sql
+docs/rollback_dashboard_sales_analysis.sql
+docs/seed_sale_events.sql
+lib/sales-analysis-aggregates.ts
+lib/sales-analysis-types.ts
+lib/sales-traffic-sync.ts
+lib/supabase-server.ts
+lib/trends-import-auth.ts
+scripts/backfill-sales-traffic.ts
+scripts/sync-google-trends-weekly.py
+tests/sales-analysis/before.json
+tests/sales-analysis/build-result.txt
+tests/sales-analysis/check-source-types.cjs
+tests/sales-analysis/font-mock.cjs
+tests/sales-analysis/implementation-report.txt
+tests/sales-analysis/lint-result.txt
+tests/sales-analysis/mock-db.ts
+tests/sales-analysis/offline-build.cjs
+tests/sales-analysis/offline-test.cjs
+tests/sales-analysis/preservation.test.ts
+tests/sales-analysis/read-reference.py
+tests/sales-analysis/sales-analysis.test.ts
+tests/sales-analysis/test-result.txt
+tests/sales-analysis/types-result.txt
+
+git diff --stat（未追跡の新規追加はこの統計に含まれない）:
+ README.md                 |  1 +
+ app/api/cron/run/route.ts |  6 ++++
+ app/dashboard/page.tsx    | 62 ++++++++++++++++++++------------
+ supabase-schema.sql       | 90 +++++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 136 insertions(+), 23 deletions(-)
+
+消込・既存計算・既存API・既存コンポーネント・既存state/財務libの git diff:
+[空: 0 bytes]
+
+追跡済み差分は許可4ファイルのみ。新規追加のコード/SQL/試験/控え/ログ/本報告は上記一覧。
