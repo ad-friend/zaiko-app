@@ -79,14 +79,18 @@ export function parseActiveListingsTsv(text: string): {
     "出品者sku",
     "出品者SKU",
   ]);
-  const asinHeader = pickHeaderKey(headers, [
-    "asin1",
-    "asin",
-    "ASIN 1",
-    "asin 1",
-    "商品ID",
-    "商品id",
-  ]);
+  const asinHeader =
+    pickHeaderKey(headers, [
+      "asin1",
+      "asin",
+      "ASIN 1",
+      "asin 1",
+      "商品ID",
+      "商品id",
+    ]) ??
+    // 2026-11-17：日本の出品レポート（英語の列名）は asin1 が無く product-id（＝「商品ID」と同じ列）に入る。
+    // 「product-id-type」を誤って拾わないよう、列名がちょうど product-id のときだけ使う。
+    (headers.find((h) => normalizeHeaderKey(h) === "productid") ?? null);
   const conditionHeader = pickHeaderKey(headers, [
     "item-condition",
     "itemcondition",

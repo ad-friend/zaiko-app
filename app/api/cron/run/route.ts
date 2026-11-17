@@ -312,7 +312,7 @@ async function runListingReportPollStep(): Promise<{ fetched: number; summary: s
       if (parsed.parseErrors.length && parsed.rows.length === 0) {
         await deleteCronState(LISTING_STATE_KEY);
         // 原因を突き止めるため、届いた列名（1行目だけ。データの値は含めない）を添える
-        const header = (iconv.decode(buf, "cp932").replace(/^﻿/, "").split(/\r?\n/)[0] ?? "").replace(/\t/g, " | ").slice(0, 300);
+        const header = (iconv.decode(buf, "cp932").replace(/^﻿/, "").split(/\r?\n/)[0] ?? "").replace(/\t/g, " | ").slice(0, 450);
         throw new Error(`${parsed.parseErrors[0]} 届いた列名: ${header}`);
       }
       const { upserted, deletedStale } = await upsertSkuConditions(parsed.rows);

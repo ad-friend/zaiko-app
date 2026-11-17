@@ -148,8 +148,15 @@ export async function runSalesTrafficPoll(backfill = false) {
       call: (operation, parameters) => bounded(client.callAPI({ operation, endpoint: "reports", ...parameters }), 6500),
       download: async (url, compression) => { const response = await fetch(url, { signal: AbortSignal.timeout(3000) }); if (!response.ok) throw new Error("本文取得失敗"); const buffer = Buffer.from(await response.arrayBuffer()); return JSON.parse((compression === "GZIP" ? gunzipSync(buffer, { maxOutputLength: 32 * 1024 * 1024 }) : buffer).toString("utf8")); },
     }, tokyoDate(), backfill);
-  } catch {
-    // SDK由来のURL、署名、ヘッダー、例外文字列を既存cronのログ経路に渡さない。
-    throw new Error("SALES_TRAFFIC_FAILED: SP-API取得に失敗しました");
+  } catch (e: unknown) {
+    // SDK由来のURL、署名、ヘッダーは渡さない。原因が分かるよう、種類・番号と伏せ字にした短い文だけ残す（2026-11-17）。
+    const o = e && typeof e === "object" ? (e as Record<string, unknown>) : {};
+    const kind = [o.name, o.code, o.statusCode ?? o.status].filter((v) => v != null && String(v).length > 0).map(String).join("/");
+    const text = String(o.message ?? e ?? "")
+      .replace(/https?:\/\/[^\s"'<>]+/gi, "[URL]")
+      .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [伏せ字]")
+      .replace(/(X-Amz-[A-Za-z0-9-]+|Signature|access_token|refresh_token|client_secret|Authorization)=?\s*[:=]\s*([^&\s"',]+)/gi, "$1=[伏せ字]")
+      .slice(0, 200);
+    throw new Error(`SALES_TRAFFIC_FAILED: SP-API取得に失敗しました（${kind || "不明"}: ${text}）`);
   }
 }
