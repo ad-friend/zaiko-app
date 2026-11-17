@@ -20,6 +20,7 @@ import {
   upsertSalesTransactionRows,
 } from "@/lib/amazon-financial-events";
 import { deleteCronState, getCronState, setCronState } from "@/lib/cron-continuation-state";
+import { parseActiveListingsTsv } from "@/lib/amazon-listing-tsv";
 
 // 注文の再取得は子APIの完了を待つため、Vercel Hobby の上限 300 秒にする。
 export const maxDuration = 300;
@@ -151,57 +152,6 @@ async function fetchTextFromReportDocument(url: string, compressionAlgorithm: st
   const buf = Buffer.from(await res.arrayBuffer());
   if (String(compressionAlgorithm ?? "").toUpperCase() === "GZIP") return gunzipSync(buf).toString("utf-8");
   return buf.toString("utf-8");
-}
-
-function conditionFromItemCondition(raw: string): "New" | "Used" {
-  const n = Number(String(raw ?? "").trim());
-  if (n === 11) return "New";
-  return "Used";
-}
-
-function toTrimmedString(v: unknown): string {
-  return v == null ? "" : String(v).trim();
-}
-
-/**
- * GET_MERCHANT_LISTINGS_ALL_DATA の TSV（reportOptions.custom=true でカスタム出力を要求）。
- * item-condition 列が無い場合は全行 New。ある場合は 11=New、それ以外 Used。
- */
-function parseListingReportTsv(text: string): {
-  rows: Array<{ sku: string; asin: string | null; condition_id: "New" | "Used" }>;
-  parseErrors: string[];
-} {
-  const bomStripped = text.replace(/^\uFEFF/, "");
-  const lines = bomStripped.split(/\r?\n/);
-  const headerLine = lines.find((l) => l.trim().length > 0) ?? "";
-  const headers = headerLine.split("\t").map((h) => h.trim().toLowerCase());
-  const idx = (k: string) => headers.findIndex((h) => h === k);
-  const skuIdx = idx("seller-sku");
-  const asinIdx = idx("asin1");
-  const condIdx = idx("item-condition");
-  if (skuIdx < 0 || asinIdx < 0) {
-    return {
-      rows: [],
-      parseErrors: [
-        "必須列が見つかりません（seller-sku / asin1）。出品詳細(GET_MERCHANT_LISTINGS_ALL_DATA)・言語 en_US を確認してください。",
-      ],
-    };
-  }
-  const parseErrors: string[] = [];
-  if (condIdx < 0) {
-    parseErrors.push("item-condition 列がありません。全行を新品(New)として登録します。");
-  }
-  const bySku = new Map<string, { sku: string; asin: string | null; condition_id: "New" | "Used" }>();
-  for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].split("\t");
-    const sku = toTrimmedString(cols[skuIdx]);
-    if (!sku) continue;
-    const asin = toTrimmedString(cols[asinIdx]) || null;
-    const condition_id: "New" | "Used" =
-      condIdx >= 0 ? conditionFromItemCondition(toTrimmedString(cols[condIdx])) : "New";
-    bySku.set(sku, { sku, asin, condition_id });
-  }
-  return { rows: [...bySku.values()], parseErrors };
 }
 
 async function upsertSkuConditions(rows: Array<{ sku: string; asin: string | null; condition_id: "New" | "Used" }>): Promise<{ upserted: number; deletedStale: number }> {
@@ -351,7 +301,8 @@ async function runListingReportPollStep(): Promise<{ fetched: number; summary: s
       const url = String(doc?.url ?? "").trim();
       if (!url) throw new Error("出品レポートURLが取得できませんでした");
       const text = await fetchTextFromReportDocument(url, doc?.compressionAlgorithm);
-      const parsed = parseListingReportTsv(text);
+      // 2026-11-17：日本語の列名でも読める手動の取り込みと同じ読み方を使う（英語だけの読み方では毎回「必須列が見つかりません」になっていた）
+      const parsed = parseActiveListingsTsv(text);
       if (parsed.parseErrors.length && parsed.rows.length === 0) {
         await deleteCronState(LISTING_STATE_KEY);
         throw new Error(parsed.parseErrors[0]);
@@ -745,7 +696,24 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({ ok: true, jobKey, fetched, summary, metrics });
   } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : "Cron job failed";
+    // 2026-11-17：Error 以外（Supabase のエラーオブジェクト等）も中身を残す。以前は「Cron job failed」だけで原因が分からなかった
+    // 行の値が入りうる details・hint は残さない。URL・Bearer・署名らしい部分は伏せ、全体を500字までにする。
+    const obj = e && typeof e === "object" ? (e as Record<string, unknown>) : null;
+    const redact = (s: string) =>
+      s
+        .replace(/https?:\/\/[^\s"'<>]+/gi, "[URL]")
+        .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [伏せ字]")
+        .replace(/(X-Amz-[A-Za-z0-9-]+|Signature|access_token|refresh_token|client_secret)=([^&\s"']+)/gi, "$1=[伏せ字]")
+        .slice(0, 500);
+    const rawMessage =
+      e instanceof Error
+        ? e.message
+        : typeof e === "string"
+          ? e
+          : obj && (obj.message || obj.code)
+            ? `${obj.code ? `[${String(obj.code)}] ` : ""}${String(obj.message ?? "")}`
+            : "Cron job failed";
+    const message = redact(rawMessage);
     const code = extractHttpErrorCode(message);
     const fetched = 0;
     const summary = `${jobKey}: 失敗${code ? `(${code})` : ""} / 取得 ${fetched}件`;
