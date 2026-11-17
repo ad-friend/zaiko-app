@@ -21,6 +21,7 @@ import {
 } from "@/lib/amazon-financial-events";
 import { deleteCronState, getCronState, setCronState } from "@/lib/cron-continuation-state";
 import { parseActiveListingsTsv } from "@/lib/amazon-listing-tsv";
+import iconv from "iconv-lite";
 
 // 注文の再取得は子APIの完了を待つため、Vercel Hobby の上限 300 秒にする。
 export const maxDuration = 300;
@@ -146,12 +147,12 @@ function createSpClient() {
   });
 }
 
-async function fetchTextFromReportDocument(url: string, compressionAlgorithm: string | null | undefined): Promise<string> {
+async function fetchBufferFromReportDocument(url: string, compressionAlgorithm: string | null | undefined): Promise<Buffer> {
   const res = await fetch(url, { method: "GET" });
   if (!res.ok) throw new Error(`レポート本文のダウンロードに失敗しました (${res.status})`);
   const buf = Buffer.from(await res.arrayBuffer());
-  if (String(compressionAlgorithm ?? "").toUpperCase() === "GZIP") return gunzipSync(buf).toString("utf-8");
-  return buf.toString("utf-8");
+  if (String(compressionAlgorithm ?? "").toUpperCase() === "GZIP") return gunzipSync(buf);
+  return buf;
 }
 
 async function upsertSkuConditions(rows: Array<{ sku: string; asin: string | null; condition_id: "New" | "Used" }>): Promise<{ upserted: number; deletedStale: number }> {
@@ -300,12 +301,19 @@ async function runListingReportPollStep(): Promise<{ fetched: number; summary: s
       })) as { url?: string; compressionAlgorithm?: string };
       const url = String(doc?.url ?? "").trim();
       if (!url) throw new Error("出品レポートURLが取得できませんでした");
-      const text = await fetchTextFromReportDocument(url, doc?.compressionAlgorithm);
-      // 2026-11-17：日本語の列名でも読める手動の取り込みと同じ読み方を使う（英語だけの読み方では毎回「必須列が見つかりません」になっていた）
-      const parsed = parseActiveListingsTsv(text);
+      const buf = await fetchBufferFromReportDocument(url, doc?.compressionAlgorithm);
+      // 2026-11-17：日本語の列名でも読める手動の取り込みと同じ読み方を使う（英語だけの読み方では毎回「必須列が見つかりません」になっていた）。
+      // 日本の出品レポートは CP932（Shift_JIS）で届くことがあるため、UTF-8 で列が見つからなければ CP932 で読み直す（返品の取り込みと同じ考え方）。
+      let parsed = parseActiveListingsTsv(buf.toString("utf-8"));
+      if (parsed.rows.length === 0) {
+        const retry = parseActiveListingsTsv(iconv.decode(buf, "cp932"));
+        if (retry.rows.length > 0) parsed = retry;
+      }
       if (parsed.parseErrors.length && parsed.rows.length === 0) {
         await deleteCronState(LISTING_STATE_KEY);
-        throw new Error(parsed.parseErrors[0]);
+        // 原因を突き止めるため、届いた列名（1行目だけ。データの値は含めない）を添える
+        const header = (iconv.decode(buf, "cp932").replace(/^﻿/, "").split(/\r?\n/)[0] ?? "").replace(/\t/g, " | ").slice(0, 300);
+        throw new Error(`${parsed.parseErrors[0]} 届いた列名: ${header}`);
       }
       const { upserted, deletedStale } = await upsertSkuConditions(parsed.rows);
       await deleteCronState(LISTING_STATE_KEY);
