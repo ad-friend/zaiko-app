@@ -23,18 +23,29 @@ export function parseSalesTrafficReport(input: unknown, start: string, end: stri
     if (amount.currencyCode !== "JPY") throw new Error("日本円以外のレポートです");
     return { date: row.date, sessions: integer(traffic.sessions), page_views: integer(traffic.pageViews), buy_box_percentage: numeric(traffic.buyBoxPercentage), unit_session_percentage: numeric(traffic.unitSessionPercentage), ordered_product_sales: numeric(amount.amount), total_order_items: integer(sales.totalOrderItems), units_ordered: integer(sales.unitsOrdered), source_report_id: reportId };
   });
-  const asinRows: AsinTotal[] = (Array.isArray(report.salesAndTrafficByAsin) ? report.salesAndTrafficByAsin : []).map(value => {
+  // 2026-11-17：本番の90日分に条件に合わない行が混ざり、1行のためにレポート全体を捨てていた。
+  // 合わない行だけ飛ばし、数と例（ASIN・通貨の値だけ）を返す。大半が合わないときは従来どおりエラー。
+  const rawAsin = Array.isArray(report.salesAndTrafficByAsin) ? report.salesAndTrafficByAsin : [];
+  const skippedAsinSamples: string[] = [];
+  let skippedAsinCount = 0;
+  const asinRows: AsinTotal[] = [];
+  for (const value of rawAsin) {
     const row = object(value), sales = object(row.salesByAsin), amount = object(sales.orderedProductSales);
-    if (typeof row.childAsin !== "string" || !/^[A-Z0-9]{10}$/.test(row.childAsin) || amount.currencyCode !== "JPY") throw new Error("ASIN別レポートが不正です");
-    return { asin: row.childAsin, window_start: start, window_end: end, units_ordered: integer(sales.unitsOrdered), ordered_sales: numeric(amount.amount) };
-  });
+    if (typeof row.childAsin !== "string" || !/^[A-Z0-9]{10}$/.test(row.childAsin) || amount.currencyCode !== "JPY") {
+      skippedAsinCount += 1;
+      if (skippedAsinSamples.length < 5) skippedAsinSamples.push(`${String(row.childAsin ?? "(なし)").slice(0, 20)}/${String(amount.currencyCode ?? "(なし)").slice(0, 5)}`);
+      continue;
+    }
+    asinRows.push({ asin: row.childAsin, window_start: start, window_end: end, units_ordered: integer(sales.unitsOrdered), ordered_sales: numeric(amount.amount) });
+  }
+  if (rawAsin.length > 0 && skippedAsinCount * 2 > rawAsin.length) throw new Error(`ASIN別レポートが不正です（${skippedAsinCount}/${rawAsin.length}行、例 ${skippedAsinSamples.join(", ")}）`);
   // 固定応答には親ASINの違う同一childAsinが存在する。主キー単位へまとめてからbatch upsertする。
   const byAsin = new Map<string, AsinTotal>();
   for (const row of asinRows) {
     const previous = byAsin.get(row.asin);
     byAsin.set(row.asin, previous ? { ...row, units_ordered: previous.units_ordered + row.units_ordered, ordered_sales: previous.ordered_sales + row.ordered_sales } : row);
   }
-  return { daily, totals: [...byAsin.values()] };
+  return { daily, totals: [...byAsin.values()], skippedAsinCount, skippedAsinSamples };
 }
 export function validateTrendsPayload(input: unknown) {
   const body = object(input), start = body.window_start, end = body.window_end;
@@ -87,6 +98,8 @@ async function bounded<T>(work: Promise<T>, ms = 3000): Promise<T> {
 export async function runSalesTrafficSync(deps: SyncDependencies, today = tokyoDate(), backfill = false) {
   const deadline = deps.now() + SALES_TRAFFIC_BUDGET_MS;
   let fetched = 0;
+  let skippedAsinCount = 0;
+  const skippedAsinSamples: string[] = [];
   let pending = false;
   const processReport = async (key: string, days: number, includeAsins: boolean, existing: Record<string, unknown> | null) => {
     let state: ReportState;
@@ -118,6 +131,8 @@ export async function runSalesTrafficSync(deps: SyncDependencies, today = tokyoD
       await saveSalesTraffic(deps.db, parsed, state.requestedWindowStart, state.requestedWindowEnd, includeAsins);
       await deps.deleteState(key);
       fetched += parsed.daily.length;
+      skippedAsinCount += parsed.skippedAsinCount;
+      skippedAsinSamples.push(...parsed.skippedAsinSamples.slice(0, 5 - skippedAsinSamples.length));
       return true;
     }
     return false; // poll/create後の状態は外部I/O前に既に保存済み。
@@ -135,7 +150,7 @@ export async function runSalesTrafficSync(deps: SyncDependencies, today = tokyoD
     const daily = await deps.getState(dailyKey);
     if (!await processReport(dailyKey, 7, false, daily)) pending = true;
   }
-  return { fetched, summary: pending ? "売上とトラフィック: 継続待ち（翌朝再開）" : "売上とトラフィック: 取得完了", metrics: { pending, fetched } };
+  return { fetched, summary: pending ? "売上とトラフィック: 継続待ち（翌朝再開）" : "売上とトラフィック: 取得完了", metrics: { pending, fetched, skippedAsinCount, skippedAsinSamples } };
 }
 export async function runSalesTrafficPoll(backfill = false) {
   try {
