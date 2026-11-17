@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { normalizeToFullWidthKatakana } from "@/lib/kana";
 import { normalizeSupplierForMatch } from "@/lib/normalizeSupplier";
 import BarcodeScannerModal from "@/components/BarcodeScannerModal";
+import InboundPendingList from "@/components/InboundPendingList";
+import { pendingSourceLabel, type PendingRow } from "@/lib/inbound-pending";
 
 // ----- 型定義 -----
 type ProductCondition = "new" | "used";
@@ -179,6 +181,75 @@ export default function InboundPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
 
+  // 相談-13：入庫待ちから呼び出した伝票（null＝今までどおりの手入力）
+  const [pending, setPending] = useState<{ id: string; orderNumber: string | null; label: string; blockers: string[]; notes: string[] } | null>(null);
+  const [pendingReloadKey, setPendingReloadKey] = useState(0);
+
+  const clearPending = useCallback(() => setPending(null), []);
+
+  /** 呼び出しをやめるときは、呼び出した入力も全部消す（そのまま手入力として登録して二重にならないように） */
+  const cancelPending = useCallback(() => {
+    setPending(null);
+    setRows([]);
+    setTotalPurchase("");
+    setShipping("");
+    setDiscount("");
+    setSupplier("");
+    setGenre("");
+    setPurchaseDate(new Date().toISOString().split("T")[0]);
+  }, []);
+
+  const loadPending = useCallback(
+    (row: PendingRow) => {
+      const today = new Date().toISOString().split("T")[0];
+      const hasInput =
+        rows.length > 0 || totalPurchase !== "" || supplier !== "" || shipping !== "" || discount !== "" ||
+        genre !== "" || purchaseDate !== today || pending !== null;
+      if (hasInput && !confirm("今の入力を消して、入庫待ちの伝票を呼び出します。よろしいですか？")) return;
+      const h = row.payload.header;
+      const numStr = (n: number | null | undefined) => (n == null ? "" : String(n));
+      setInboundMode("product");
+      // 仕入日が分からないときは空欄のまま（今日で埋めない）。入れるまで登録できない
+      setPurchaseDate(h.purchaseDate ?? row.purchaseDate ?? "");
+      setSupplier(h.supplierKana ?? "");
+      setGenre(h.genre ?? "");
+      setTotalPurchase(numStr(h.totalPurchase));
+      setShipping(numStr(h.shipping));
+      setDiscount(numStr(h.discount));
+      setRows(
+        row.payload.items.map((it) => ({
+          id: generateId(),
+          // 登録に使うのは Amazon の自分の出品から確かめたJANだけ（書類の印字JANは使わない）
+          jan: it.jan ?? "",
+          brand: it.brand ?? "",
+          productName: cleanseProductName(it.productName ?? it.rawName ?? ""),
+          modelNumber: it.modelNumber ?? it.rawModel ?? "",
+          basePrice: it.fixedUnitPrice ? it.basePrice ?? 0 : it.unitPrice ?? it.basePrice ?? 0,
+          quantity: it.quantity ?? 1,
+          fixedUnitPrice: it.fixedUnitPrice === true,
+          inferredByAi: false,
+          condition: it.condition ?? "new",
+          itemKind: "product" as const,
+          partCode: "",
+          ...(it.asin ? { asin: it.asin } : {}),
+        }))
+      );
+      const warn: string[] = [...row.blockers];
+      if (!(h.purchaseDate ?? row.purchaseDate)) warn.push("仕入日が分かりません。原本を見て入れてください");
+      if (row.payload.items.some((it) => it.quantity == null)) warn.push("数量が分からない行は1にしています。確かめてください");
+      if (row.payload.items.some((it) => it.condition == null)) warn.push("新品/中古が分からない行は新品にしています。確かめてください");
+      if (!h.supplierKana) warn.push(`仕入先カナが未確定です（書類の名前：${h.supplierName ?? "不明"}）`);
+      setPending({
+        id: row.id,
+        orderNumber: row.orderNumber ?? h.orderNumber ?? null,
+        label: pendingSourceLabel(row),
+        blockers: warn,
+        notes: row.payload.notes ?? [],
+      });
+    },
+    [rows.length, totalPurchase, supplier, shipping, discount, genre, purchaseDate, pending]
+  );
+
   const totalNum = Number(totalPurchase) || 0;
   const shippingNum = Number(shipping) || 0;
   const discountNum = Number(discount) || 0;
@@ -195,8 +266,28 @@ export default function InboundPage() {
   const validation = validate(totalNum, headerInfo, rows, totalPurchase, masterSuppliers, inboundMode);
 
   // 🌟 追加: エラーが1つでもあれば true になるフラグ
-  const hasErrors = 
-    !!validation.fixedTotalExceedsPurchase || 
+  // 相談-13：入庫待ちからの登録だけ、按分対象で基準価格が0の行を止める（手入力の決まりは変えない）
+  const pendingDistributeZero = !!pending && rows.some((r) => r.fixedUnitPrice && r.basePrice <= 0);
+  const pendingDateMissing = !!pending && !purchaseDate;
+  // 相談-13：入庫待ちからの登録は、按分なしなら「単価×数量の合計＝仕入総額」をサーバーでも確かめる。先に画面で知らせる
+  const pendingSumBase = rows.reduce((s, r) => s + r.basePrice * r.quantity, 0);
+  const pendingUnitCount = rows.reduce((s, r) => s + r.quantity, 0);
+  const pendingTotalMismatch =
+    !!pending && rows.length > 0 && !rows.some((r) => r.fixedUnitPrice) &&
+    (totalPurchase.trim() === "" || Math.abs(pendingSumBase - totalNum) > pendingUnitCount);
+
+  // サーバーと同じ確認：送料・割引・総コストは0以上、計算した実効単価はすべて0より大きい
+  const pendingMoneyBad =
+    !!pending && rows.length > 0 &&
+    (shippingNum < 0 || discountNum < 0 || totalNum + shippingNum - discountNum < 0 ||
+      rows.some((r) => !(calcEffectiveUnitPrice(r, totalNum, headerInfo, rows) > 0)));
+
+  const hasErrors =
+    pendingDistributeZero ||
+    pendingDateMissing ||
+    pendingTotalMismatch ||
+    pendingMoneyBad ||
+    !!validation.fixedTotalExceedsPurchase ||
     !!validation.purchaseRequiredWhenDistribute || 
     (validation.missingFields && validation.missingFields.length > 0) ||
     !!validation.supplierKanaError ||
@@ -390,7 +481,10 @@ export default function InboundPage() {
 
   const handleRegister = useCallback(async () => {
     // 🌟 変更: エラーチェックはボタンの disabled で防ぐため、ここにあった alert() を削除
-    if (!confirm("入力内容をデータベースに保存しますか？")) return;
+    const confirmText = pending && pending.blockers.length > 0
+        ? `次の点を確かめましたか？\n・${pending.blockers.join("\n・")}\n\n入力内容をデータベースに保存しますか？`
+        : "入力内容をデータベースに保存しますか？";
+    if (!confirm(confirmText)) return;
 
     setIsSubmitting(true);
     try {
@@ -423,9 +517,11 @@ export default function InboundPage() {
                 totalPurchase: totalNum,
                 shipping: shippingNum,
                 discount: discountNum,
-                totalCost: totalNum + shippingNum - discountNum
+                totalCost: totalNum + shippingNum - discountNum,
+                ...(pending ? { orderNumber: pending.orderNumber } : {})
             },
-            items: expandedItems
+            items: expandedItems,
+            ...(pending ? { pendingId: pending.id } : {})
         };
 
         const res = await fetch("/api/inbound", {
@@ -435,10 +531,16 @@ export default function InboundPage() {
         });
 
         if (!res.ok) {
-            throw new Error("保存に失敗しました");
+            let msg = "保存に失敗しました";
+            try { const j = await res.json(); if (j?.error) msg = `保存に失敗しました：${j.error}`; } catch { /* 本文なし */ }
+            throw new Error(msg);
         }
-        
+
         const result = await res.json();
+        if (pending) {
+            setPending(null);
+            setPendingReloadKey((k) => k + 1);
+        }
         alert(`保存しました (ID: ${result.id}, 商品数: ${expandedItems.length})`);
         setRows([]);             // 商品リストを空にする
         setTotalPurchase("");    // 仕入総額を空にする
@@ -455,7 +557,7 @@ export default function InboundPage() {
     } finally {
         setIsSubmitting(false);
     }
-  }, [headerInfo, rows, totalNum, shippingNum, discountNum, purchaseDate, supplier, genre, totalPurchase, inboundMode]);
+  }, [headerInfo, rows, totalNum, shippingNum, discountNum, purchaseDate, supplier, genre, totalPurchase, inboundMode, pending]);
 
   const openCamera = useCallback(() => {
     setCameraOpen(true);
@@ -493,7 +595,46 @@ export default function InboundPage() {
           <div className="grid gap-8 lg:grid-cols-12 items-start">
             
             <div className="lg:col-span-4 space-y-6 lg:sticky lg:top-24">
-              
+
+              <InboundPendingList activeId={pending?.id ?? null} reloadKey={pendingReloadKey} onSelect={loadPending} />
+
+              {pending && (
+                <div className="rounded-xl border border-primary/30 bg-primary/5 p-4 text-sm shadow-sm">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="font-semibold text-slate-800">入庫待ちから呼び出し中</div>
+                      <div className="text-xs text-slate-600 truncate">書類：{pending.label}</div>
+                      {pending.orderNumber && <div className="text-xs text-slate-600">注文番号：{pending.orderNumber}</div>}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!confirm("呼び出しをやめます。呼び出した入力は全部消えます（入庫待ちには残ります）。よろしいですか？")) return;
+                        cancelPending();
+                      }}
+                      className="shrink-0 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                    >
+                      呼び出しをやめる
+                    </button>
+                  </div>
+                  {pending.blockers.length > 0 && (
+                    <ul className="mt-2 list-disc list-inside text-xs text-amber-700">
+                      {pending.blockers.map((b, i) => (
+                        <li key={i}>{b}</li>
+                      ))}
+                    </ul>
+                  )}
+                  {pending.notes.length > 0 && (
+                    <ul className="mt-1 list-disc list-inside text-xs text-slate-500">
+                      {pending.notes.map((n, i) => (
+                        <li key={i}>{n}</li>
+                      ))}
+                    </ul>
+                  )}
+                  <p className="mt-2 text-[11px] text-slate-500">中身を確かめてから「入庫データを保存」を押してください。同じ伝票は2回登録されません。</p>
+                </div>
+              )}
+
               <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm transition-all hover:shadow-md">
                 <div className="bg-slate-50/80 px-6 py-4 border-b border-slate-100 backdrop-blur">
                   <h2 className="text-base font-bold text-slate-800 flex items-center gap-2">
@@ -676,6 +817,18 @@ export default function InboundPage() {
                     <div className="space-y-1">
                       <h4 className="font-semibold text-red-900">入力内容を確認してください</h4>
                       <ul className="list-disc list-inside text-red-700 opacity-90 text-xs leading-relaxed">
+                        {pendingDateMissing && (
+                          <li>仕入日を入れてください（原本の日付）</li>
+                        )}
+                        {pendingMoneyBad && (
+                          <li>送料・割引は0以上にし、割引のあとで実効単価が0円以下になる行がないようにしてください</li>
+                        )}
+                        {pendingTotalMismatch && (
+                          <li>単価×数量の合計（{pendingSumBase.toLocaleString()}円）と仕入総額が合いません。原本を見て直してください</li>
+                        )}
+                        {pendingDistributeZero && (
+                          <li>按分対象の行に基準価格（Amazonの最安値など）を入れてください</li>
+                        )}
                         {validation.purchaseRequiredWhenDistribute && (
                           <li>按分を使用している場合は仕入総額を入力してください</li>
                         )}
@@ -715,6 +868,7 @@ export default function InboundPage() {
                         if (rows.length > 0 && !confirm("モードを切替えるとリストをクリアします。よろしいですか？")) return;
                         setInboundMode("product");
                         setRows([]);
+                        clearPending();
                       }}
                       className={`rounded-md px-3 py-1.5 font-medium ${inboundMode === "product" ? "bg-primary text-white" : "text-slate-600 hover:bg-slate-50"}`}
                     >
@@ -727,6 +881,7 @@ export default function InboundPage() {
                         if (rows.length > 0 && !confirm("モードを切替えるとリストをクリアします。よろしいですか？")) return;
                         setInboundMode("part");
                         setRows([]);
+                        clearPending();
                       }}
                       className={`rounded-md px-3 py-1.5 font-medium ${inboundMode === "part" ? "bg-violet-600 text-white" : "text-slate-600 hover:bg-slate-50"}`}
                     >

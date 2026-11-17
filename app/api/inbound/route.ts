@@ -76,13 +76,70 @@ type Body = {
     shipping: number;
     discount: number;
     totalCost: number;
+    /** 相談-13：入庫待ちから呼び出したときの注文番号（任意） */
+    orderNumber?: string | null;
   };
   items: Item[];
+  /** 相談-13：入庫待ちから呼び出した伝票。あれば register_pending_inbound で1回の処理で登録する */
+  pendingId?: string | null;
 };
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** 相談-13：入庫待ちからの登録。ASIN の取得（外部）は DB の処理の外で先に済ませ、登録は関数1回で行う */
+async function registerFromPending(pendingId: string, header: Body["header"], items: Item[]) {
+  if (!UUID.test(pendingId)) {
+    return NextResponse.json({ success: false, error: "入庫待ちの番号が正しくありません" }, { status: 400 });
+  }
+  if (!Array.isArray(items) || items.length === 0) {
+    return NextResponse.json({ success: false, error: "商品が1つもありません" }, { status: 400 });
+  }
+  const asinByJan = new Map<string, string | null>();
+  const rpcItems = [];
+  for (const item of items) {
+    const isPart = String(item.itemKind ?? "product").trim().toLowerCase() === "part";
+    const jan = item.jan?.trim() || "";
+    let asin: string | null = typeof item.asin === "string" && item.asin.trim().length >= 10 ? item.asin.trim() : null;
+    if (!isPart && !asin && is13DigitJan(jan)) {
+      if (!asinByJan.has(jan)) {
+        asinByJan.set(jan, await fetchAsinByJan(jan));
+        await sleep(400);
+      }
+      asin = asinByJan.get(jan) ?? null;
+    }
+    rpcItems.push({
+      jan,
+      asin: isPart ? null : asin,
+      brand: item.brand ?? null,
+      productName: item.productName ?? null,
+      modelNumber: item.modelNumber ?? null,
+      condition: item.condition ?? null,
+      basePrice: item.basePrice,
+      fixedUnitPrice: item.fixedUnitPrice === true,
+      effectiveUnitPrice: item.effectiveUnitPrice,
+      itemKind: isPart ? "part" : "product",
+      partCode: item.partCode ?? null,
+    });
+  }
+  const { data, error } = await supabase.rpc("register_pending_inbound", {
+    p_pending_id: pendingId,
+    p_header: header,
+    p_items: rpcItems,
+  });
+  if (error) {
+    console.error("入庫待ちからの登録に失敗:", error.message);
+    return NextResponse.json({ success: false, error: error.message }, { status: 400 });
+  }
+  return NextResponse.json({ success: true, id: Number(data) });
+}
 
 export async function POST(req: Request) {
   try {
-    const { header, items }: Body = await req.json();
+    const { header, items, pendingId }: Body = await req.json();
+
+    if (pendingId) {
+      return await registerFromPending(String(pendingId), header, items);
+    }
 
     // 1. ヘッダー情報の保存
     const { data: headerRow, error: headerError } = await supabase
