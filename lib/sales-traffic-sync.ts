@@ -126,7 +126,9 @@ export async function runSalesTrafficSync(deps: SyncDependencies, today = tokyoD
       const doc = object(await deps.call("getReportDocument", { path: { reportDocumentId: state.documentId } }));
       if (typeof doc.url !== "string") throw new Error("レポート文書がありません");
       const raw = await deps.download(doc.url, typeof doc.compressionAlgorithm === "string" ? doc.compressionAlgorithm : undefined);
-      const parsed = parseSalesTrafficReport(raw, state.requestedWindowStart, state.requestedWindowEnd, state.reportId);
+      // 2026-11-17：ASIN別を頼んでいない回（直近7日）にも Amazon は親ASIN単位のまとめを付け、そこには childAsin が無い。
+      // その回はASINの部分を読まない（ASIN別の合計は90日の回だけで更新する）。
+      const parsed = parseSalesTrafficReport(includeAsins ? raw : { ...object(raw), salesAndTrafficByAsin: [] }, state.requestedWindowStart, state.requestedWindowEnd, state.reportId);
       if (includeAsins && !Array.isArray(object(raw).salesAndTrafficByAsin)) throw new Error("ASIN別レポートがありません");
       await saveSalesTraffic(deps.db, parsed, state.requestedWindowStart, state.requestedWindowEnd, includeAsins);
       await deps.deleteState(key);
