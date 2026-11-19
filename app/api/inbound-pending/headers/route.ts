@@ -13,7 +13,7 @@ export const maxDuration = 60;
 const PAGE = 1000;
 const MAX_ROWS = 5000;
 const COLUMNS =
-  "id,purchase_date,supplier,order_number,total_purchase_amount,shipping_cost,discount_amount,total_cost,created_at,pending_id";
+  "id,purchase_date,supplier,order_number,total_purchase_amount,shipping_cost,discount_amount,total_cost,created_at,pending_id,inbound_items(effective_unit_price)";
 
 type Row = {
   id: number;
@@ -26,6 +26,7 @@ type Row = {
   total_cost: number | string | null;
   created_at: string | null;
   pending_id: string | null;
+  inbound_items: { effective_unit_price: number | string | null }[] | null;
 };
 
 const num = (v: number | string | null) => (v === null || v === "" ? null : Number(v));
@@ -67,6 +68,9 @@ export async function GET(req: NextRequest) {
             totalCost: num(r.total_cost),
             createdAt: r.created_at,
             fromPending: r.pending_id !== null,
+            // 手入力の伝票は見出しの合計が 0 のことがあるため、商品の行の実質単価の合計も返す（送料・値引きを按分した後の値）
+            itemCount: (r.inbound_items ?? []).length,
+            itemsTotal: (r.inbound_items ?? []).reduce((a, it) => a + (num(it.effective_unit_price) ?? 0), 0),
           })),
         });
       }
