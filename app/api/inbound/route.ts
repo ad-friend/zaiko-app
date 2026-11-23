@@ -82,7 +82,11 @@ type Body = {
   items: Item[];
   /** 相談-13：入庫待ちから呼び出した伝票。あれば register_pending_inbound で1回の処理で登録する */
   pendingId?: string | null;
+  /** 相談-13 段階3：福袋の袋ごとの固定の番号。通信が切れて保存し直しても、同じ袋を二重に登録しない */
+  bagKey?: string | null;
 };
+
+const BAG_KEY = /^[a-z0-9-]{8,60}:\d{1,3}$/;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -135,33 +139,81 @@ async function registerFromPending(pendingId: string, header: Body["header"], it
 
 export async function POST(req: Request) {
   try {
-    const { header, items, pendingId }: Body = await req.json();
+    const { header, items, pendingId, bagKey }: Body = await req.json();
 
     if (pendingId) {
       return await registerFromPending(String(pendingId), header, items);
     }
 
-    // 1. ヘッダー情報の保存
-    const { data: headerRow, error: headerError } = await supabase
-      .from('inbound_headers')
-      .insert({
-        purchase_date: header.purchaseDate,
-        supplier: header.supplier,
-        genre: header.genre,
-        total_purchase_amount: header.totalPurchase,
-        shipping_cost: header.shipping,
-        discount_amount: header.discount,
-        total_cost: header.totalCost,
-      })
-      .select('id')
-      .single();
-
-    if (headerError || !headerRow) {
-      console.error('Failed to save inbound header:', headerError);
-      return NextResponse.json({ success: false, error: 'Database Error' }, { status: 500 });
+    // 相談-13 段階3：同じ袋がもう登録されていれば、新しく作らずその伝票を返す
+    let reuseHeaderId: number | null = null;
+    if (bagKey != null) {
+      if (!BAG_KEY.test(String(bagKey))) {
+        return NextResponse.json({ success: false, error: "袋の番号が正しくありません" }, { status: 400 });
+      }
+      const { data: found, error: findError } = await supabase
+        .from('inbound_headers')
+        .select('id, inbound_items(id)')
+        .contains('source_reference', { bagKey })
+        .limit(1);
+      if (findError) {
+        console.error('Failed to check bag:', findError);
+        return NextResponse.json({ success: false, error: 'Database Error' }, { status: 500 });
+      }
+      const hit = found?.[0] as { id: number; inbound_items?: { id: number }[] } | undefined;
+      if (hit && (hit.inbound_items?.length ?? 0) > 0) {
+        return NextResponse.json({ success: true, id: Number(hit.id), alreadySaved: true });
+      }
+      if (hit) reuseHeaderId = Number(hit.id); // 前回は伝票だけできて商品が入らなかった
     }
 
-    const headerId = headerRow.id as number;
+    // 1. ヘッダー情報の保存
+    let headerId: number;
+    if (reuseHeaderId !== null) {
+      headerId = reuseHeaderId;
+      // 保存し直すまでに直した仕入日・仕入先なども、残っている伝票に反映する
+      const { error: fixError } = await supabase
+        .from('inbound_headers')
+        .update({
+          purchase_date: header.purchaseDate,
+          supplier: header.supplier,
+          genre: header.genre,
+          total_purchase_amount: header.totalPurchase,
+          shipping_cost: header.shipping,
+          discount_amount: header.discount,
+          total_cost: header.totalCost,
+          order_number: header.orderNumber?.trim() || null,
+        })
+        .eq('id', headerId);
+      if (fixError) {
+        console.error('Failed to update bag header:', fixError);
+        return NextResponse.json({ success: false, error: 'Database Error' }, { status: 500 });
+      }
+    } else {
+      const { data: headerRow, error: headerError } = await supabase
+        .from('inbound_headers')
+        .insert({
+          purchase_date: header.purchaseDate,
+          supplier: header.supplier,
+          genre: header.genre,
+          total_purchase_amount: header.totalPurchase,
+          shipping_cost: header.shipping,
+          discount_amount: header.discount,
+          total_cost: header.totalCost,
+          // 相談-13 段階3：福袋は1袋＝1伝票なので、freee と合計で照らせるよう同じ注文番号を残す
+          ...(header.orderNumber?.trim() ? { order_number: header.orderNumber.trim() } : {}),
+          ...(bagKey ? { source_reference: { kind: "bag", bagKey } } : {}),
+        })
+        .select('id')
+        .single();
+
+      if (headerError || !headerRow) {
+        console.error('Failed to save inbound header:', headerError);
+        return NextResponse.json({ success: false, error: 'Database Error' }, { status: 500 });
+      }
+
+      headerId = headerRow.id as number;
+    }
 
     // 2. 明細の保存（商品: JAN→ASIN / パーツ: part_code・商品マスタ非登録）
     if (items.length > 0) {

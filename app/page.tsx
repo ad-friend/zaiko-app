@@ -5,7 +5,9 @@ import { normalizeToFullWidthKatakana } from "@/lib/kana";
 import { normalizeSupplierForMatch } from "@/lib/normalizeSupplier";
 import BarcodeScannerModal from "@/components/BarcodeScannerModal";
 import InboundPendingList from "@/components/InboundPendingList";
+import BagInboundPanel from "@/components/BagInboundPanel";
 import { pendingSourceLabel, type PendingRow } from "@/lib/inbound-pending";
+import { countPhotoJans, isRegistrableJan, type BagRun, type PriceQuote } from "@/lib/inbound-bags";
 
 // ----- 型定義 -----
 type ProductCondition = "new" | "used";
@@ -27,7 +29,12 @@ type ProductRow = {
   asin?: string | null;
   itemKind: InboundMode;
   partCode: string;
+  /** 相談-13 段階3：福袋で自動で入れた基準価格の出どころ（手で直すと消える） */
+  priceSource?: { label: string; url: string | null; name: string | null } | null;
+  priceNote?: string | null;
 };
+
+const BAG_RUN_KEY = "inbound-bag-run-v1";
 
 type HeaderInfo = {
   purchaseDate: string;
@@ -147,6 +154,21 @@ function generateId() {
   return Math.random().toString(36).slice(2, 12);
 }
 
+/** 福袋で自動で入れた基準価格の出どころ（押すと、その出品を開いて確かめられる） */
+function BagPriceInfo({ row }: { row: ProductRow }) {
+  if (row.priceSource) {
+    const text = `${row.priceSource.label}の最安値`;
+    return row.priceSource.url ? (
+      <a href={row.priceSource.url} target="_blank" rel="noopener noreferrer" title={row.priceSource.name ?? undefined} className="mt-1 block text-right text-[10px] text-primary underline">
+        {text}
+      </a>
+    ) : (
+      <div className="mt-1 text-right text-[10px] text-slate-500">{text}</div>
+    );
+  }
+  return row.priceNote ? <div className="mt-1 text-right text-[10px] text-amber-700">{row.priceNote}</div> : null;
+}
+
 export default function InboundPage() {
   const [purchaseDate, setPurchaseDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [supplier, setSupplier] = useState<string>("");
@@ -156,6 +178,10 @@ export default function InboundPage() {
   const [discount, setDiscount] = useState<string>("");
 
   const [rows, setRows] = useState<ProductRow[]>([]);
+  const rowsRef = useRef<ProductRow[]>([]);
+  useEffect(() => {
+    rowsRef.current = rows;
+  }, [rows]);
   const [inboundMode, setInboundMode] = useState<InboundMode>("product");
   const [inferringJan, setInferringJan] = useState<string | null>(null);
   const [partLookupBusy, setPartLookupBusy] = useState<string | null>(null);
@@ -187,6 +213,182 @@ export default function InboundPage() {
 
   const clearPending = useCallback(() => setPending(null), []);
 
+  // 相談-13 段階3：福袋の入庫（1袋＝1伝票）。画面を開き直しても続きから入れるよう、袋の進み具合だけ端末に残す
+  const [bagRun, setBagRunState] = useState<BagRun | null>(null);
+  const [bagBusy, setBagBusy] = useState<string | null>(null);
+  const [bagMessage, setBagMessage] = useState<string | null>(null);
+  const bagRetryAtRef = useRef(0); // 通信が切れた直後は、前の保存が終わるまで押し直させない
+
+  const setBagRun = useCallback((run: BagRun | null) => {
+    setBagRunState(run);
+    try {
+      if (run) localStorage.setItem(BAG_RUN_KEY, JSON.stringify(run));
+      else localStorage.removeItem(BAG_RUN_KEY);
+    } catch {
+      /* 保存できない端末でも入庫は続けられる */
+    }
+  }, []);
+
+  const applyBag = useCallback((run: BagRun) => {
+    const bag = run.bags[run.current];
+    setInboundMode("product");
+    setRows([]);
+    setTotalPurchase(String(bag.price));
+    setShipping(bag.shipping ? String(bag.shipping) : "");
+    setDiscount(bag.discount ? String(bag.discount) : "");
+    setBagMessage(null);
+  }, []);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(BAG_RUN_KEY);
+      if (!raw) return;
+      const run = JSON.parse(raw) as BagRun;
+      if (!run.runId || !Array.isArray(run.bags) || !run.bags[run.current]) return;
+      setBagRunState(run);
+      applyBag(run);
+      // 開き直しても、仕入日を今日に変えたまま登録しない
+      const h = JSON.parse(localStorage.getItem(`${BAG_RUN_KEY}-header`) ?? "{}") as { purchaseDate?: string; supplier?: string; genre?: string };
+      setPurchaseDate(h.purchaseDate ?? "");
+      setSupplier(h.supplier ?? "");
+      setGenre(h.genre ?? "");
+    } catch {
+      /* 読めない控えは使わない */
+    }
+  }, [applyBag]);
+
+  useEffect(() => {
+    if (!bagRun) return;
+    try {
+      localStorage.setItem(`${BAG_RUN_KEY}-header`, JSON.stringify({ purchaseDate, supplier, genre }));
+    } catch {
+      /* 保存できない端末でも入庫は続けられる */
+    }
+  }, [bagRun, purchaseDate, supplier, genre]);
+
+  const startBagRun = useCallback((run: BagRun) => {
+    if (rows.length > 0 && !confirm("今の商品リストを消して、福袋の入庫を始めます。よろしいですか？")) return;
+    setBagRun(run);
+    applyBag(run);
+  }, [rows.length, setBagRun, applyBag]);
+
+  const cancelBagRun = useCallback(() => {
+    setBagRun(null);
+    setBagMessage(null);
+    setRows([]);
+    setTotalPurchase("");
+    setShipping("");
+    setDiscount("");
+  }, [setBagRun]);
+
+  /** JAN から商品名と基準価格を取る（今の自動取得に「価格も」を付けて呼ぶ） */
+  const fetchBagItem = useCallback(async (jan: string, condition: ProductCondition) => {
+    const res = await fetch("/api/infer-jan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jan, withPrice: true, condition }),
+    });
+    const data = res.ok ? await res.json() : {};
+    const quote = (data.quote ?? null) as PriceQuote | null;
+    return {
+      brand: cleanseProductName(data.brand ?? ""),
+      productName: cleanseProductName(data.productName ?? ""),
+      modelNumber: cleanseProductName(data.modelNumber ?? ""),
+      asin: (data.asin as string | undefined) ?? null,
+      isMaster: data.isMaster === true,
+      basePrice: quote?.amount ?? 0,
+      priceSource: quote?.amount && quote.source ? { label: quote.source, url: quote.url, name: quote.name } : null,
+      priceNote: quote?.amount ? null : quote?.note ?? "価格を取得できませんでした",
+    };
+  }, []);
+
+  /** 福袋の行を足す。mode=photo は数量を写真の個数まで（撮り直しで増やさない）、add は1個足す */
+  const addBagJans = useCallback(async (counts: Map<string, number>, mode: "photo" | "add") => {
+    const known = new Set(rowsRef.current.map((r) => r.jan));
+    setRows((prev) => prev.map((r) => {
+      const n = counts.get(r.jan);
+      if (!n) return r;
+      return { ...r, quantity: mode === "photo" ? Math.max(r.quantity, n) : r.quantity + n };
+    }));
+    const fresh = [...counts.entries()].filter(([jan]) => !known.has(jan));
+    let i = 0;
+    for (const [jan, quantity] of fresh) {
+      i += 1;
+      setBagBusy(`商品と価格を調べています（${i}/${fresh.length}）`);
+      let info: Awaited<ReturnType<typeof fetchBagItem>>;
+      try {
+        info = await fetchBagItem(jan, "new");
+      } catch {
+        info = { brand: "", productName: "", modelNumber: "", asin: null, isMaster: false, basePrice: 0, priceSource: null, priceNote: "価格を取得できませんでした" };
+      }
+      const row: ProductRow = {
+        id: generateId(),
+        jan,
+        brand: info.brand,
+        productName: info.productName,
+        modelNumber: info.modelNumber,
+        basePrice: info.basePrice,
+        quantity,
+        fixedUnitPrice: true,
+        inferredByAi: !!info.productName,
+        condition: "new",
+        isMaster: info.isMaster,
+        itemKind: "product",
+        partCode: "",
+        priceSource: info.priceSource,
+        priceNote: info.priceNote,
+        ...(info.asin ? { asin: info.asin } : {}),
+      };
+      setRows((prev) => [...prev, row]);
+    }
+    return fresh.length;
+  }, [fetchBagItem]);
+
+  const handleBagPhotos = useCallback(async (files: File[]) => {
+    setBagBusy("写真を読んでいます");
+    setBagMessage(null);
+    try {
+      const { readJansFromPhoto } = await import("@/lib/barcode-photo");
+      const photos: string[][] = [];
+      let failed = 0;
+      let unusable = 0;
+      for (const f of files) {
+        try {
+          const r = await readJansFromPhoto(f);
+          photos.push(r.jans);
+          unusable += r.unusable;
+        } catch {
+          failed += 1;
+        }
+      }
+      const counts = countPhotoJans(photos);
+      await addBagJans(counts, "photo");
+      const total = [...counts.values()].reduce((a, b) => a + b, 0);
+      const msg = [`写真 ${files.length}枚から ${total}個のJANを読みました。写真の点数と合うか確かめてください。`];
+      if (failed) msg.push(`読めなかった写真：${failed}枚`);
+      if (unusable) msg.push(`登録に使えないコード（8桁・店内コードなど）：${unusable}個。手で入れてください`);
+      if (files.length > 1) msg.push("同じJANが別の写真にあるときは、撮り直しとみなして数量を足していません");
+      setBagMessage(msg.join("\n"));
+    } finally {
+      setBagBusy(null);
+    }
+  }, [addBagJans]);
+
+  /** 福袋で新品／中古を変えたら、その条件の最安値を取り直す */
+  const changeBagCondition = useCallback(async (row: ProductRow, condition: ProductCondition) => {
+    setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, condition, basePrice: 0, priceSource: null, priceNote: "価格を調べています" } : r)));
+    let quote: { basePrice: number; priceSource: ProductRow["priceSource"]; priceNote: string | null };
+    try {
+      quote = await fetchBagItem(row.jan, condition);
+    } catch {
+      quote = { basePrice: 0, priceSource: null, priceNote: "価格を取得できませんでした" };
+    }
+    // 調べている間に手で価格を入れていたら（目印が消える）、取った価格で上書きしない
+    setRows((prev) => prev.map((r) => (r.id === row.id && r.condition === condition && r.priceNote === "価格を調べています"
+      ? { ...r, basePrice: quote.basePrice, priceSource: quote.priceSource, priceNote: quote.priceNote }
+      : r)));
+  }, [fetchBagItem]);
+
   /** 呼び出しをやめるときは、呼び出した入力も全部消す（そのまま手入力として登録して二重にならないように） */
   const cancelPending = useCallback(() => {
     setPending(null);
@@ -201,6 +403,10 @@ export default function InboundPage() {
 
   const loadPending = useCallback(
     (row: PendingRow) => {
+      if (bagRun) {
+        alert("福袋の入庫の途中です。終わるか「やめる」を押してから呼び出してください。");
+        return;
+      }
       const today = new Date().toISOString().split("T")[0];
       const hasInput =
         rows.length > 0 || totalPurchase !== "" || supplier !== "" || shipping !== "" || discount !== "" ||
@@ -247,7 +453,7 @@ export default function InboundPage() {
         notes: row.payload.notes ?? [],
       });
     },
-    [rows.length, totalPurchase, supplier, shipping, discount, genre, purchaseDate, pending]
+    [rows.length, totalPurchase, supplier, shipping, discount, genre, purchaseDate, pending, bagRun]
   );
 
   const totalNum = Number(totalPurchase) || 0;
@@ -267,18 +473,20 @@ export default function InboundPage() {
 
   // 🌟 追加: エラーが1つでもあれば true になるフラグ
   // 相談-13：入庫待ちからの登録だけ、按分対象で基準価格が0の行を止める（手入力の決まりは変えない）
-  const pendingDistributeZero = !!pending && rows.some((r) => r.fixedUnitPrice && r.basePrice <= 0);
-  const pendingDateMissing = !!pending && !purchaseDate;
+  // 福袋（相談-13 段階3）も同じ確認をする
+  const strictCheck = !!pending || !!bagRun;
+  const pendingDistributeZero = strictCheck && rows.some((r) => r.fixedUnitPrice && r.basePrice <= 0);
+  const pendingDateMissing = strictCheck && !purchaseDate;
   // 相談-13：入庫待ちからの登録は、按分なしなら「単価×数量の合計＝仕入総額」をサーバーでも確かめる。先に画面で知らせる
   const pendingSumBase = rows.reduce((s, r) => s + r.basePrice * r.quantity, 0);
   const pendingUnitCount = rows.reduce((s, r) => s + r.quantity, 0);
   const pendingTotalMismatch =
-    !!pending && rows.length > 0 && !rows.some((r) => r.fixedUnitPrice) &&
+    strictCheck && rows.length > 0 && !rows.some((r) => r.fixedUnitPrice) &&
     (totalPurchase.trim() === "" || Math.abs(pendingSumBase - totalNum) > pendingUnitCount);
 
   // サーバーと同じ確認：送料・割引・総コストは0以上、計算した実効単価はすべて0より大きい
   const pendingMoneyBad =
-    !!pending && rows.length > 0 &&
+    strictCheck && rows.length > 0 &&
     (shippingNum < 0 || discountNum < 0 || totalNum + shippingNum - discountNum < 0 ||
       rows.some((r) => !(calcEffectiveUnitPrice(r, totalNum, headerInfo, rows) > 0)));
 
@@ -315,6 +523,31 @@ export default function InboundPage() {
 
       const target = rowId ? rows.find((r) => r.id === rowId) : null;
       if (target && (target.brand || target.productName || target.modelNumber)) return;
+
+      // 福袋の途中は、手で入れた JAN も商品名と基準価格を一緒に取る
+      if (bagRun) {
+        if (janInputRef.current) janInputRef.current.value = "";
+        if (!isRegistrableJan(trimmed)) {
+          setBagMessage(`JAN「${trimmed}」は登録に使えない番号です（チェック数字違い・店内コード）`);
+          return;
+        }
+        setBagBusy("商品と価格を調べています");
+        try {
+          if (rowId) {
+            const info = await fetchBagItem(trimmed, target?.condition ?? "new");
+            setRows((prev) => prev.map((r) => (r.id === rowId
+              ? { ...r, jan: trimmed, brand: info.brand, productName: info.productName, modelNumber: info.modelNumber, isMaster: info.isMaster, inferredByAi: !!info.productName, fixedUnitPrice: true, basePrice: info.basePrice, priceSource: info.priceSource, priceNote: info.priceNote, ...(info.asin ? { asin: info.asin } : {}) }
+              : r)));
+          } else {
+            await addBagJans(new Map([[trimmed, 1]]), "add");
+          }
+        } catch {
+          setBagMessage("商品と価格を取得できませんでした。手で入れてください");
+        } finally {
+          setBagBusy(null);
+        }
+        return;
+      }
 
       let brand = "";
       let productName = "";
@@ -401,7 +634,7 @@ export default function InboundPage() {
         }
       }
     },
-    [rows]
+    [rows, bagRun, fetchBagItem, addBagJans]
   );
 
   const addRow = useCallback(() => {
@@ -413,7 +646,7 @@ export default function InboundPage() {
       modelNumber: "",
       basePrice: 0,
       quantity: 1,
-      fixedUnitPrice: false,
+      fixedUnitPrice: !!bagRun, // 福袋の行は最初から按分対象
       inferredByAi: false,
       condition: inboundMode === "part" ? "used" : "new",
       itemKind: inboundMode,
@@ -422,7 +655,7 @@ export default function InboundPage() {
     lastAddedIdRef.current = newRow.id;
     setRows((prev) => [...prev, newRow]);
     setTimeout(() => janInputRef.current?.focus(), 50);
-  }, [inboundMode]);
+  }, [inboundMode, bagRun]);
 
   const updateRow = useCallback((id: string, patch: Partial<ProductRow>) => {
     if (patch.productName !== undefined) {
@@ -481,6 +714,10 @@ export default function InboundPage() {
 
   const handleRegister = useCallback(async () => {
     // 🌟 変更: エラーチェックはボタンの disabled で防ぐため、ここにあった alert() を削除
+    if (bagRun && Date.now() < bagRetryAtRef.current) {
+      alert(`通信が切れた直後です。前の保存が終わるのを待っています。あと${Math.ceil((bagRetryAtRef.current - Date.now()) / 1000)}秒してから押してください。`);
+      return;
+    }
     const confirmText = pending && pending.blockers.length > 0
         ? `次の点を確かめましたか？\n・${pending.blockers.join("\n・")}\n\n入力内容をデータベースに保存しますか？`
         : "入力内容をデータベースに保存しますか？";
@@ -518,10 +755,11 @@ export default function InboundPage() {
                 shipping: shippingNum,
                 discount: discountNum,
                 totalCost: totalNum + shippingNum - discountNum,
-                ...(pending ? { orderNumber: pending.orderNumber } : {})
+                ...(pending ? { orderNumber: pending.orderNumber } : bagRun?.orderNumber ? { orderNumber: bagRun.orderNumber } : {})
             },
             items: expandedItems,
-            ...(pending ? { pendingId: pending.id } : {})
+            ...(pending ? { pendingId: pending.id } : {}),
+            ...(bagRun ? { bagKey: `${bagRun.runId}:${bagRun.current}` } : {})
         };
 
         const res = await fetch("/api/inbound", {
@@ -541,6 +779,20 @@ export default function InboundPage() {
             setPending(null);
             setPendingReloadKey((k) => k + 1);
         }
+        if (bagRun) {
+            // 福袋：この袋の登録を記録し、仕入日・仕入先・ジャンルを残して次の袋へ
+            const bags = bagRun.bags.map((b, i) => (i === bagRun.current ? { ...b, headerId: Number(result.id) } : b));
+            const next = bagRun.current + 1;
+            if (next < bags.length) {
+                const run = { ...bagRun, bags, current: next };
+                setBagRun(run);
+                applyBag(run);
+                alert(`${bagRun.current + 1}袋目を保存しました (ID: ${result.id}, 商品数: ${expandedItems.length})。次は${next + 1}袋目です`);
+                return;
+            }
+            setBagRun(null);
+            setBagMessage(null);
+        }
         alert(`保存しました (ID: ${result.id}, 商品数: ${expandedItems.length})`);
         setRows([]);             // 商品リストを空にする
         setTotalPurchase("");    // 仕入総額を空にする
@@ -553,11 +805,12 @@ export default function InboundPage() {
 
     } catch (error) {
         console.error(error);
+        if (bagRun && error instanceof TypeError) bagRetryAtRef.current = Date.now() + 30000;
         alert("エラーが発生しました: " + error);
     } finally {
         setIsSubmitting(false);
     }
-  }, [headerInfo, rows, totalNum, shippingNum, discountNum, purchaseDate, supplier, genre, totalPurchase, inboundMode, pending]);
+  }, [headerInfo, rows, totalNum, shippingNum, discountNum, purchaseDate, supplier, genre, totalPurchase, inboundMode, pending, bagRun, setBagRun, applyBag]);
 
   const openCamera = useCallback(() => {
     setCameraOpen(true);
@@ -597,6 +850,18 @@ export default function InboundPage() {
             <div className="lg:col-span-4 space-y-6 lg:sticky lg:top-24">
 
               <InboundPendingList activeId={pending?.id ?? null} reloadKey={pendingReloadKey} onSelect={loadPending} />
+
+              {inboundMode === "product" && (
+                <BagInboundPanel
+                  run={bagRun}
+                  disabled={!!pending}
+                  busy={bagBusy}
+                  message={bagMessage}
+                  onStart={startBagRun}
+                  onCancel={cancelBagRun}
+                  onPhotos={handleBagPhotos}
+                />
+              )}
 
               {pending && (
                 <div className="rounded-xl border border-primary/30 bg-primary/5 p-4 text-sm shadow-sm">
@@ -730,6 +995,7 @@ export default function InboundPage() {
                                 className={`flex h-11 w-full rounded-md border bg-slate-50/50 pl-8 pr-4 text-xl font-bold text-slate-900 placeholder:text-slate-300 focus:bg-white focus:outline-none focus:ring-4 transition-all text-right shadow-sm ${validation.purchaseRequiredWhenDistribute || validation.fixedTotalExceedsPurchase ? "border-red-400 focus:ring-red-100" : "border-slate-200 focus:border-primary focus:ring-primary/10"}`}
                                 placeholder="0"
                                 value={totalPurchase}
+                                readOnly={!!bagRun}
                                 onChange={(e) => setTotalPurchase(e.target.value)}
                                 />
                             </div>
@@ -743,6 +1009,7 @@ export default function InboundPage() {
                                 type="number"
                                 min={0}
                                 value={shipping}
+                                readOnly={!!bagRun}
                                 onChange={(e) => setShipping(e.target.value)}
                                 className={`${inputClass} text-right`}
                                 placeholder="0"
@@ -754,6 +1021,7 @@ export default function InboundPage() {
                                 type="number"
                                 min={0}
                                 value={discount}
+                                readOnly={!!bagRun}
                                 onChange={(e) => setDiscount(e.target.value)}
                                 className={`${inputClass} text-right text-red-500`}
                                 placeholder="0"
@@ -820,7 +1088,7 @@ export default function InboundPage() {
                         {pendingDateMissing && (
                           <li>仕入日を入れてください（原本の日付）</li>
                         )}
-                        {pendingMoneyBad && (
+                        {pendingMoneyBad && !pendingDistributeZero && (
                           <li>送料・割引は0以上にし、割引のあとで実効単価が0円以下になる行がないようにしてください</li>
                         )}
                         {pendingTotalMismatch && (
@@ -876,6 +1144,7 @@ export default function InboundPage() {
                     </button>
                     <button
                       type="button"
+                      disabled={!!bagRun}
                       onClick={() => {
                         if (inboundMode === "part") return;
                         if (rows.length > 0 && !confirm("モードを切替えるとリストをクリアします。よろしいですか？")) return;
@@ -1039,9 +1308,13 @@ export default function InboundPage() {
                                     <div className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-primary ring-2 ring-white shadow-sm" title="AI自動入力済み" />
                                     )}
                                 </div>
-                                <select 
+                                <select
                                     value={row.condition}
-                                    onChange={(e) => updateRow(row.id, { condition: e.target.value as ProductCondition })}
+                                    onChange={(e) => {
+                                      const c = e.target.value as ProductCondition;
+                                      if (bagRun && row.jan) void changeBagCondition(row, c);
+                                      else updateRow(row.id, { condition: c });
+                                    }}
                                     className={`${inputClass} w-full h-8 text-xs py-0`}
                                 >
                                     <option value="new">新品</option>
@@ -1106,11 +1379,12 @@ export default function InboundPage() {
                                     type="number"
                                     min={0}
                                     value={row.basePrice || ""}
-                                    onChange={(e) => updateRow(row.id, { basePrice: Number(e.target.value) || 0 })}
-                                    className={`${inputClass} w-full text-right pl-6 h-9 font-medium shadow-sm ${isPriceMissing ? "border-red-400 focus-visible:ring-red-200" : ""}`}
+                                    onChange={(e) => updateRow(row.id, { basePrice: Number(e.target.value) || 0, priceSource: null, priceNote: null })}
+                                    className={`${inputClass} w-full text-right pl-6 h-9 font-medium shadow-sm ${isPriceMissing || (!!bagRun && row.basePrice <= 0) ? "border-red-400 focus-visible:ring-red-200" : ""}`}
                                     placeholder="0"
                                   />
                                 </div>
+                                <BagPriceInfo row={row} />
                               </div>
                             </td>
 
@@ -1183,9 +1457,13 @@ export default function InboundPage() {
                                     />
                                     {row.inferredByAi && <div className="absolute top-0 right-0 h-2 w-2 rounded-full bg-primary" />}
                                 </div>
-                                <select 
+                                <select
                                     value={row.condition}
-                                    onChange={(e) => updateRow(row.id, { condition: e.target.value as ProductCondition })}
+                                    onChange={(e) => {
+                                      const c = e.target.value as ProductCondition;
+                                      if (bagRun && row.jan) void changeBagCondition(row, c);
+                                      else updateRow(row.id, { condition: c });
+                                    }}
                                     className={`${inputClass} h-9 text-xs w-20 py-0 bg-white/80`}
                                 >
                                     <option value="new">新品</option>
@@ -1244,10 +1522,11 @@ export default function InboundPage() {
                                  type="number"
                                  min={0}
                                  value={row.basePrice || ""}
-                                 onChange={(e) => updateRow(row.id, { basePrice: Number(e.target.value) || 0 })}
-                                 className={`${inputClass} text-right pl-4 h-8 bg-white ${isPriceMissing ? "border-red-400" : ""}`}
+                                 onChange={(e) => updateRow(row.id, { basePrice: Number(e.target.value) || 0, priceSource: null, priceNote: null })}
+                                 className={`${inputClass} text-right pl-4 h-8 bg-white ${isPriceMissing || (!!bagRun && row.basePrice <= 0) ? "border-red-400" : ""}`}
                                />
                              </div>
+                             <BagPriceInfo row={row} />
                            </div>
                            <div className="text-right">
                               <div className="text-sm font-bold text-slate-900">

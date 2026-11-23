@@ -4,6 +4,7 @@
  * 書類に印字された JAN や型番は候補を探す手がかりにだけ使い、登録に使う JAN は Amazon 側の識別子から取る。
  */
 import { createInboundPendingClient } from "@/lib/inbound-pending-server";
+import { lowestFromAmazonOffers, type BagCondition } from "@/lib/inbound-bags";
 
 const MARKETPLACE_ID_JP = "A1VC38T7YXB528";
 
@@ -128,4 +129,27 @@ export async function findCatalogCandidates(input: { refJan?: string | null; key
       foundBy: [...foundBy],
     };
   });
+}
+
+/**
+ * 相談-13 段階3：JAN が商品ページの識別子と一致する ASIN が1つに決まるときだけ、その条件（新品／中古）の最安の商品価格を返す。
+ * 読むだけ。決まらないときは amount なしで理由を返す（次の楽天・Yahoo! へ進む）。
+ */
+export async function lowestAmazonPrice(
+  jan: string,
+  condition: BagCondition
+): Promise<{ amount: number | null; asin: string | null; title: string | null; note: string | null }> {
+  const hits = (await findCatalogCandidates({ refJan: jan })).filter((c) => c.foundBy.includes("jan") && c.eans.includes(jan));
+  if (hits.length === 0) return { amount: null, asin: null, title: null, note: "Amazon にカタログなし" };
+  if (hits.length > 1) return { amount: null, asin: null, title: null, note: `Amazon に同じ JAN の商品が${hits.length}件あり決められない` };
+  const c = hits[0];
+  const sp = createSpClient();
+  const res = (await sp.callAPI({
+    operation: "getItemOffers",
+    endpoint: "productPricing",
+    path: { Asin: c.asin },
+    query: { MarketplaceId: MARKETPLACE_ID_JP, ItemCondition: condition === "used" ? "Used" : "New" },
+  })) as Parameters<typeof lowestFromAmazonOffers>[0];
+  const amount = lowestFromAmazonOffers(res, condition);
+  return { amount, asin: c.asin, title: c.title, note: amount === null ? `Amazon に${condition === "used" ? "中古" : "新品"}の出品なし` : null };
 }
