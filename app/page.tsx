@@ -5,9 +5,10 @@ import { normalizeToFullWidthKatakana } from "@/lib/kana";
 import { normalizeSupplierForMatch } from "@/lib/normalizeSupplier";
 import BarcodeScannerModal from "@/components/BarcodeScannerModal";
 import InboundPendingList from "@/components/InboundPendingList";
-import BagInboundPanel from "@/components/BagInboundPanel";
+import BagInboundPanel, { type BagPhoto } from "@/components/BagInboundPanel";
+import { MAX_BAG_PHOTOS, photoProblem, sendBagPhotos } from "@/lib/bag-photo-upload";
 import { pendingSourceLabel, type PendingRow } from "@/lib/inbound-pending";
-import { countPhotoJans, isRegistrableJan, type BagRun, type PriceQuote } from "@/lib/inbound-bags";
+import { isRegistrableJan, type BagRun, type PriceQuote } from "@/lib/inbound-bags";
 
 // ----- 型定義 -----
 type ProductCondition = "new" | "used";
@@ -218,6 +219,13 @@ export default function InboundPage() {
   const [bagBusy, setBagBusy] = useState<string | null>(null);
   const [bagMessage, setBagMessage] = useState<string | null>(null);
   const bagRetryAtRef = useRef(0); // 通信が切れた直後は、前の保存が終わるまで押し直させない
+  const [bagPhotos, setBagPhotos] = useState<BagPhoto[]>([]);
+  const clearBagPhotos = useCallback(() => {
+    setBagPhotos((prev) => {
+      prev.forEach((p) => URL.revokeObjectURL(p.url));
+      return [];
+    });
+  }, []);
 
   const setBagRun = useCallback((run: BagRun | null) => {
     setBagRunState(run);
@@ -274,12 +282,13 @@ export default function InboundPage() {
 
   const cancelBagRun = useCallback(() => {
     setBagRun(null);
+    clearBagPhotos();
     setBagMessage(null);
     setRows([]);
     setTotalPurchase("");
     setShipping("");
     setDiscount("");
-  }, [setBagRun]);
+  }, [setBagRun, clearBagPhotos]);
 
   /** JAN から商品名と基準価格を取る（今の自動取得に「価格も」を付けて呼ぶ） */
   const fetchBagItem = useCallback(async (jan: string, condition: ProductCondition) => {
@@ -344,35 +353,68 @@ export default function InboundPage() {
     return fresh.length;
   }, [fetchBagItem]);
 
-  const handleBagPhotos = useCallback(async (files: File[]) => {
-    setBagBusy("写真を読んでいます");
+  /** この袋の写真を並べる（読むのは PC の Claude。送るまでは端末の中だけ） */
+  const handleBagPhotos = useCallback((files: File[]) => {
+    const problems = files.map(photoProblem).filter((x): x is string => !!x);
+    const usable = files.filter((f) => !photoProblem(f));
+    const room = Math.max(0, MAX_BAG_PHOTOS - bagPhotos.length);
+    if (usable.length > room) problems.push(`1袋に${MAX_BAG_PHOTOS}枚までです。${usable.length - room}枚は入れていません`);
+    setBagPhotos((prev) => [...prev, ...usable.slice(0, room).map((file) => ({ id: generateId(), file, url: URL.createObjectURL(file) }))]);
+    setBagMessage(problems.length ? problems.join("\n") : null);
+  }, [bagPhotos.length]);
+
+  const removeBagPhoto = useCallback((id: string) => {
+    setBagPhotos((prev) => {
+      const hit = prev.find((p) => p.id === id);
+      if (hit) URL.revokeObjectURL(hit.url);
+      return prev.filter((p) => p.id !== id);
+    });
+  }, []);
+
+  /** この袋の写真を PC の Claude へ送り、次の袋へ */
+  const sendBagToClaude = useCallback(async (condition: "new" | "used") => {
+    if (!bagRun || bagPhotos.length === 0) return;
+    const bag = bagRun.bags[bagRun.current];
+    if (!purchaseDate) { setBagMessage("下の伝票情報に仕入日を入れてください"); return; }
+    if (!supplier.trim()) { setBagMessage("下の伝票情報に仕入先を入れてください"); return; }
+    if (rowsRef.current.length > 0 && !confirm("商品リストに手で入れた行は送られず、消えます。写真だけを送ってよろしいですか？")) return;
+    const batchId = `${bagRun.runId}-b${bagRun.current + 1}`;
+    setBagBusy("写真を送っています");
     setBagMessage(null);
     try {
-      const { readJansFromPhoto } = await import("@/lib/barcode-photo");
-      const photos: string[][] = [];
-      let failed = 0;
-      let unusable = 0;
-      for (const f of files) {
-        try {
-          const r = await readJansFromPhoto(f);
-          photos.push(r.jans);
-          unusable += r.unusable;
-        } catch {
-          failed += 1;
-        }
+      await sendBagPhotos({
+        batchId,
+        files: bagPhotos.map((p) => p.file),
+        price: bag.price,
+        shipping: bag.shipping,
+        discount: bag.discount,
+        supplier: supplier.trim(),
+        orderNumber: bagRun.orderNumber,
+        purchaseDate,
+        condition,
+      }, (done, total) => setBagBusy(`写真を送っています（${done}/${total}）`));
+      const bags = bagRun.bags.map((b, i) => (i === bagRun.current ? { ...b, sentBatch: batchId } : b));
+      const next = bagRun.current + 1;
+      clearBagPhotos();
+      if (next < bags.length) {
+        const run = { ...bagRun, bags, current: next };
+        setBagRun(run);
+        applyBag(run);
+        setBagMessage(`${bagRun.current + 1}袋目を送りました。次は${next + 1}袋目の写真です。`);
+        return;
       }
-      const counts = countPhotoJans(photos);
-      await addBagJans(counts, "photo");
-      const total = [...counts.values()].reduce((a, b) => a + b, 0);
-      const msg = [`写真 ${files.length}枚から ${total}個のJANを読みました。写真の点数と合うか確かめてください。`];
-      if (failed) msg.push(`読めなかった写真：${failed}枚`);
-      if (unusable) msg.push(`登録に使えないコード（8桁・店内コードなど）：${unusable}個。手で入れてください`);
-      if (files.length > 1) msg.push("同じJANが別の写真にあるときは、撮り直しとみなして数量を足していません");
-      setBagMessage(msg.join("\n"));
+      setBagRun(null);
+      setRows([]);
+      setTotalPurchase("");
+      setShipping("");
+      setDiscount("");
+      alert(`${bags.length}袋すべて送りました。毎時20分にClaudeがJANを読み、入庫待ちに入れます。`);
+    } catch (e) {
+      setBagMessage(`送れませんでした：${e instanceof Error ? e.message : "通信エラー"}\nもう一度「Claudeに送る」を押してください（二重にはなりません）。`);
     } finally {
       setBagBusy(null);
     }
-  }, [addBagJans]);
+  }, [bagRun, bagPhotos, purchaseDate, supplier, clearBagPhotos, setBagRun, applyBag]);
 
   /** 福袋で新品／中古を変えたら、その条件の最安値を取り直す */
   const changeBagCondition = useCallback(async (row: ProductRow, condition: ProductCondition) => {
@@ -859,7 +901,10 @@ export default function InboundPage() {
                   message={bagMessage}
                   onStart={startBagRun}
                   onCancel={cancelBagRun}
+                  photos={bagPhotos}
                   onPhotos={handleBagPhotos}
+                  onRemovePhoto={removeBagPhoto}
+                  onSend={sendBagToClaude}
                 />
               )}
 

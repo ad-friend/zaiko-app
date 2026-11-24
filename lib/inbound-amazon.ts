@@ -131,6 +131,38 @@ export async function findCatalogCandidates(input: { refJan?: string | null; key
   });
 }
 
+/** 自分の出品の一覧（出品の辞書）。ASIN ごとに SKU をまとめて返す。読むだけ */
+export async function listOwnAsins(): Promise<{ asin: string; skus: { sku: string; condition: string }[] }[]> {
+  const db = createInboundPendingClient();
+  const own = new Map<string, { sku: string; condition: string }[]>();
+  const PAGE = 1000;
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await db
+      .from("amazon_sku_conditions")
+      .select("sku,asin,condition_id")
+      .not("asin", "is", null)
+      .order("sku", { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) throw new Error(error.message);
+    for (const r of data ?? []) {
+      const a = String(r.asin ?? "").trim();
+      if (a.length < 10) continue;
+      own.set(a, [...(own.get(a) ?? []), { sku: String(r.sku), condition: String(r.condition_id ?? "") }]);
+    }
+    if ((data?.length ?? 0) < PAGE) break;
+  }
+  return [...own.entries()].map(([asin, skus]) => ({ asin, skus }));
+}
+
+/** ASIN（1回20件まで）から商品名・型番・JAN を返す。読むだけ */
+export async function findCatalogByAsins(asins: string[]): Promise<Omit<CatalogCandidate, "ownSkus" | "foundBy">[]> {
+  const items = await search(createSpClient(), { identifiers: asins.slice(0, 20), identifiersType: "ASIN" });
+  return items.map((it) => {
+    const s = it.summaries?.[0] ?? {};
+    return { asin: String(it.asin ?? ""), title: s.itemName ?? null, brand: s.brand ?? null, model: s.modelNumber ?? s.partNumber ?? null, eans: eansOf(it) };
+  });
+}
+
 /**
  * 相談-13 段階3：JAN が商品ページの識別子と一致する ASIN が1つに決まるときだけ、その条件（新品／中古）の最安の商品価格を返す。
  * 読むだけ。決まらないときは amount なしで理由を返す（次の楽天・Yahoo! へ進む）。

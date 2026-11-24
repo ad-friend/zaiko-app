@@ -2,6 +2,9 @@
 
 import { useRef, useState } from "react";
 import { buildBags, parseBagPrices, type BagRun } from "@/lib/inbound-bags";
+import { MAX_BAG_PHOTOS } from "@/lib/bag-photo-upload";
+
+export type BagPhoto = { id: string; file: File; url: string };
 
 type Props = {
   run: BagRun | null;
@@ -10,17 +13,21 @@ type Props = {
   message: string | null;
   onStart: (run: BagRun) => void;
   onCancel: () => void;
+  photos: BagPhoto[];
   onPhotos: (files: File[]) => void;
+  onRemovePhoto: (id: string) => void;
+  onSend: (condition: "new" | "used") => void;
 };
 
 const field = "h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm";
 
-export default function BagInboundPanel({ run, disabled, busy, message, onStart, onCancel, onPhotos }: Props) {
+export default function BagInboundPanel({ run, disabled, busy, message, photos, onStart, onCancel, onPhotos, onRemovePhoto, onSend }: Props) {
   const [open, setOpen] = useState(false);
   const [orderNumber, setOrderNumber] = useState("");
   const [pricesText, setPricesText] = useState("");
   const [shipping, setShipping] = useState("");
   const [discount, setDiscount] = useState("");
+  const [condition, setCondition] = useState<"new" | "used">("new");
   const fileRef = useRef<HTMLInputElement>(null);
 
   const prices = parseBagPrices(pricesText);
@@ -45,8 +52,8 @@ export default function BagInboundPanel({ run, disabled, busy, message, onStart,
           <button
             type="button"
             onClick={() => {
-              const saved = run.bags.filter((b) => b.headerId !== null).length;
-              if (confirm(`福袋の入庫をやめます。登録済みの${saved}袋はそのまま残り、この袋の入力は消えます。よろしいですか？`)) onCancel();
+              const saved = run.bags.filter((b) => b.headerId !== null || b.sentBatch).length;
+              if (confirm(`福袋の入庫をやめます。送信・登録済みの${saved}袋はそのまま残り、この袋の入力は消えます。よろしいですか？`)) onCancel();
             }}
             className="shrink-0 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
           >
@@ -56,7 +63,7 @@ export default function BagInboundPanel({ run, disabled, busy, message, onStart,
         <input
           ref={fileRef}
           type="file"
-          accept="image/*"
+          accept="image/jpeg,image/png,image/webp"
           multiple
           className="hidden"
           onChange={(e) => {
@@ -71,10 +78,48 @@ export default function BagInboundPanel({ run, disabled, busy, message, onStart,
           onClick={() => fileRef.current?.click()}
           className="mt-3 h-11 w-full rounded-md bg-amber-500 font-bold text-white hover:bg-amber-600 disabled:bg-slate-300"
         >
-          {busy ?? "この袋の写真を撮る・選ぶ"}
+          {busy ?? (photos.length ? "この袋の写真を追加する" : "この袋の写真を撮る・選ぶ")}
         </button>
+        {photos.length > 0 && (
+          <div className="mt-3">
+            <div className="text-xs font-bold text-slate-700">{run.current + 1}袋目：写真{photos.length}枚</div>
+            <div className="mt-1 grid grid-cols-4 gap-2">
+              {photos.map((p, i) => (
+                <div key={p.id} className="relative">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={p.url} alt={`${run.current + 1}袋目の写真${i + 1}`} className="h-16 w-full rounded-md border border-amber-200 object-cover" />
+                  <button
+                    type="button"
+                    aria-label={`写真${i + 1}を外す`}
+                    disabled={!!busy}
+                    onClick={() => onRemovePhoto(p.id)}
+                    className="absolute -right-1 -top-1 h-5 w-5 rounded-full bg-slate-700 text-xs leading-5 text-white"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+            {photos.length >= MAX_BAG_PHOTOS && <p className="mt-1 text-[11px] text-amber-700">1袋に{MAX_BAG_PHOTOS}枚までです</p>}
+            <label className="mt-2 block text-xs font-semibold text-slate-500">
+              この袋の状態
+              <select value={condition} onChange={(e) => setCondition(e.target.value as "new" | "used")} className={field}>
+                <option value="new">新品</option>
+                <option value="used">中古</option>
+              </select>
+            </label>
+            <button
+              type="button"
+              disabled={!!busy}
+              onClick={() => onSend(condition)}
+              className="mt-2 h-11 w-full rounded-md bg-indigo-600 font-bold text-white hover:bg-indigo-700 disabled:bg-slate-300"
+            >
+              Claudeに送る（写真{photos.length}枚）
+            </button>
+          </div>
+        )}
         {message && <p className="mt-2 whitespace-pre-line text-xs text-slate-700">{message}</p>}
-        <p className="mt-2 text-[11px] text-slate-500">中身と基準価格を確かめて「入庫データを保存」を押すと、次の袋に進みます。</p>
+        <p className="mt-2 text-[11px] text-slate-500">下の伝票情報に仕入日と仕入先を入れて送ると、次の袋に進みます。毎時20分にClaudeがJANを読み、1袋ずつ入庫待ちに入ります。同じ商品が2枚に写っていても二重に数えません。</p>
       </div>
     );
   }

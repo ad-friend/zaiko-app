@@ -4,7 +4,7 @@
 
 export type BagCondition = "new" | "used";
 
-export type Bag = { price: number; shipping: number; discount: number; headerId: number | null };
+export type Bag = { price: number; shipping: number; discount: number; headerId: number | null; sentBatch?: string };
 
 export type BagRun = {
   runId: string; // この福袋の入庫の固定の番号（袋ごとの二重登録を止める）
