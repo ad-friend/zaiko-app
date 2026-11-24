@@ -189,7 +189,8 @@ export function parseImportBody(body: unknown):
       sourceRefs: Array.isArray(b.sourceRefs) ? b.sourceRefs : [],
       supplierKey: strOrNull(b.supplierKey),
       documentNumber: header.documentNumber ?? null,
-      orderNumber: header.orderNumber ?? null,
+      // 相談-13 段階3：福袋は1袋＝1伝票で全袋が同じ注文番号。重複の疑いにしないよう列には入れず、登録時に payload の注文番号を保存する
+      orderNumber: b.bag === true ? null : header.orderNumber ?? null,
       purchaseDate: header.purchaseDate,
       payload: { header, items, notes: Array.isArray(p.notes) ? p.notes.map(String) : [] },
       status,
