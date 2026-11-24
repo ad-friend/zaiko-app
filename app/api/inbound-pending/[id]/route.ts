@@ -3,6 +3,7 @@
  * GET   … 入庫画面に呼び出す（登録済みなら registered を返し、画面には入れない）
  * PATCH … 人が「別の伝票です」と確かめたときだけ、重複の疑いを外す（{ action: "not_duplicate" }）。
  *         登録済みは変えない。ほかの項目は変えない。
+ * DELETE … 仕入れではない書類が入ったときに、人が消す（2026-11-24 社長）。登録済みは消さない。
  */
 import { NextRequest, NextResponse } from "next/server";
 import { toPendingRow } from "@/lib/inbound-pending";
@@ -69,5 +70,23 @@ export async function PATCH(req: NextRequest, context: Context) {
     return NextResponse.json({ ok: true });
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : "保存に失敗しました" }, { status: 500 });
+  }
+}
+
+export async function DELETE(_req: NextRequest, context: Context) {
+  const { id } = await context.params;
+  if (!UUID.test(id)) return NextResponse.json({ error: "番号が正しくありません" }, { status: 400 });
+  try {
+    const db = createInboundPendingClient();
+    const { data, error } = await db.from("inbound_pending").delete().eq("id", id).is("registered_header_id", null).select("id");
+    if (error) throw new Error(error.message);
+    if (!data || data.length === 0) {
+      const { data: left } = await db.from("inbound_pending").select("registered_header_id").eq("id", id).maybeSingle();
+      if (left) return NextResponse.json({ error: "登録済みの伝票は消せません" }, { status: 409 });
+      return NextResponse.json({ error: "入庫待ちが見つかりません" }, { status: 404 });
+    }
+    return NextResponse.json({ ok: true });
+  } catch (e) {
+    return NextResponse.json({ error: e instanceof Error ? e.message : "消せませんでした" }, { status: 500 });
   }
 }

@@ -3,6 +3,7 @@
 /**
  * 相談-13：入庫画面の「入庫待ち」一覧。押すとその伝票を入庫画面に呼び出す。
  * 登録済みは出さない。重複の疑いがあるものは呼び出せず、「別の伝票です」で人が外す。
+ * 仕入れではない書類が入ったら「仕入れではない（消す）」で人が消す（PC の処理も作り直さない）。
  */
 import { useCallback, useEffect, useState } from "react";
 import { pendingSourceLabel, type PendingRow } from "@/lib/inbound-pending";
@@ -107,6 +108,25 @@ export default function InboundPendingList({ activeId, reloadKey, onSelect }: Pr
     [load]
   );
 
+  const remove = useCallback(
+    async (row: PendingRow) => {
+      const name = row.payload.header.supplierName || row.payload.header.supplierKana || pendingSourceLabel(row);
+      if (!confirm(`「${name}」（${pendingSourceLabel(row)}）は仕入れではないので、入庫待ちから消します。よろしいですか？\n（在庫には何も登録されません。元に戻せません）`)) return;
+      setBusyId(row.id);
+      try {
+        const res = await fetch(`/api/inbound-pending/${row.id}`, { method: "DELETE" });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok && res.status !== 404) throw new Error(data.error || "消せませんでした");
+        await load();
+      } catch (e) {
+        alert(e instanceof Error ? e.message : "消せませんでした");
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [load]
+  );
+
   const readyCount = rows.filter((r) => r.status === "そろった（入庫待ち）" && !r.reviewRequired).length;
 
   return (
@@ -179,6 +199,15 @@ export default function InboundPendingList({ activeId, reloadKey, onSelect }: Pr
                       {active ? "呼び出し中" : "画面に呼び出す"}
                     </button>
                   )}
+                  <button
+                    type="button"
+                    disabled={busyId === r.id || active}
+                    title={active ? "画面に呼び出している伝票は消せません" : undefined}
+                    onClick={() => remove(r)}
+                    className="ml-auto rounded-md border border-slate-200 bg-white px-3 py-1 text-xs text-slate-500 hover:bg-red-50 hover:text-red-700 disabled:opacity-50"
+                  >
+                    仕入れではない（消す）
+                  </button>
                 </div>
               </div>
             );
