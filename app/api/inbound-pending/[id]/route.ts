@@ -26,6 +26,9 @@ export async function GET(_req: NextRequest, context: Context) {
     if (row.registeredHeaderId != null) {
       return NextResponse.json({ registered: true, headerId: row.registeredHeaderId }, { status: 409 });
     }
+    if (row.status === "未着") {
+      return NextResponse.json({ notArrived: true, error: "まだ届いていない注文です。届くと、届いた分が登録できる入庫待ちになります" }, { status: 409 });
+    }
     if (row.reviewRequired) {
       return NextResponse.json({ reviewRequired: true, error: "重複の確認が済んでいないため呼び出せません" }, { status: 409 });
     }

@@ -16,6 +16,7 @@ type Props = {
 
 const STATUS_STYLE: Record<string, string> = {
   "そろった（入庫待ち）": "bg-emerald-50 text-emerald-700 border-emerald-200",
+  未着: "bg-slate-100 text-slate-500 border-slate-300",
   単価待ち: "bg-amber-50 text-amber-700 border-amber-200",
   出品待ち: "bg-sky-50 text-sky-700 border-sky-200",
 };
@@ -127,7 +128,10 @@ export default function InboundPendingList({ activeId, reloadKey, onSelect }: Pr
     [load]
   );
 
-  const readyCount = rows.filter((r) => r.status === "そろった（入庫待ち）" && !r.reviewRequired).length;
+  // 2026-11-26：未着（注文したがまだ届いていない）は下に分けて出す。呼び出し・消すはできない（打ち切りは社内ボードで）
+  const notYet = rows.filter((r) => r.status === "未着");
+  const arrived = rows.filter((r) => r.status !== "未着");
+  const readyCount = arrived.filter((r) => r.status === "そろった（入庫待ち）" && !r.reviewRequired).length;
 
   return (
     <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
@@ -139,7 +143,7 @@ export default function InboundPendingList({ activeId, reloadKey, onSelect }: Pr
         <span className="text-base font-bold text-slate-800">
           入庫待ち
           <span className="ml-2 text-xs font-normal text-slate-500">
-            {loading ? "読み込み中…" : `${rows.length}件（そろった ${readyCount}件）`}
+            {loading ? "読み込み中…" : `${arrived.length}件（そろった ${readyCount}件）${notYet.length ? `・未着 ${notYet.length}件` : ""}`}
           </span>
         </span>
         <span className="text-xs text-slate-400">{open ? "閉じる" : "開く"}</span>
@@ -147,10 +151,10 @@ export default function InboundPendingList({ activeId, reloadKey, onSelect }: Pr
       {open && (
         <div className="max-h-80 overflow-auto divide-y divide-slate-100">
           {error && <p className="px-6 py-3 text-xs text-red-600">{error}</p>}
-          {!loading && !error && rows.length === 0 && (
+          {!loading && !error && arrived.length === 0 && (
             <p className="px-6 py-3 text-xs text-slate-500">入庫待ちはありません</p>
           )}
-          {rows.map((r) => {
+          {arrived.map((r) => {
             const h = r.payload.header;
             const qty = r.payload.items.reduce((s, it) => s + (it.quantity ?? 0), 0);
             const active = r.id === activeId;
@@ -212,6 +216,38 @@ export default function InboundPendingList({ activeId, reloadKey, onSelect }: Pr
               </div>
             );
           })}
+          {notYet.length > 0 && (
+            <div className="bg-slate-50/60">
+              <p className="px-4 pt-3 pb-1 text-xs font-semibold text-slate-600">
+                注文済み・未着 {notYet.length}件
+                <span className="ml-2 font-normal text-slate-400">届くと、届いた分が上の一覧に入ります（ここからは登録できません）</span>
+              </p>
+              {notYet.map((r) => {
+                const h = r.payload.header;
+                const items = r.payload.items;
+                const names = items
+                  .slice(0, 3)
+                  .map((it) => `${it.rawName || it.rawModel || "品名なし"}${it.quantity != null ? ` ×${it.quantity}` : ""}`)
+                  .join("、");
+                return (
+                  <div key={r.id} className="px-4 py-2 text-xs text-slate-600 border-t border-slate-100">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium text-slate-700 truncate">
+                        {h.supplierName || h.supplierKana || r.supplierKey || "仕入先不明"}
+                        <span className="ml-2 font-normal text-slate-400">注文 {r.purchaseDate ?? "日付不明"}{h.orderNumber ? `・${h.orderNumber}` : ""}</span>
+                      </span>
+                      <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[11px] ${STATUS_STYLE["未着"]}`}>未着</span>
+                    </div>
+                    <div className="truncate text-slate-500">
+                      {names}
+                      {items.length > 3 ? ` ほか${items.length - 3}品` : ""}
+                      {h.totalPurchase != null ? `・残り ${yen(h.totalPurchase)}` : ""}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
     </div>

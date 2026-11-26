@@ -3,10 +3,11 @@
  * ブラウザとサーバーの両方から読む（秘密の値は持たない）。
  */
 
-export const PENDING_STATUSES = ["単価待ち", "出品待ち", "そろった（入庫待ち）", "登録済み"] as const;
+// 未着＝注文したがまだ届いていない（仕入れ専用の店の注文から PC が作る。届くまで登録できない。2026-11-26 社長）
+export const PENDING_STATUSES = ["未着", "単価待ち", "出品待ち", "そろった（入庫待ち）", "登録済み"] as const;
 export type PendingStatus = (typeof PENDING_STATUSES)[number];
 /** 取込で入れてよい状態（登録済みは人の登録だけが付ける） */
-export const IMPORTABLE_STATUSES: PendingStatus[] = ["単価待ち", "出品待ち", "そろった（入庫待ち）"];
+export const IMPORTABLE_STATUSES: PendingStatus[] = ["未着", "単価待ち", "出品待ち", "そろった（入庫待ち）"];
 
 /** 分からない値は null のまま（0・今日・新品で埋めない） */
 export type PendingHeader = {
@@ -135,7 +136,7 @@ export function parseImportBody(body: unknown):
   const sourcePage = Number(b.sourcePage ?? 1);
   if (!Number.isInteger(sourcePage) || sourcePage < 1) return { ok: false, error: "sourcePage は1以上の整数にしてください" };
   const status = (b.status ?? "単価待ち") as PendingStatus;
-  if (!IMPORTABLE_STATUSES.includes(status)) return { ok: false, error: "status は 単価待ち・出品待ち・そろった（入庫待ち） のどれかにしてください" };
+  if (!IMPORTABLE_STATUSES.includes(status)) return { ok: false, error: "status は 未着・単価待ち・出品待ち・そろった（入庫待ち） のどれかにしてください" };
   if ("registeredHeaderId" in b || "registered_header_id" in b) return { ok: false, error: "登録済みの印は取込では付けられません" };
   const purchaseDate = strOrNull(b.purchaseDate);
   if (purchaseDate && !/^\d{4}-\d{2}-\d{2}$/.test(purchaseDate)) return { ok: false, error: "purchaseDate は YYYY-MM-DD にしてください" };
@@ -190,7 +191,8 @@ export function parseImportBody(body: unknown):
       supplierKey: strOrNull(b.supplierKey),
       documentNumber: header.documentNumber ?? null,
       // 相談-13 段階3：福袋は1袋＝1伝票で全袋が同じ注文番号。重複の疑いにしないよう列には入れず、登録時に payload の注文番号を保存する
-      orderNumber: b.bag === true ? null : header.orderNumber ?? null,
+      // 2026-11-26：未着（注文の残り）と分納の届いた分（split）も、同じ注文番号で何件もできるので列には入れない
+      orderNumber: b.bag === true || b.split === true || status === "未着" ? null : header.orderNumber ?? null,
       purchaseDate: header.purchaseDate,
       payload: { header, items, notes: Array.isArray(p.notes) ? p.notes.map(String) : [] },
       status,

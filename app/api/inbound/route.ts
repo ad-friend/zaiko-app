@@ -1,6 +1,7 @@
 /** 入庫管理ページ（JAN主軸：入庫時にJAN→ASINをCatalog APIで取得して保存） */
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
+import { createInboundPendingClient } from '@/lib/inbound-pending-server';
 
 const MARKETPLACE_ID_JP = 'A1VC38T7YXB528';
 
@@ -97,6 +98,14 @@ async function registerFromPending(pendingId: string, header: Body["header"], it
   }
   if (!Array.isArray(items) || items.length === 0) {
     return NextResponse.json({ success: false, error: "商品が1つもありません" }, { status: 400 });
+  }
+  // 2026-11-26：未着（まだ届いていない注文）は登録しない
+  {
+    const { data: pend, error: pendErr } = await createInboundPendingClient().from("inbound_pending").select("status").eq("id", pendingId).maybeSingle();
+    if (pendErr) return NextResponse.json({ success: false, error: pendErr.message }, { status: 500 });
+    if (pend && pend.status === "未着") {
+      return NextResponse.json({ success: false, error: "まだ届いていない注文（未着）は登録できません" }, { status: 409 });
+    }
   }
   const asinByJan = new Map<string, string | null>();
   const rpcItems = [];
